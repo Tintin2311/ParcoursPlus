@@ -1,0 +1,78 @@
+/* Style global */
+body {
+  margin: 0;
+  padding: 0;
+  font-family: "Segoe UI", sans-serif;
+  background: #f0f2f5;
+}
+
+/* Conteneur principal */
+.App {
+  text-align: center;
+  padding: 20px;
+}
+
+/* Titre principal */
+h1 {
+  font-size: 2.5em;
+  margin-top: 40px;
+  color: #2c3e50;
+}
+
+/* Boutons de gestion (groupes/parcours) */
+.bouton-gestion-groupes {
+  background-color: #3498db;
+  color: white;
+  font-size: 18px;
+  padding: 14px 24px;
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+  width: 280px;
+  margin-bottom: 20px;
+  transition: background-color 0.3s ease, transform 0.2s ease;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.bouton-gestion-groupes:hover {
+  background-color: #2980b9;
+  transform: scale(1.03);
+}
+
+/* Boutons secondaires (haut de page) */
+button {
+  font-size: 16px;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  background-color: #e0e0e0;
+  transition: background-color 0.3s ease;
+}
+
+button:hover {
+  background-color: #d5d5d5;
+}
+
+/* Paragraphes d'information */
+p {
+  font-size: 16px;
+  color: #333;
+  line-height: 1.6;
+}
+
+/* Titres de sections */
+h2 {
+  font-size: 24px;
+  color: #2c3e50;
+  margin-bottom: 30px;
+}
+
+/* Centrage vertical (utile dans pages secondaires) */
+.page-centree {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  margin-top: 80px;
+}

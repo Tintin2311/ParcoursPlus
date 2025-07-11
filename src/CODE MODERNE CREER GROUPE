@@ -1,0 +1,310 @@
+import React, { useState } from 'react';
+import { ArrowLeft, Users, Plus, Trash2, UserPlus, Check, X } from 'lucide-react';
+
+export default function CreerUnGroupe() {
+  const [page, setPage] = useState("CreerUnGroupe");
+  const [nomGroupe, setNomGroupe] = useState("");
+  const [groupeActif, setGroupeActif] = useState(null);
+  const [nomEleve, setNomEleve] = useState("");
+  const [groupeTemporaire, setGroupeTemporaire] = useState(null);
+  const [groupes, setGroupes] = useState([]);
+  const [errors, setErrors] = useState({});
+
+  const validateGroupName = (name) => {
+    if (!name.trim()) {
+      return "Le nom du groupe ne peut pas être vide";
+    }
+    if (name.length < 2) {
+      return "Le nom du groupe doit contenir au moins 2 caractères";
+    }
+    return null;
+  };
+
+  const validateStudentName = (name) => {
+    if (!name.trim()) {
+      return "Le nom de l'élève ne peut pas être vide";
+    }
+    if (name.length < 2) {
+      return "Le nom de l'élève doit contenir au moins 2 caractères";
+    }
+    return null;
+  };
+
+  const handleCreateGroup = () => {
+    const error = validateGroupName(nomGroupe);
+    if (error) {
+      setErrors({ groupName: error });
+      return;
+    }
+    
+    const nouveau = {
+      id: Date.now(),
+      nom: nomGroupe.trim(),
+      eleves: [],
+    };
+    setGroupeTemporaire(nouveau);
+    setNomGroupe("");
+    setErrors({});
+  };
+
+  const handleAddStudent = () => {
+    const error = validateStudentName(nomEleve);
+    if (error) {
+      setErrors({ studentName: error });
+      return;
+    }
+    
+    if (!groupeTemporaire) {
+      setErrors({ general: "Créez d'abord un groupe" });
+      return;
+    }
+
+    // Vérifier si l'élève existe déjà
+    if (groupeTemporaire.eleves.includes(nomEleve.trim())) {
+      setErrors({ studentName: "Cet élève est déjà dans le groupe" });
+      return;
+    }
+    
+    setGroupeTemporaire({
+      ...groupeTemporaire,
+      eleves: [...groupeTemporaire.eleves, nomEleve.trim()],
+    });
+    setNomEleve("");
+    setErrors({});
+  };
+
+  const handleRemoveStudent = (eleve) => {
+    setGroupeTemporaire({
+      ...groupeTemporaire,
+      eleves: groupeTemporaire.eleves.filter(e => e !== eleve),
+    });
+  };
+
+  const handleSaveGroup = () => {
+    if (!groupeTemporaire) {
+      setErrors({ general: "Aucun groupe à sauvegarder" });
+      return;
+    }
+    
+    setGroupes([...groupes, groupeTemporaire]);
+    setGroupeTemporaire(null);
+    setErrors({});
+  };
+
+  const handleDeleteGroup = () => {
+    if (window.confirm("Êtes-vous sûr de vouloir supprimer ce groupe ?")) {
+      setGroupes(groupes.filter(g => g.id !== groupeActif));
+      setGroupeActif(null);
+      setNomGroupe("");
+      setNomEleve("");
+      setGroupeTemporaire(null);
+    }
+  };
+
+  const handleBack = () => {
+    setPage("gestionGroupes");
+    setNomGroupe("");
+    setGroupeActif(null);
+    setNomEleve("");
+    setGroupeTemporaire(null);
+    setErrors({});
+  };
+
+  if (page !== "CreerUnGroupe") {
+    return <div>Page non trouvée</div>;
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50 py-8">
+      <div className="max-w-4xl mx-auto px-4">
+        {/* Header */}
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200 mb-6">
+          <div className="flex items-center justify-between p-6">
+            <button
+              onClick={handleBack}
+              className="inline-flex items-center px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-50 rounded-lg transition-colors"
+            >
+              <ArrowLeft className="w-4 h-4 mr-2" />
+              Retour
+            </button>
+            <h1 className="text-2xl font-bold text-gray-900 flex items-center">
+              <Users className="w-6 h-6 mr-3 text-blue-600" />
+              {groupeActif
+                ? `Modification du groupe "${groupes.find(g => g.id === groupeActif)?.nom}"`
+                : "Créer un nouveau groupe"}
+            </h1>
+            <div className="w-20"></div>
+          </div>
+        </div>
+
+        {/* Formulaire de création */}
+        {!groupeTemporaire ? (
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+            <h2 className="text-lg font-semibold text-gray-900 mb-4">
+              Informations du groupe
+            </h2>
+            
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Nom du groupe *
+                </label>
+                <input
+                  type="text"
+                  placeholder="Entrez le nom du groupe"
+                  value={nomGroupe}
+                  onChange={(e) => {
+                    setNomGroupe(e.target.value);
+                    if (errors.groupName) setErrors({...errors, groupName: null});
+                  }}
+                  className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors ${
+                    errors.groupName ? 'border-red-300' : 'border-gray-300'
+                  }`}
+                />
+                {errors.groupName && (
+                  <p className="mt-2 text-sm text-red-600 flex items-center">
+                    <X className="w-4 h-4 mr-1" />
+                    {errors.groupName}
+                  </p>
+                )}
+              </div>
+
+              <button
+                onClick={handleCreateGroup}
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center"
+              >
+                <Plus className="w-5 h-5 mr-2" />
+                {groupeActif ? "Valider les modifications" : "Créer le groupe"}
+              </button>
+            </div>
+          </div>
+        ) : (
+          /* Gestion des élèves */
+          <div className="space-y-6">
+            {/* Informations du groupe */}
+            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-lg font-semibold text-gray-900">
+                  Groupe : {groupeTemporaire.nom}
+                </h2>
+                <span className="bg-blue-100 text-blue-800 text-sm font-medium px-3 py-1 rounded-full">
+                  {groupeTemporaire.eleves.length} élève{groupeTemporaire.eleves.length > 1 ? 's' : ''}
+                </span>
+              </div>
+            </div>
+
+            {/* Liste des élèves */}
+            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+              <h3 className="text-lg font-semibold text-gray-900 mb-4">
+                Élèves du groupe
+              </h3>
+
+              {groupeTemporaire.eleves.length === 0 ? (
+                <div className="text-center py-8 text-gray-500">
+                  <Users className="w-12 h-12 mx-auto mb-4 text-gray-300" />
+                  <p>Aucun élève dans ce groupe</p>
+                  <p className="text-sm">Ajoutez des élèves pour commencer</p>
+                </div>
+              ) : (
+                <div className="grid gap-3 mb-6">
+                  {groupeTemporaire.eleves.map((eleve, idx) => (
+                    <div key={idx} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                      <div className="flex items-center">
+                        <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center mr-3">
+                          <span className="text-blue-600 font-medium text-sm">
+                            {eleve.charAt(0).toUpperCase()}
+                          </span>
+                        </div>
+                        <span className="font-medium text-gray-900">{eleve}</span>
+                      </div>
+                      <button
+                        onClick={() => handleRemoveStudent(eleve)}
+                        className="text-red-500 hover:text-red-700 hover:bg-red-50 p-2 rounded-lg transition-colors"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Ajouter un élève */}
+              <div className="border-t pt-4">
+                <h4 className="text-sm font-medium text-gray-700 mb-3">
+                  Ajouter un élève
+                </h4>
+                <div className="flex gap-3">
+                  <div className="flex-1">
+                    <input
+                      type="text"
+                      placeholder="Nom de l'élève"
+                      value={nomEleve}
+                      onChange={(e) => {
+                        setNomEleve(e.target.value);
+                        if (errors.studentName) setErrors({...errors, studentName: null});
+                      }}
+                      onKeyPress={(e) => {
+                        if (e.key === 'Enter') {
+                          handleAddStudent();
+                        }
+                      }}
+                      className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors ${
+                        errors.studentName ? 'border-red-300' : 'border-gray-300'
+                      }`}
+                    />
+                    {errors.studentName && (
+                      <p className="mt-2 text-sm text-red-600 flex items-center">
+                        <X className="w-4 h-4 mr-1" />
+                        {errors.studentName}
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    onClick={handleAddStudent}
+                    className="bg-green-600 hover:bg-green-700 text-white px-6 py-3 rounded-lg transition-colors flex items-center"
+                  >
+                    <UserPlus className="w-5 h-5 mr-2" />
+                    Ajouter
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+              <div className="flex flex-col sm:flex-row gap-4">
+                <button
+                  onClick={handleSaveGroup}
+                  className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center"
+                >
+                  <Check className="w-5 h-5 mr-2" />
+                  Sauvegarder le groupe
+                </button>
+
+                {groupeActif && (
+                  <button
+                    onClick={handleDeleteGroup}
+                    className="sm:w-auto bg-red-600 hover:bg-red-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center"
+                  >
+                    <Trash2 className="w-5 h-5 mr-2" />
+                    Supprimer le groupe
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Messages d'erreur généraux */}
+        {errors.general && (
+          <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-lg">
+            <p className="text-red-700 flex items-center">
+              <X className="w-4 h-4 mr-2" />
+              {errors.general}
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
