@@ -3,6 +3,7 @@
 import "./styles.css";
 
 import { createClient } from "@supabase/supabase-js";
+import { updateDataWithOwner } from "./supabaseFunctions";
 
 const supabaseUrl = "https://aswhubzprehjnunbpkwc.supabase.co";
 const supabaseKey =
@@ -23,7 +24,24 @@ import {
 
 import emailjs from "emailjs-com";
 emailjs.init("lyiZ-6klparD8KCNw"); // ← ta clé publique
+// Ajouter ces interfaces au début du fichier, après les imports
+interface Partage {
+  id: string;
+  nom: string;
+  type: 'dossier' | 'parcours';
+  date?: number;
+  expediteur?: string;
+  // Ajoutez d'autres propriétés selon vos besoins
+  contenu?: any; // ou un type plus spécifique selon votre structure
+}
 
+interface Professeur {
+  code: string;
+  nom?: string;
+  email?: string;
+  partagesRecus: Partage[];
+  // Ajoutez d'autres propriétés selon votre structure existante
+}
 function Groupes({
   parcoursGlobaux,
   groupes,
@@ -59,21 +77,7 @@ function Groupes({
     return code;
   };
 
-  useEffect(() => {
-    const hash = window.location.hash; // ex: #access_token=...&type=recovery
-    const params = new URLSearchParams(hash.substring(1));
-    const type = params.get("type");
-
-    console.log("🔍 Hash détecté :", hash);
-    console.log("🔍 Type détecté :", type);
-
-    if (type === "recovery") {
-      console.log(
-        "✅ Type recovery détecté, redirection vers nouveauMotDePasse"
-      );
-      setPage("nouveauMotDePasse");
-    }
-  }, []);
+  
 
   const ajouterEleve = () => {
     if (!nomEleve.trim() || groupeActif === null) return;
@@ -108,20 +112,42 @@ function genererCodeEleveUnique(groupes) {
 }
 
 export default function App() {
+    const [page, setPage] = useState("accueil");
+    useEffect(() => {
+    const hash = window.location.hash; // ex: #access_token=...&type=recovery
+    const params = new URLSearchParams(hash.substring(1));
+    const type = params.get("type");
+
+    console.log("🔍 Hash détecté :", hash);
+    console.log("🔍 Type détecté :", type);
+
+    if (type === "recovery") {
+      console.log(
+        "✅ Type recovery détecté, redirection vers nouveauMotDePasse"
+      );
+      setPage("nouveauMotDePasse");
+    }
+  }, []);
+
+  const [loginEmail, setLoginEmail] = useState("");
+const [loginPassword, setLoginPassword] = useState("");
+
   const [emailMotDePasseOublie, setEmailMotDePasseOublie] = useState("");
   const [passwordValide, setPasswordValide] = useState(false);
   const [currentPasswordInput, setCurrentPasswordInput] = useState("");
   const [modifierCode, setModifierCode] = useState(false);
   const [nouveauCodeUnique, setNouveauCodeUnique] = useState("");
   const [messageErreurCode, setMessageErreurCode] = useState("");
-  const [professeur, setProfesseur] = useState(null);
-  const [dossiersParcours, setDossiersParcours] = useState([]);
-  const [professeurs, setProfesseurs] = useState([]);
+  
+  const [professeurs, setProfesseurs] = useState<Professeur[]>([]);
+  const [professeur, setProfesseur] = useState<Professeur | null>(null);
+  const [parcoursGlobaux, setParcoursGlobaux] = useState<any[]>([]); // À typer selon votre structure
+  const [dossiersParcours, setDossiersParcours] = useState<any[]>([]); // À typer selon votre structure
+  
   const [newProfName, setNewProfName] = useState("");
   const [newProfEmail, setNewProfEmail] = useState("");
-  const [parcoursGlobaux, setParcoursGlobaux] = useState([]);
+  
   const [groupes, setGroupes] = useState([]);
-  const [page, setPage] = useState("accueil");
   const [newParcoursNom, setNewParcoursNom] = useState("");
   const [nombreBalises, setNombreBalises] = useState(0);
   const [nomExpediteurPartage, setNomExpediteurPartage] = useState("");
@@ -134,6 +160,7 @@ export default function App() {
   const [balisesGlobales, setBalisesGlobales] = useState<{ code: string }[]>(
     []
   );
+const [session, setSession] = useState(null);
 
   const [balisesTemp, setBalisesTemp] = useState([]);
   const [emailPartage, setEmailPartage] = useState("");
@@ -156,9 +183,18 @@ export default function App() {
   const [groupeTemporaire, setGroupeTemporaire] = useState(null);
   const [groupeCree, setGroupeCree] = useState(false);
   const [editParcoursId, setEditParcoursId] = useState(null);
+const termine = false; // temporairement
+const partages: any[] = []; // ou le typage correct selon ton projet
+
   const [ongletPartage, setOngletPartage] = useState("envoyer");
   // "envoyer" ou "recevoir"
   const [eleveActif, setEleveActif] = useState<EleveType | null>(null);
+  type EleveType = {
+  nom: string;
+  code: string;
+  // ajouter d'autres propriétés selon tes besoins
+};
+
   useEffect(() => {
     const restaurerSession = async () => {
       const { data, error } = await supabase.auth.getSession();
@@ -4954,256 +4990,231 @@ export default function App() {
             📥 Partages reçus
           </h2>
 
-          {professeur.partagesRecus && professeur.partagesRecus.length > 0 ? (
-            Object.entries(
-              professeur.partagesRecus.reduce((acc, partage) => {
-                const expediteur = partage.expediteur || "Expéditeur inconnu";
-                if (!acc[expediteur]) {
-                  acc[expediteur] = [];
-                }
-                acc[expediteur].push(partage);
-                return acc;
-              }, {})
-            ).map(([expediteur, partages], idx) => (
+         
+{professeur?.partagesRecus && professeur.partagesRecus.length > 0 ? (
+  <div>
+    <h2 style={{ textAlign: "center", marginTop: "60px" }}>
+      📥 Partages reçus
+    </h2>
+    
+    {Object.entries(
+      professeur.partagesRecus.reduce((acc: Record<string, Partage[]>, partage: Partage) => {
+        const expediteur = partage.expediteur || "Expéditeur inconnu";
+        if (!acc[expediteur]) {
+          acc[expediteur] = [];
+        }
+        acc[expediteur].push(partage);
+        return acc;
+      }, {})
+    ).map(([expediteur, partages]: [string, Partage[]], idx: number) => (
+      <div
+        key={idx}
+        style={{
+          border: "1px solid #ddd",
+          borderRadius: "8px",
+          padding: "10px",
+          margin: "10px auto",
+          maxWidth: "500px",
+          backgroundColor: "#f9f9f9",
+        }}
+      >
+        <p style={{ fontWeight: "bold", marginBottom: "5px" }}>
+          📩 Souhaitez-vous consulter les partages de : {expediteur}
+        </p>
+        <p style={{ fontSize: "0.9em", color: "#555" }}>
+          Date d'envoi du dernier élément :{" "}
+          {new Date(
+            partages.length > 0 
+              ? Math.max(...partages.map((p: Partage) => p.date || Date.now()))
+              : Date.now()
+          ).toLocaleString()}
+        </p>
+
+        <div style={{ marginTop: "15px" }}>
+          <button
+            onClick={() => {
+              setOngletPartage(
+                ongletPartage === `voir-${idx}` ? null : `voir-${idx}`
+              );
+            }}
+            style={{
+              marginRight: "10px",
+              padding: "6px 12px",
+              backgroundColor: "#2196F3",
+              color: "white",
+              border: "none",
+              borderRadius: "5px",
+              cursor: "pointer",
+            }}
+          >
+            📂{" "}
+            {ongletPartage === `voir-${idx}` ? "Masquer" : "Visionner"}{" "}
+            les partages
+          </button>
+
+          <button
+            onClick={() => {
+              if (
+                confirm(
+                  `❌ Supprimer définitivement tous les partages de ${expediteur} ?`
+                )
+              ) {
+                const updatedProf: Professeur = {
+                  ...professeur,
+                  partagesRecus: professeur.partagesRecus.filter(
+                    (p: Partage) =>
+                      (p.expediteur || "Expéditeur inconnu") !== expediteur
+                  ),
+                };
+                setProfesseur(updatedProf);
+                setProfesseurs((prev: Professeur[]) =>
+                  prev.map((p: Professeur) =>
+                    p.code === updatedProf.code ? updatedProf : p
+                  )
+                );
+                alert(
+                  `✅ Tous les partages de ${expediteur} ont été supprimés.`
+                );
+              }
+            }}
+            style={{
+              padding: "6px 12px",
+              backgroundColor: "#f44336",
+              color: "white",
+              border: "none",
+              borderRadius: "5px",
+              cursor: "pointer",
+            }}
+          >
+            🗑️ Refuser
+          </button>
+        </div>
+
+        {ongletPartage === `voir-${idx}` && (
+          <div style={{ marginTop: "15px" }}>
+            {partages.map((partage: Partage, index: number) => (
               <div
-                key={idx}
+                key={index}
                 style={{
-                  border: "1px solid #ddd",
-                  borderRadius: "8px",
-                  padding: "10px",
-                  margin: "10px auto",
-                  maxWidth: "500px",
-                  backgroundColor: "#f9f9f9",
+                  borderTop: "1px solid #ccc",
+                  paddingTop: "10px",
+                  marginTop: "10px",
                 }}
               >
-                <p style={{ fontWeight: "bold", marginBottom: "5px" }}>
-                  📩 Souhaitez-vous consulter les partages de : {expediteur}
-                </p>
-                <p style={{ fontSize: "0.9em", color: "#555" }}>
-                  Date d'envoi du dernier élément :{" "}
-                  {new Date(
-                    Math.max(...partages.map((p) => p.date || Date.now()))
-                  ).toLocaleString()}
+                <p>
+                  <strong>
+                    {partage.type === "dossier"
+                      ? "📁 Dossier"
+                      : "📋 Parcours"}{" "}
+                    :
+                  </strong>{" "}
+                  {partage.nom}
                 </p>
 
-                <div style={{ marginTop: "15px" }}>
-                  <button
-                    onClick={() => {
-                      setOngletPartage(
-                        ongletPartage === `voir-${idx}` ? null : `voir-${idx}`
+                <button
+                  onClick={() => {
+                    let nomFinal = partage.nom.trim();
+                    let doublon = true;
+
+                    while (doublon) {
+                      const nouveauNom = prompt(
+                        "Renommer l'élément avant importation :",
+                        nomFinal
                       );
-                    }}
-                    style={{
-                      marginRight: "10px",
-                      padding: "6px 12px",
-                      backgroundColor: "#2196F3",
-                      color: "white",
-                      border: "none",
-                      borderRadius: "5px",
-                      cursor: "pointer",
-                    }}
-                  >
-                    📂{" "}
-                    {ongletPartage === `voir-${idx}` ? "Masquer" : "Visionner"}{" "}
-                    les partages
-                  </button>
 
-                  <button
-                    onClick={() => {
-                      if (
-                        confirm(
-                          `❌ Supprimer définitivement tous les partages de ${expediteur} ?`
-                        )
-                      ) {
-                        const updatedProf = {
-                          ...professeur,
-                          partagesRecus: professeur.partagesRecus.filter(
-                            (p) =>
-                              (p.expediteur || "Expéditeur inconnu") !==
-                              expediteur
-                          ),
-                        };
-                        setProfesseur(updatedProf);
-                        setProfesseurs((prev) =>
-                          prev.map((p) =>
-                            p.code === updatedProf.code ? updatedProf : p
-                          )
-                        );
+                      if (!nouveauNom || nouveauNom.trim() === "") {
                         alert(
-                          `✅ Tous les partages de ${expediteur} ont été supprimés.`
+                          "❌ Vous devez saisir un nom pour importer cet élément."
                         );
+                        return;
                       }
-                    }}
-                    style={{
-                      padding: "6px 12px",
-                      backgroundColor: "#f44336",
-                      color: "white",
-                      border: "none",
-                      borderRadius: "5px",
-                      cursor: "pointer",
-                    }}
-                  >
-                    🗑️ Refuser
-                  </button>
-                </div>
 
-                {ongletPartage === `voir-${idx}` && (
-                  <div style={{ marginTop: "15px" }}>
-                    {partages.map((partage, index) => (
-                      <div
-                        key={index}
-                        style={{
-                          borderTop: "1px solid #ccc",
-                          paddingTop: "10px",
-                          marginTop: "10px",
-                        }}
-                      >
-                        <p>
-                          <strong>
-                            {partage.type === "dossier"
-                              ? "📁 Dossier"
-                              : "📋 Parcours"}{" "}
-                            :
-                          </strong>{" "}
-                          {partage.nom}
-                        </p>
+                      nomFinal = nouveauNom.trim();
 
-                        <button
-                          onClick={() => {
-                            let nomFinal = partage.nom.trim();
-                            let doublon = true;
-
-                            while (doublon) {
-                              const nouveauNom = prompt(
-                                "Renommer l'élément avant importation :",
-                                nomFinal
-                              );
-
-                              if (!nouveauNom || nouveauNom.trim() === "") {
-                                alert(
-                                  "❌ Vous devez saisir un nom pour importer cet élément."
-                                );
-                                return;
-                              }
-
-                              nomFinal = nouveauNom.trim();
-
-                              doublon =
-                                partage.type === "parcours"
-                                  ? parcoursGlobaux.some(
-                                      (p) =>
-                                        p.nom.trim().toLowerCase() ===
-                                        nomFinal.toLowerCase()
-                                    )
-                                  : dossiersParcours.some(
-                                      (d) =>
-                                        d.nom.trim().toLowerCase() ===
-                                        nomFinal.toLowerCase()
-                                    );
-
-                              if (doublon) {
-                                alert(
-                                  `❌ Un ${
-                                    partage.type === "parcours"
-                                      ? "parcours"
-                                      : "dossier"
-                                  } avec ce nom existe déjà. Veuillez choisir un autre nom.`
-                                );
-                              }
-                            }
-
-                            if (partage.type === "dossier") {
-                              setDossiersParcours([
-                                ...dossiersParcours,
-                                { ...partage, nom: nomFinal },
-                              ]);
-                            } else if (partage.type === "parcours") {
-                              setParcoursGlobaux([
-                                ...parcoursGlobaux,
-                                { ...partage, nom: nomFinal },
-                              ]);
-                            }
-
-                            const updatedProf = {
-                              ...professeur,
-                              partagesRecus: professeur.partagesRecus.filter(
-                                (_, i) =>
-                                  !(
-                                    i ===
-                                    professeur.partagesRecus.findIndex(
-                                      (p) => p.id === partage.id
-                                    )
-                                  )
-                              ),
-                            };
-                            setProfesseur(updatedProf);
-                            setProfesseurs((prev) =>
-                              prev.map((p) =>
-                                p.code === updatedProf.code ? updatedProf : p
-                              )
+                      doublon =
+                        partage.type === "parcours"
+                          ? parcoursGlobaux.some(
+                              (p) =>
+                                p.nom.trim().toLowerCase() ===
+                                nomFinal.toLowerCase()
+                            )
+                          : dossiersParcours.some(
+                              (d) =>
+                                d.nom.trim().toLowerCase() ===
+                                nomFinal.toLowerCase()
                             );
 
-                            alert(`✅ "${nomFinal}" importé avec succès !`);
-                          }}
-                          style={{
-                            marginRight: "10px",
-                            padding: "6px 12px",
-                            backgroundColor: "#4CAF50",
-                            color: "white",
-                            border: "none",
-                            borderRadius: "5px",
-                            cursor: "pointer",
-                          }}
-                        >
-                          ✅ Importer
-                        </button>
+                      if (doublon) {
+                        alert(
+                          `❌ Un ${
+                            partage.type === "parcours"
+                              ? "parcours"
+                              : "dossier"
+                          } avec ce nom existe déjà. Veuillez choisir un autre nom.`
+                        );
+                      }
+                    }
 
-                        <button
-                          onClick={() => {
-                            if (confirm("❌ Supprimer ce partage ?")) {
-                              const updatedProf = {
-                                ...professeur,
-                                partagesRecus: professeur.partagesRecus.filter(
-                                  (_, i) =>
-                                    !(
-                                      i ===
-                                      professeur.partagesRecus.findIndex(
-                                        (p) => p.id === partage.id
-                                      )
-                                    )
-                                ),
-                              };
-                              setProfesseur(updatedProf);
-                              setProfesseurs((prev) =>
-                                prev.map((p) =>
-                                  p.code === updatedProf.code ? updatedProf : p
-                                )
-                              );
-                              alert("✅ Partage supprimé.");
-                            }
-                          }}
-                          style={{
-                            padding: "6px 12px",
-                            backgroundColor: "#f44336",
-                            color: "white",
-                            border: "none",
-                            borderRadius: "5px",
-                            cursor: "pointer",
-                          }}
-                        >
-                          🗑️ Supprimer
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                    if (partage.type === "dossier") {
+                      setDossiersParcours([
+                        ...dossiersParcours,
+                        { ...partage, nom: nomFinal },
+                      ]);
+                    } else if (partage.type === "parcours") {
+                      setParcoursGlobaux([
+                        ...parcoursGlobaux,
+                        { ...partage, nom: nomFinal },
+                      ]);
+                    }
+
+                    const updatedProf: Professeur = {
+                      ...professeur,
+                      partagesRecus: professeur.partagesRecus.filter(
+                        (_, i: number) =>
+                          !(
+                            i ===
+                            professeur.partagesRecus.findIndex(
+                              (p: Partage) => p.id === partage.id
+                            )
+                          )
+                      ),
+                    };
+                    setProfesseur(updatedProf);
+                    setProfesseurs((prev: Professeur[]) =>
+                      prev.map((p: Professeur) =>
+                        p.code === updatedProf.code ? updatedProf : p
+                      )
+                    );
+
+                    alert(`✅ "${nomFinal}" importé avec succès !`);
+                  }}
+                  style={{
+                    marginRight: "10px",
+                    padding: "6px 12px",
+                    backgroundColor: "#4CAF50",
+                    color: "white",
+                    border: "none",
+                    borderRadius: "5px",
+                    cursor: "pointer",
+                  }}
+                >
+                  ✅ Importer
+                </button>
               </div>
-            ))
-          ) : (
-            <p style={{ textAlign: "center", color: "#555" }}>
-              Aucun partage reçu pour le moment.
-            </p>
-          )}
+            ))}
+          </div>
+        )}
+      </div>
+    ))}
+  </div>
+) : (
+  <div>
+    <h2 style={{ textAlign: "center", marginTop: "60px" }}>
+      📥 Partages reçus
+    </h2>
+    <p style={{ textAlign: "center" }}>Aucun partage reçu</p>
+  </div>
+)}
         </div>
       ) : (
         <></>
