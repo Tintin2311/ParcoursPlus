@@ -1,13 +1,16 @@
 // Code complet fusionné avec les 371 lignes
 // Ce fichier contient la création de groupes, de parcours, le partage, les paramètres, etc.
 import "./styles.css";
+
 import { createClient } from "@supabase/supabase-js";
+import { updateDataWithOwner } from "./supabaseFunctions";
 
 const supabaseUrl = "https://aswhubzprehjnunbpkwc.supabase.co";
 const supabaseKey =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFzd2h1YnpwcmVoam51bmJwa3djIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTIwMDg5ODcsImV4cCI6MjA2NzU4NDk4N30.rNsW9i0jxtOxHYsoagVXjqz_yMHmVmKumf8c8LKuB0Q"; // Clé publique (anon)
 
 export const supabase = createClient(supabaseUrl, supabaseKey);
+
 import React, { useState, useEffect } from "react";
 import {
   ArrowLeft,
@@ -21,7 +24,24 @@ import {
 
 import emailjs from "emailjs-com";
 emailjs.init("lyiZ-6klparD8KCNw"); // ← ta clé publique
+// Ajouter ces interfaces au début du fichier, après les imports
+interface Partage {
+  id: string;
+  nom: string;
+  type: "dossier" | "parcours";
+  date?: number;
+  expediteur?: string;
+  // Ajoutez d'autres propriétés selon vos besoins
+  contenu?: any; // ou un type plus spécifique selon votre structure
+}
 
+interface Professeur {
+  code: string;
+  nom?: string;
+  email?: string;
+  partagesRecus: Partage[];
+  // Ajoutez d'autres propriétés selon votre structure existante
+}
 function Groupes({
   parcoursGlobaux,
   groupes,
@@ -90,20 +110,42 @@ function genererCodeEleveUnique(groupes) {
 }
 
 export default function App() {
+  const [page, setPage] = useState("accueil");
+  useEffect(() => {
+    const hash = window.location.hash; // ex: #access_token=...&type=recovery
+    const params = new URLSearchParams(hash.substring(1));
+    const type = params.get("type");
+
+    console.log("🔍 Hash détecté :", hash);
+    console.log("🔍 Type détecté :", type);
+
+    if (type === "recovery") {
+      console.log(
+        "✅ Type recovery détecté, redirection vers nouveauMotDePasse"
+      );
+      setPage("nouveauMotDePasse");
+    }
+  }, []);
+
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+
   const [emailMotDePasseOublie, setEmailMotDePasseOublie] = useState("");
   const [passwordValide, setPasswordValide] = useState(false);
   const [currentPasswordInput, setCurrentPasswordInput] = useState("");
   const [modifierCode, setModifierCode] = useState(false);
   const [nouveauCodeUnique, setNouveauCodeUnique] = useState("");
   const [messageErreurCode, setMessageErreurCode] = useState("");
-  const [professeur, setProfesseur] = useState(null);
-  const [dossiersParcours, setDossiersParcours] = useState([]);
-  const [professeurs, setProfesseurs] = useState([]);
+
+  const [professeurs, setProfesseurs] = useState<Professeur[]>([]);
+  const [professeur, setProfesseur] = useState<Professeur | null>(null);
+  const [parcoursGlobaux, setParcoursGlobaux] = useState<any[]>([]); // À typer selon votre structure
+  const [dossiersParcours, setDossiersParcours] = useState<any[]>([]); // À typer selon votre structure
+
   const [newProfName, setNewProfName] = useState("");
   const [newProfEmail, setNewProfEmail] = useState("");
-  const [parcoursGlobaux, setParcoursGlobaux] = useState([]);
+
   const [groupes, setGroupes] = useState([]);
-  const [page, setPage] = useState("accueil");
   const [newParcoursNom, setNewParcoursNom] = useState("");
   const [nombreBalises, setNombreBalises] = useState(0);
   const [nomExpediteurPartage, setNomExpediteurPartage] = useState("");
@@ -116,6 +158,7 @@ export default function App() {
   const [balisesGlobales, setBalisesGlobales] = useState<{ code: string }[]>(
     []
   );
+  const [session, setSession] = useState(null);
 
   const [balisesTemp, setBalisesTemp] = useState([]);
   const [emailPartage, setEmailPartage] = useState("");
@@ -138,10 +181,51 @@ export default function App() {
   const [groupeTemporaire, setGroupeTemporaire] = useState(null);
   const [groupeCree, setGroupeCree] = useState(false);
   const [editParcoursId, setEditParcoursId] = useState(null);
+  const termine = false; // temporairement
+  const partages: any[] = []; // ou le typage correct selon ton projet
+
   const [ongletPartage, setOngletPartage] = useState("envoyer");
   // "envoyer" ou "recevoir"
   const [eleveActif, setEleveActif] = useState<EleveType | null>(null);
+  type EleveType = {
+    nom: string;
+    code: string;
+    // ajouter d'autres propriétés selon tes besoins
+  };
 
+  useEffect(() => {
+    const restaurerSession = async () => {
+      const { data, error } = await supabase.auth.getSession();
+      if (data.session) {
+        const userId = data.session.user.id;
+        // Aller chercher le professeur lié à ce user_id
+        const { data: prof, error: profError } = await supabase
+          .from("professeurs")
+          .select("*")
+          .eq("user_id", userId)
+          .single();
+
+        if (prof) {
+          setProfesseur(prof);
+          setModeConnexion("prof");
+          setPage("accueil");
+          console.log("✅ Session restaurée automatiquement");
+        } else {
+          console.log("❌ Aucun professeur lié à cet user_id");
+        }
+      }
+    };
+    restaurerSession();
+  }, []);
+  useEffect(() => {
+    const hash = window.location.hash;
+    const params = new URLSearchParams(hash.substring(1));
+
+    if (params.get("type") === "recovery") {
+      console.log("🔑 Lien de récupération détecté");
+      setPage("nouveauMotDePasse");
+    }
+  }, []);
   const [dossiersGroupes, setDossiersGroupes] = useState([]); // Chaque dossier aura {id, nom, groupes: [ids]}
   const [nouveauNomDossier, setNouveauNomDossier] = useState("");
   const [codeProfesseurDestinataire, setCodeProfesseurDestinataire] =
@@ -166,7 +250,109 @@ export default function App() {
     { type: "≥", tentatives: 4, couleur: "red" },
   ]);
 
+  const handleConnexion = async () => {
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: loginEmail.trim().toLowerCase(),
+      password: loginPassword,
+    });
+
+    if (error) {
+      alert("Email ou mot de passe incorrect.");
+      console.error(error);
+    } else {
+      setSession(data.session); // ✅ met à jour le parent
+      alert("Connexion réussie !");
+    }
+  };
+  async function creerCompteProfesseur() {
+    const password = newProfPassword;
+    const regex = /^(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{6,}$/;
+    if (!regex.test(password)) {
+      alert(
+        "Le mot de passe doit contenir au moins 6 caractères, une majuscule, un chiffre et un symbole."
+      );
+      return;
+    }
+    if (newProfPassword !== newProfPasswordConfirm) {
+      alert("Les mots de passe ne correspondent pas.");
+      return;
+    }
+    const emailExistant = professeurs.some(
+      (p) => p.email === newProfEmail.trim().toLowerCase()
+    );
+    if (emailExistant) {
+      alert("Un compte existe déjà avec cette adresse email.");
+      return;
+    }
+
+    const codeGenere = genererCodeUnique(professeurs);
+    const codeConfirmation = Math.floor(
+      100000 + Math.random() * 900000
+    ).toString();
+    setCodeValidationEnvoye(codeConfirmation);
+
+    const { data: authData, error: authError } = await supabase.auth.signUp({
+      email: newProfEmail.trim().toLowerCase(),
+      password: newProfPassword,
+    });
+    if (authError) {
+      alert("Erreur de création de compte: " + authError.message);
+      return;
+    }
+
+    const nouveauProf = {
+      user_id: authData.user.id, // <-- clé pour retrouver le professeur automatiquement
+      nom: newProfName,
+      prenom: newProfPrenom,
+      email: newProfEmail.trim().toLowerCase(),
+      code: codeGenere,
+      parametres: {},
+      refuserPartage: false,
+      partagesRecus: [],
+    };
+
+    try {
+      const { data, error } = await supabase
+        .from("professeurs")
+        .insert([nouveauProf])
+        .select();
+
+      if (error) {
+        console.error(error);
+        alert(
+          "❌ Erreur lors de la création du compte Supabase : " + error.message
+        );
+        return;
+      }
+
+      console.log("✅ Compte professeur créé dans Supabase :", data);
+
+      // Envoi du mail de confirmation
+      emailjs
+        .send(
+          "service_6dkmtzr",
+          "template_g1aj6kg",
+          {
+            to_email: newProfEmail,
+            confirmation_code: codeConfirmation,
+          },
+          "lyiZ-6klparD8KCNw"
+        )
+        .then(() => {
+          console.log("✅ Email envoyé !");
+        })
+        .catch((error) => {
+          console.error("❌ Erreur envoi email", error);
+        });
+
+      setPage("confirmationEmail");
+    } catch (err) {
+      console.error("❌ Erreur inattendue :", err);
+      alert("❌ Une erreur inattendue est survenue.");
+    }
+  }
   const [prendEnCompteTentatives, setPrendEnCompteTentatives] = useState(true);
+
   const [priseEnCompteTentatives, setPriseEnCompteTentatives] = useState(true);
   const [modePoints, setModePoints] = useState("cumul"); // "cumul", "parParcours", "parTentatives", "personnalise"
   const [baremePointsGlobal, setBaremePointsGlobal] = useState({
@@ -261,6 +447,41 @@ export default function App() {
       setPage("gestionParcours");
     }
   };
+  const handleChangePassword = async () => {
+    if (!nouveauPassword.trim()) {
+      alert("❌ Merci de saisir un mot de passe.");
+      return;
+    }
+
+    try {
+      const { error: authError } = await supabase.auth.updateUser({
+        password: nouveauPassword.trim(),
+      });
+      if (authError) {
+        console.error(authError);
+        alert("❌ Erreur Auth : " + authError.message);
+        return;
+      }
+
+      const updated = await updateDataWithOwner(
+        "professeurs",
+        { password: nouveauPassword.trim() },
+        {}
+      );
+      if (!updated) {
+        alert("❌ Erreur lors de la mise à jour dans la table professeurs.");
+        return;
+      }
+
+      alert("✅ Mot de passe modifié avec succès !");
+      setNouveauPassword("");
+      setPage("parametres");
+    } catch (error) {
+      console.error(error);
+      alert("❌ Erreur inattendue : " + error.message);
+    }
+  };
+
   const [attribuerPointsParBalise, setAttribuerPointsParBalise] =
     useState(false);
 
@@ -315,6 +536,8 @@ export default function App() {
 
     setDossiersGroupes(supprimerRecursif(dossiersGroupes));
   };
+  const [nouveauPassword, setNouveauPassword] = useState("");
+
   const renderDossier = (dossier, niveau = 0) => (
     <div
       key={dossier.id}
@@ -915,6 +1138,7 @@ export default function App() {
           )}
         </div>
       )}
+
       {page === "motDePasseOublie" ? (
         <div style={{ textAlign: "center", marginTop: 100 }}>
           <button
@@ -928,7 +1152,8 @@ export default function App() {
           </button>
           <h2>🔐 Récupération du mot de passe</h2>
           <p>
-            Entrez votre adresse email pour recevoir un nouveau mot de passe.
+            Entrez votre adresse email pour recevoir un lien de réinitialisation
+            de mot de passe.
           </p>
           <input
             type="email"
@@ -939,46 +1164,37 @@ export default function App() {
           />
           <br />
           <button
-            onClick={() => {
-              const prof = professeurs.find(
-                (p) =>
-                  p.email.toLowerCase() === emailMotDePasseOublie.toLowerCase()
-              );
-              if (!prof) {
-                alert("❌ Aucun compte trouvé avec cet email.");
+            onClick={async () => {
+              const email = emailMotDePasseOublie.trim().toLowerCase();
+              if (!email) {
+                alert("❌ Veuillez entrer une adresse email.");
                 return;
               }
-              const nouveauMotDePasse = Math.random().toString(36).slice(-8);
-              const updatedProf = { ...prof, password: nouveauMotDePasse };
-              setProfesseurs(
-                professeurs.map((p) =>
-                  p.email === prof.email ? updatedProf : p
-                )
-              );
-              emailjs
-                .send(
-                  "service_6dkmtzr", // remplace par ton service_id
-                  "template_7drvg46", // remplace par ton template_id
-                  {
-                    to_email: emailMotDePasseOublie,
-                    nouveau_mdp: nouveauMotDePasse,
-                  },
-                  "lyiZ-6klparD8KCNw" // ta clé publique
-                )
-                .then(() => {
-                  alert("✅ Nouveau mot de passe envoyé par email.");
-                })
-                .catch((error) => {
-                  console.error("Erreur lors de l’envoi de l’email :", error);
-                  alert("❌ Échec de l’envoi du mail.");
-                });
 
-              setPage("accueil");
-              setModeConnexion("accueil");
+              try {
+                const { data, error } =
+                  await supabase.auth.resetPasswordForEmail(email, {
+                    redirectTo: "https://x7623y.csb.app",
+                  });
+
+                if (error) {
+                  console.error(error);
+                  alert("❌ Erreur : " + error.message);
+                  return;
+                }
+
+                alert(
+                  "✅ Si un compte existe avec cet email, un lien de réinitialisation a été envoyé."
+                );
+                setPage("connexion"); // redirige vers la page de connexion
+              } catch (err) {
+                console.error(err);
+                alert("❌ Erreur inattendue : " + err.message);
+              }
             }}
             style={{ marginTop: 10 }}
           >
-            Envoyer
+            📩 Envoyer le lien de réinitialisation
           </button>
         </div>
       ) : modeConnexion === "accueil" ? (
@@ -1032,18 +1248,37 @@ export default function App() {
             />
 
             <button
-              onClick={() => {
-                const prof = professeurs.find(
-                  (p) =>
-                    p.email === newProfEmail && p.password === newProfPassword
-                );
-                if (!prof) {
+              onClick={async () => {
+                const { data, error } = await supabase.auth.signInWithPassword({
+                  email: newProfEmail.trim().toLowerCase(),
+                  password: newProfPassword,
+                });
+
+                if (error) {
                   alert("Email ou mot de passe incorrect.");
+                  console.error(error);
                   return;
                 }
-                setProfesseur(prof);
-                setNouveauCodeUnique(prof.code);
+
+                // Aller chercher le professeur lié à cet user_id
+                const { data: profData, error: profError } = await supabase
+                  .from("professeurs")
+                  .select("*")
+                  .eq("user_id", data.user.id)
+                  .single();
+
+                if (profError || !profData) {
+                  alert("Aucun profil professeur lié à ce compte.");
+                  console.error(profError);
+                  return;
+                }
+
+                setProfesseur(profData);
+                setNouveauCodeUnique(profData.code);
                 setModeConnexion("prof");
+                setPage("accueil");
+
+                alert("Connexion réussie !");
               }}
             >
               Connexion prof
@@ -1285,7 +1520,7 @@ export default function App() {
                   style={{ textTransform: "uppercase" }}
                 />
                 <button
-                  onClick={() => {
+                  onClick={async () => {
                     if (nouveauCodeUnique.length < 6) {
                       setMessageErreurCode(
                         "Le code doit contenir au moins 6 caractères."
@@ -1293,13 +1528,37 @@ export default function App() {
                       return;
                     }
 
-                    const codePris = professeurs.some(
-                      (p) =>
-                        p.code === nouveauCodeUnique &&
-                        p.email !== professeur.email
-                    );
-                    if (codePris) {
+                    const { data, error } = await supabase
+                      .from("professeurs")
+                      .select("*")
+                      .eq("code", nouveauCodeUnique);
+
+                    if (error) {
+                      console.error(error);
+                      setMessageErreurCode(
+                        "Erreur lors de la vérification du code."
+                      );
+                      return;
+                    }
+
+                    if (
+                      data.length > 0 &&
+                      data[0].user_id !== professeur.user_id
+                    ) {
                       setMessageErreurCode("Code déjà utilisé !");
+                      return;
+                    }
+
+                    const { error: updateError } = await supabase
+                      .from("professeurs")
+                      .update({ code: nouveauCodeUnique })
+                      .eq("user_id", professeur.user_id);
+
+                    if (updateError) {
+                      console.error(updateError);
+                      setMessageErreurCode(
+                        "Erreur lors de la mise à jour du code."
+                      );
                       return;
                     }
 
@@ -1308,13 +1567,9 @@ export default function App() {
                       code: nouveauCodeUnique,
                     };
                     setProfesseur(updatedProf);
-                    setProfesseurs(
-                      professeurs.map((p) =>
-                        p.email === updatedProf.email ? updatedProf : p
-                      )
-                    );
                     setModifierCode(false);
                     setMessageErreurCode("");
+                    alert("✅ Code unique mis à jour avec succès !");
                   }}
                   style={{ marginLeft: 10 }}
                 >
@@ -1409,6 +1664,78 @@ export default function App() {
               ⚡ Toujours en mode automatique
             </label>
           </div>
+        </div>
+      ) : page === "nouveauMotDePasse" ? (
+        <div style={{ textAlign: "center", marginTop: 100 }}>
+          <h2>🔐 Définir un nouveau mot de passe</h2>
+          <p>Entrez votre nouveau mot de passe ci-dessous.</p>
+          <input
+            type="password"
+            placeholder="Nouveau mot de passe"
+            value={newProfPassword}
+            onChange={(e) => setNewProfPassword(e.target.value)}
+            style={{ width: "300px", marginBottom: 10 }}
+          />
+          <br />
+          <input
+            type="password"
+            placeholder="Confirmer le mot de passe"
+            value={newProfPasswordConfirm}
+            onChange={(e) => setNewProfPasswordConfirm(e.target.value)}
+            style={{ width: "300px", marginBottom: 10 }}
+          />
+          <br />
+          <button
+            onClick={async () => {
+              if (newProfPassword !== newProfPasswordConfirm) {
+                alert("❌ Les mots de passe ne correspondent pas.");
+                return;
+              }
+              const regex = /^(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{6,}$/;
+              if (!regex.test(newProfPassword)) {
+                alert(
+                  "❌ Le mot de passe doit contenir au moins 6 caractères, une majuscule, un chiffre et un symbole."
+                );
+                return;
+              }
+
+              try {
+                const {
+                  data: { session },
+                  error: sessionError,
+                } = await supabase.auth.getSession();
+                if (sessionError || !session) {
+                  alert(
+                    "❌ Session invalide ou expirée. Veuillez relancer la récupération de mot de passe."
+                  );
+                  setPage("connexion");
+                  return;
+                }
+
+                const { error } = await supabase.auth.updateUser({
+                  password: newProfPassword.trim(),
+                });
+
+                if (error) {
+                  console.error(error);
+                  alert(
+                    "❌ Erreur lors de la mise à jour du mot de passe : " +
+                      error.message
+                  );
+                  return;
+                }
+                alert("✅ Mot de passe mis à jour avec succès !");
+                setNewProfPassword("");
+                setNewProfPasswordConfirm("");
+                setPage("connexion"); // retour à la connexion
+              } catch (err) {
+                console.error(err);
+                alert("❌ Erreur inattendue : " + err.message);
+              }
+            }}
+          >
+            ✅ Valider le nouveau mot de passe
+          </button>
         </div>
       ) : page === "gestionBalises" ? (
         <div
@@ -1561,7 +1888,9 @@ export default function App() {
           />
           <br />
           <button
-            onClick={() => {
+            // Version corrigée du code de création de compte professeur
+
+            onClick={async () => {
               const password = newProfPassword;
               const regex = /^(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{6,}$/;
               if (!regex.test(password)) {
@@ -1582,38 +1911,83 @@ export default function App() {
                 return;
               }
 
-              const codeGenere = genererCodeUnique(professeurs);
-              const codeConfirmation = Math.floor(
-                100000 + Math.random() * 900000
-              ).toString();
-              setCodeValidationEnvoye(codeConfirmation);
+              try {
+                // 1. D'abord créer le compte utilisateur dans Auth
+                const { data: authData, error: authError } =
+                  await supabase.auth.signUp({
+                    email: newProfEmail.trim().toLowerCase(),
+                    password: newProfPassword,
+                  });
 
-              const nouveauProf = {
-                nom: newProfName + " " + newProfPrenom,
-                email: newProfEmail,
-                code: codeGenere,
-                password: newProfPassword,
-              };
+                if (authError) {
+                  console.error(
+                    "❌ Erreur lors de la création du compte Auth :",
+                    authError
+                  );
+                  alert(
+                    "❌ Erreur lors de la création du compte : " +
+                      authError.message
+                  );
+                  return;
+                }
 
-              console.log("Code de confirmation :", codeConfirmation);
-              emailjs
-                .send(
-                  "service_6dkmtzr", // ← remplace par ton service ID
-                  "template_g1aj6kg", // ← remplace par ton template ID
-                  {
-                    to_email: newProfEmail, // la variable dans le template
-                    confirmation_code: codeConfirmation,
-                  },
-                  "lyiZ-6klparD8KCNw" // ← remplace par ta clé publique
-                )
-                .then(() => {
-                  console.log("✅ Email envoyé !");
-                })
-                .catch((error) => {
-                  console.error("❌ Erreur envoi email", error);
-                });
+                // 2. Ensuite créer le profil professeur avec user_id
+                const codeGenere = genererCodeUnique(professeurs);
+                const codeConfirmation = Math.floor(
+                  100000 + Math.random() * 900000
+                ).toString();
+                setCodeValidationEnvoye(codeConfirmation);
 
-              setPage("confirmationEmail");
+                const nouveauProf = {
+                  user_id: authData.user.id, // 🔥 AJOUT IMPORTANT : lier au compte utilisateur
+                  nom: newProfName,
+                  prenom: newProfPrenom,
+                  email: newProfEmail.trim().toLowerCase(),
+                  password: newProfPassword, // Note: vous devriez éviter de stocker le mot de passe en clair
+                  code: codeGenere,
+                  parametres: {},
+                  refuserPartage: false,
+                  partagesRecus: [],
+                };
+
+                const { data, error } = await supabase
+                  .from("professeurs")
+                  .insert([nouveauProf])
+                  .select();
+
+                if (error) {
+                  console.error("❌ Erreur Supabase :", error);
+                  alert(
+                    "❌ Erreur lors de la création du profil : " + error.message
+                  );
+                  return;
+                }
+
+                console.log("✅ Compte professeur créé sur Supabase :", data);
+
+                // 3. Envoyer l'email de confirmation
+                emailjs
+                  .send(
+                    "service_6dkmtzr",
+                    "template_g1aj6kg",
+                    {
+                      to_email: newProfEmail,
+                      confirmation_code: codeConfirmation,
+                    },
+                    "lyiZ-6klparD8KCNw"
+                  )
+                  .then(() => {
+                    console.log("✅ Email envoyé !");
+                  })
+                  .catch((error) => {
+                    console.error("❌ Erreur envoi email", error);
+                  });
+
+                setPage("confirmationEmail");
+              } catch (err) {
+                console.error("❌ Erreur inattendue :", err);
+                alert("❌ Une erreur inattendue est survenue.");
+              }
             }}
           >
             ✅ Créer mon compte
@@ -2818,14 +3192,14 @@ export default function App() {
           })()}
         </div>
       ) : page === "modifierMotDePasse" ? (
-        <div style={{ marginTop: "100px", textAlign: "center" }}>
-          <button
-            onClick={() => setPage("parametres")}
-            style={{ position: "absolute", top: 10, right: 10 }}
-          >
-            ⬅️ Retour
-          </button>
-
+        <div
+          style={{
+            padding: 20,
+            maxWidth: 400,
+            margin: "0 auto",
+            textAlign: "center",
+          }}
+        >
           <h2>🔐 Modification du mot de passe</h2>
           <p style={{ fontSize: "0.9em", color: "#666" }}>
             Le mot de passe doit contenir entre 6 et 20 caractères, une
@@ -2875,36 +3249,56 @@ export default function App() {
           <br />
           <button
             disabled={!passwordValide}
-            onClick={() => {
-              const password = newProfPassword;
+            onClick={async () => {
+              const password = newProfPassword.trim();
               const regex = /^(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{6,}$/;
 
-              if (!professeur || currentPasswordInput !== professeur.password) {
-                alert("❌ Le mot de passe actuel est incorrect.");
-                return;
-              }
               if (!regex.test(password)) {
                 alert(
                   "❌ Le mot de passe doit contenir au moins 6 caractères, une majuscule, un chiffre et un symbole."
                 );
                 return;
               }
+
               if (newProfPassword !== newProfPasswordConfirm) {
                 alert("❌ Les mots de passe ne correspondent pas.");
                 return;
               }
-              const updatedProf = {
-                ...professeur,
-                password: newProfPassword,
-              };
-              setProfesseur(updatedProf);
-              setProfesseurs(
-                professeurs.map((p) =>
-                  p.email === updatedProf.email ? updatedProf : p
-                )
-              );
-              alert("✅ Mot de passe mis à jour avec succès.");
-              setPage("parametres");
+
+              try {
+                // ✅ Vérifier la session utilisateur avant updateUser
+                const { data: sessionData, error: sessionError } =
+                  await supabase.auth.getSession();
+                if (sessionError || !sessionData.session) {
+                  alert(
+                    "❌ Session expirée ou utilisateur non connecté, veuillez vous reconnecter."
+                  );
+                  setPage("connexion"); // renvoie vers ta page de connexion
+                  return;
+                }
+
+                // ✅ Modifier le mot de passe dans Supabase Auth
+                const { error: authError } = await supabase.auth.updateUser({
+                  password,
+                });
+                if (authError) {
+                  console.error(authError);
+                  alert(
+                    "❌ Erreur lors de la mise à jour du mot de passe : " +
+                      authError.message
+                  );
+                  return;
+                }
+
+                alert("✅ Mot de passe modifié avec succès !");
+                setNewProfPassword("");
+                setNewProfPasswordConfirm("");
+                setPasswordValide(false);
+                setPage("parametres");
+              } catch (error) {
+                console.error(error);
+                alert("❌ Erreur inattendue : " + error.message);
+              }
             }}
           >
             ✅ Valider le changement
@@ -4594,255 +4988,247 @@ export default function App() {
             📥 Partages reçus
           </h2>
 
-          {professeur.partagesRecus && professeur.partagesRecus.length > 0 ? (
-            Object.entries(
-              professeur.partagesRecus.reduce((acc, partage) => {
-                const expediteur = partage.expediteur || "Expéditeur inconnu";
-                if (!acc[expediteur]) {
-                  acc[expediteur] = [];
-                }
-                acc[expediteur].push(partage);
-                return acc;
-              }, {})
-            ).map(([expediteur, partages], idx) => (
-              <div
-                key={idx}
-                style={{
-                  border: "1px solid #ddd",
-                  borderRadius: "8px",
-                  padding: "10px",
-                  margin: "10px auto",
-                  maxWidth: "500px",
-                  backgroundColor: "#f9f9f9",
-                }}
-              >
-                <p style={{ fontWeight: "bold", marginBottom: "5px" }}>
-                  📩 Souhaitez-vous consulter les partages de : {expediteur}
-                </p>
-                <p style={{ fontSize: "0.9em", color: "#555" }}>
-                  Date d'envoi du dernier élément :{" "}
-                  {new Date(
-                    Math.max(...partages.map((p) => p.date || Date.now()))
-                  ).toLocaleString()}
-                </p>
+          {professeur?.partagesRecus && professeur.partagesRecus.length > 0 ? (
+            <div>
+              <h2 style={{ textAlign: "center", marginTop: "60px" }}>
+                📥 Partages reçus
+              </h2>
 
-                <div style={{ marginTop: "15px" }}>
-                  <button
-                    onClick={() => {
-                      setOngletPartage(
-                        ongletPartage === `voir-${idx}` ? null : `voir-${idx}`
-                      );
-                    }}
+              {Object.entries(
+                professeur.partagesRecus.reduce(
+                  (acc: Record<string, Partage[]>, partage: Partage) => {
+                    const expediteur =
+                      partage.expediteur || "Expéditeur inconnu";
+                    if (!acc[expediteur]) {
+                      acc[expediteur] = [];
+                    }
+                    acc[expediteur].push(partage);
+                    return acc;
+                  },
+                  {}
+                )
+              ).map(
+                ([expediteur, partages]: [string, Partage[]], idx: number) => (
+                  <div
+                    key={idx}
                     style={{
-                      marginRight: "10px",
-                      padding: "6px 12px",
-                      backgroundColor: "#2196F3",
-                      color: "white",
-                      border: "none",
-                      borderRadius: "5px",
-                      cursor: "pointer",
+                      border: "1px solid #ddd",
+                      borderRadius: "8px",
+                      padding: "10px",
+                      margin: "10px auto",
+                      maxWidth: "500px",
+                      backgroundColor: "#f9f9f9",
                     }}
                   >
-                    📂{" "}
-                    {ongletPartage === `voir-${idx}` ? "Masquer" : "Visionner"}{" "}
-                    les partages
-                  </button>
+                    <p style={{ fontWeight: "bold", marginBottom: "5px" }}>
+                      📩 Souhaitez-vous consulter les partages de : {expediteur}
+                    </p>
+                    <p style={{ fontSize: "0.9em", color: "#555" }}>
+                      Date d'envoi du dernier élément :{" "}
+                      {new Date(
+                        partages.length > 0
+                          ? Math.max(
+                              ...partages.map(
+                                (p: Partage) => p.date || Date.now()
+                              )
+                            )
+                          : Date.now()
+                      ).toLocaleString()}
+                    </p>
 
-                  <button
-                    onClick={() => {
-                      if (
-                        confirm(
-                          `❌ Supprimer définitivement tous les partages de ${expediteur} ?`
-                        )
-                      ) {
-                        const updatedProf = {
-                          ...professeur,
-                          partagesRecus: professeur.partagesRecus.filter(
-                            (p) =>
-                              (p.expediteur || "Expéditeur inconnu") !==
-                              expediteur
-                          ),
-                        };
-                        setProfesseur(updatedProf);
-                        setProfesseurs((prev) =>
-                          prev.map((p) =>
-                            p.code === updatedProf.code ? updatedProf : p
-                          )
-                        );
-                        alert(
-                          `✅ Tous les partages de ${expediteur} ont été supprimés.`
-                        );
-                      }
-                    }}
-                    style={{
-                      padding: "6px 12px",
-                      backgroundColor: "#f44336",
-                      color: "white",
-                      border: "none",
-                      borderRadius: "5px",
-                      cursor: "pointer",
-                    }}
-                  >
-                    🗑️ Refuser
-                  </button>
-                </div>
-
-                {ongletPartage === `voir-${idx}` && (
-                  <div style={{ marginTop: "15px" }}>
-                    {partages.map((partage, index) => (
-                      <div
-                        key={index}
+                    <div style={{ marginTop: "15px" }}>
+                      <button
+                        onClick={() => {
+                          setOngletPartage(
+                            ongletPartage === `voir-${idx}`
+                              ? null
+                              : `voir-${idx}`
+                          );
+                        }}
                         style={{
-                          borderTop: "1px solid #ccc",
-                          paddingTop: "10px",
-                          marginTop: "10px",
+                          marginRight: "10px",
+                          padding: "6px 12px",
+                          backgroundColor: "#2196F3",
+                          color: "white",
+                          border: "none",
+                          borderRadius: "5px",
+                          cursor: "pointer",
                         }}
                       >
-                        <p>
-                          <strong>
-                            {partage.type === "dossier"
-                              ? "📁 Dossier"
-                              : "📋 Parcours"}{" "}
-                            :
-                          </strong>{" "}
-                          {partage.nom}
-                        </p>
+                        📂{" "}
+                        {ongletPartage === `voir-${idx}`
+                          ? "Masquer"
+                          : "Visionner"}{" "}
+                        les partages
+                      </button>
 
-                        <button
-                          onClick={() => {
-                            let nomFinal = partage.nom.trim();
-                            let doublon = true;
-
-                            while (doublon) {
-                              const nouveauNom = prompt(
-                                "Renommer l'élément avant importation :",
-                                nomFinal
-                              );
-
-                              if (!nouveauNom || nouveauNom.trim() === "") {
-                                alert(
-                                  "❌ Vous devez saisir un nom pour importer cet élément."
-                                );
-                                return;
-                              }
-
-                              nomFinal = nouveauNom.trim();
-
-                              doublon =
-                                partage.type === "parcours"
-                                  ? parcoursGlobaux.some(
-                                      (p) =>
-                                        p.nom.trim().toLowerCase() ===
-                                        nomFinal.toLowerCase()
-                                    )
-                                  : dossiersParcours.some(
-                                      (d) =>
-                                        d.nom.trim().toLowerCase() ===
-                                        nomFinal.toLowerCase()
-                                    );
-
-                              if (doublon) {
-                                alert(
-                                  `❌ Un ${
-                                    partage.type === "parcours"
-                                      ? "parcours"
-                                      : "dossier"
-                                  } avec ce nom existe déjà. Veuillez choisir un autre nom.`
-                                );
-                              }
-                            }
-
-                            if (partage.type === "dossier") {
-                              setDossiersParcours([
-                                ...dossiersParcours,
-                                { ...partage, nom: nomFinal },
-                              ]);
-                            } else if (partage.type === "parcours") {
-                              setParcoursGlobaux([
-                                ...parcoursGlobaux,
-                                { ...partage, nom: nomFinal },
-                              ]);
-                            }
-
-                            const updatedProf = {
+                      <button
+                        onClick={() => {
+                          if (
+                            confirm(
+                              `❌ Supprimer définitivement tous les partages de ${expediteur} ?`
+                            )
+                          ) {
+                            const updatedProf: Professeur = {
                               ...professeur,
                               partagesRecus: professeur.partagesRecus.filter(
-                                (_, i) =>
-                                  !(
-                                    i ===
-                                    professeur.partagesRecus.findIndex(
-                                      (p) => p.id === partage.id
-                                    )
-                                  )
+                                (p: Partage) =>
+                                  (p.expediteur || "Expéditeur inconnu") !==
+                                  expediteur
                               ),
                             };
                             setProfesseur(updatedProf);
-                            setProfesseurs((prev) =>
-                              prev.map((p) =>
+                            setProfesseurs((prev: Professeur[]) =>
+                              prev.map((p: Professeur) =>
                                 p.code === updatedProf.code ? updatedProf : p
                               )
                             );
+                            alert(
+                              `✅ Tous les partages de ${expediteur} ont été supprimés.`
+                            );
+                          }
+                        }}
+                        style={{
+                          padding: "6px 12px",
+                          backgroundColor: "#f44336",
+                          color: "white",
+                          border: "none",
+                          borderRadius: "5px",
+                          cursor: "pointer",
+                        }}
+                      >
+                        🗑️ Refuser
+                      </button>
+                    </div>
 
-                            alert(`✅ "${nomFinal}" importé avec succès !`);
-                          }}
-                          style={{
-                            marginRight: "10px",
-                            padding: "6px 12px",
-                            backgroundColor: "#4CAF50",
-                            color: "white",
-                            border: "none",
-                            borderRadius: "5px",
-                            cursor: "pointer",
-                          }}
-                        >
-                          ✅ Importer
-                        </button>
+                    {ongletPartage === `voir-${idx}` && (
+                      <div style={{ marginTop: "15px" }}>
+                        {partages.map((partage: Partage, index: number) => (
+                          <div
+                            key={index}
+                            style={{
+                              borderTop: "1px solid #ccc",
+                              paddingTop: "10px",
+                              marginTop: "10px",
+                            }}
+                          >
+                            <p>
+                              <strong>
+                                {partage.type === "dossier"
+                                  ? "📁 Dossier"
+                                  : "📋 Parcours"}{" "}
+                                :
+                              </strong>{" "}
+                              {partage.nom}
+                            </p>
 
-                        <button
-                          onClick={() => {
-                            if (confirm("❌ Supprimer ce partage ?")) {
-                              const updatedProf = {
-                                ...professeur,
-                                partagesRecus: professeur.partagesRecus.filter(
-                                  (_, i) =>
-                                    !(
-                                      i ===
-                                      professeur.partagesRecus.findIndex(
-                                        (p) => p.id === partage.id
-                                      )
-                                    )
-                                ),
-                              };
-                              setProfesseur(updatedProf);
-                              setProfesseurs((prev) =>
-                                prev.map((p) =>
-                                  p.code === updatedProf.code ? updatedProf : p
-                                )
-                              );
-                              alert("✅ Partage supprimé.");
-                            }
-                          }}
-                          style={{
-                            padding: "6px 12px",
-                            backgroundColor: "#f44336",
-                            color: "white",
-                            border: "none",
-                            borderRadius: "5px",
-                            cursor: "pointer",
-                          }}
-                        >
-                          🗑️ Supprimer
-                        </button>
+                            <button
+                              onClick={() => {
+                                let nomFinal = partage.nom.trim();
+                                let doublon = true;
+
+                                while (doublon) {
+                                  const nouveauNom = prompt(
+                                    "Renommer l'élément avant importation :",
+                                    nomFinal
+                                  );
+
+                                  if (!nouveauNom || nouveauNom.trim() === "") {
+                                    alert(
+                                      "❌ Vous devez saisir un nom pour importer cet élément."
+                                    );
+                                    return;
+                                  }
+
+                                  nomFinal = nouveauNom.trim();
+
+                                  doublon =
+                                    partage.type === "parcours"
+                                      ? parcoursGlobaux.some(
+                                          (p) =>
+                                            p.nom.trim().toLowerCase() ===
+                                            nomFinal.toLowerCase()
+                                        )
+                                      : dossiersParcours.some(
+                                          (d) =>
+                                            d.nom.trim().toLowerCase() ===
+                                            nomFinal.toLowerCase()
+                                        );
+
+                                  if (doublon) {
+                                    alert(
+                                      `❌ Un ${
+                                        partage.type === "parcours"
+                                          ? "parcours"
+                                          : "dossier"
+                                      } avec ce nom existe déjà. Veuillez choisir un autre nom.`
+                                    );
+                                  }
+                                }
+
+                                if (partage.type === "dossier") {
+                                  setDossiersParcours([
+                                    ...dossiersParcours,
+                                    { ...partage, nom: nomFinal },
+                                  ]);
+                                } else if (partage.type === "parcours") {
+                                  setParcoursGlobaux([
+                                    ...parcoursGlobaux,
+                                    { ...partage, nom: nomFinal },
+                                  ]);
+                                }
+
+                                const updatedProf: Professeur = {
+                                  ...professeur,
+                                  partagesRecus:
+                                    professeur.partagesRecus.filter(
+                                      (_, i: number) =>
+                                        !(
+                                          i ===
+                                          professeur.partagesRecus.findIndex(
+                                            (p: Partage) => p.id === partage.id
+                                          )
+                                        )
+                                    ),
+                                };
+                                setProfesseur(updatedProf);
+                                setProfesseurs((prev: Professeur[]) =>
+                                  prev.map((p: Professeur) =>
+                                    p.code === updatedProf.code
+                                      ? updatedProf
+                                      : p
+                                  )
+                                );
+
+                                alert(`✅ "${nomFinal}" importé avec succès !`);
+                              }}
+                              style={{
+                                marginRight: "10px",
+                                padding: "6px 12px",
+                                backgroundColor: "#4CAF50",
+                                color: "white",
+                                border: "none",
+                                borderRadius: "5px",
+                                cursor: "pointer",
+                              }}
+                            >
+                              ✅ Importer
+                            </button>
+                          </div>
+                        ))}
                       </div>
-                    ))}
+                    )}
                   </div>
-                )}
-              </div>
-            ))
+                )
+              )}
+            </div>
           ) : (
-            <p style={{ textAlign: "center", color: "#555" }}>
-              Aucun partage reçu pour le moment.
-            </p>
+            <div>
+              <h2 style={{ textAlign: "center", marginTop: "60px" }}>
+                📥 Partages reçus
+              </h2>
+              <p style={{ textAlign: "center" }}>Aucun partage reçu</p>
+            </div>
           )}
         </div>
       ) : (
