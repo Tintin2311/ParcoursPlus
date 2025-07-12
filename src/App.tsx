@@ -1,7 +1,7 @@
 // Code complet fusionné avec les 371 lignes
 // Ce fichier contient la création de groupes, de parcours, le partage, les paramètres, etc.
 import "./styles.css";
-import ConnexionCourseOrientation from "./pages/ConnexionCourseOrientation";
+import ConnexionCourseOrientation from "./ConnexionCourseOrientation";
 
 import { createClient } from "@supabase/supabase-js";
 import { updateDataWithOwner } from "./supabaseFunctions";
@@ -1142,65 +1142,66 @@ const partages: any[] = []; // ou le typage correct selon ton projet
         </div>
       )}
 
-      {page === "motDePasseOublie" ? (
-        <div style={{ textAlign: "center", marginTop: 100 }}>
-          <button
-            onClick={() => {
-              setPage("accueil");
-              setModeConnexion("accueil");
-            }}
-            style={{ position: "absolute", top: 10, left: 10 }}
-          >
-            ⬅️ Retour
-          </button>
-          <h2>🔐 Récupération du mot de passe</h2>
-          <p>
-            Entrez votre adresse email pour recevoir un lien de réinitialisation
-            de mot de passe.
-          </p>
-          <input
-            type="email"
-            placeholder="Votre adresse email"
-            value={emailMotDePasseOublie}
-            onChange={(e) => setEmailMotDePasseOublie(e.target.value)}
-            style={{ width: "300px" }}
-          />
-          <br />
-          <button
-            onClick={async () => {
-              const email = emailMotDePasseOublie.trim().toLowerCase();
-              if (!email) {
-                alert("❌ Veuillez entrer une adresse email.");
-                return;
-              }
+    {page === "motDePasseOublie" ? (
+  <div style={{ textAlign: "center", marginTop: 100 }}>
+    <button
+      onClick={() => {
+        setPage("accueil");
+        setModeConnexion("accueil");
+      }}
+      style={{ position: "absolute", top: 10, left: 10 }}
+    >
+      ⬅️ Retour
+    </button>
+    <h2>🔐 Récupération du mot de passe</h2>
+    <p>
+      Entrez votre adresse email pour recevoir un lien de réinitialisation
+      de mot de passe.
+    </p>
+    <input
+      type="email"
+      placeholder="Votre adresse email"
+      value={emailMotDePasseOublie}
+      onChange={(e) => setEmailMotDePasseOublie(e.target.value)}
+      style={{ width: "300px" }}
+    />
+    <br />
+    <button
+      onClick={async () => {
+        const email = emailMotDePasseOublie.trim().toLowerCase();
+        if (!email) {
+          alert("❌ Veuillez entrer une adresse email.");
+          return;
+        }
 
-              try {
-                const { data, error } =
-                  await supabase.auth.resetPasswordForEmail(email, {
-                    redirectTo: "https://x7623y.csb.app",
-                  });
+        try {
+          const { data, error } = await supabase.auth.resetPasswordForEmail(email, {
+            redirectTo: "https://x7623y.csb.app",
+          });
 
-                if (error) {
-                  console.error(error);
-                  alert("❌ Erreur : " + error.message);
-                  return;
-                }
+          if (error) {
+            console.error(error);
+            alert("❌ Erreur : " + error.message);
+            return;
+          }
 
-                alert(
-                  "✅ Si un compte existe avec cet email, un lien de réinitialisation a été envoyé."
-                );
-                setPage("connexion"); // redirige vers la page de connexion
-              } catch (err) {
-                console.error(err);
-                alert("❌ Erreur inattendue : " + err.message);
-              }
-            }}
-            style={{ marginTop: 10 }}
-          >
-            📩 Envoyer le lien de réinitialisation
-          </button>
-        </div>
-  {page === "connexion" && (
+          alert(
+            "✅ Si un compte existe avec cet email, un lien de réinitialisation a été envoyé."
+          );
+          setPage("connexion");
+        } catch (err) {
+          console.error(err);
+          alert("❌ Erreur inattendue : " + err.message);
+        }
+      }}
+      style={{ marginTop: 10 }}
+    >
+      📩 Envoyer le lien de réinitialisation
+    </button>
+  </div>
+) : null}
+
+{page === "connexion" && (
   <ConnexionCourseOrientation
     setModeConnexion={setModeConnexion}
     setPage={setPage}
@@ -1211,8 +1212,6 @@ const partages: any[] = []; // ou le typage correct selon ton projet
     groupes={groupes}
   />
 )}
-
-
 
       ) : page === "personnaliserParParcours" ? (
         <div
@@ -5071,7 +5070,7 @@ const partages: any[] = []; // ou le typage correct selon ton projet
                     cursor: "pointer",
                   }}
                 >
-                  ✅ Importer
+✅ Importer
                 </button>
               </div>
             ))}
@@ -5083,7 +5082,7 @@ const partages: any[] = []; // ou le typage correct selon ton projet
 ) : (
   <div>
     <h2 style={{ textAlign: "center", marginTop: "60px" }}>
-      📥 Partages reçus
+     
     </h2>
     <p style={{ textAlign: "center" }}>Aucun partage reçu</p>
   </div>
@@ -5091,7 +5090,7 @@ const partages: any[] = []; // ou le typage correct selon ton projet
         </div>
       ) : (
         <></>
-      )}
+      )
     </div>
   );
 }

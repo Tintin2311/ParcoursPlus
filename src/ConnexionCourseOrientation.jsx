@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { MapPin, Users, Play, Trophy, ChevronRight, Eye, EyeOff, Compass, Target, Award, BookOpen, ArrowRight, ArrowLeft } from 'lucide-react';
-import { supabase } from "../supabaseClient";
-
+import supabaseClient from './supabaseClient';
 const ConnexionCourseOrientation = ({
   setModeConnexion,
   setPage,
