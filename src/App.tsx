@@ -1,6 +1,7 @@
 // Code complet fusionné avec les 371 lignes
 // Ce fichier contient la création de groupes, de parcours, le partage, les paramètres, etc.
 import "./styles.css";
+import ConnexionCourseOrientation from "./pages/ConnexionCourseOrientation";
 
 import { createClient } from "@supabase/supabase-js";
 import { updateDataWithOwner } from "./supabaseFunctions";
@@ -1199,148 +1200,20 @@ const partages: any[] = []; // ou le typage correct selon ton projet
             📩 Envoyer le lien de réinitialisation
           </button>
         </div>
-      ) : modeConnexion === "accueil" ? (
-        <>
-          {/* Lien vers création de compte */}
-          <div style={{ marginTop: 30, textAlign: "center" }}>
-            <button
-              onClick={() => {
-                setModeConnexion("creationCompteProf");
-                setPage("creationCompteProf");
-              }}
-            >
-              🧑‍🏫 Créer un compte
-            </button>
-          </div>
+  {page === "connexion" && (
+  <ConnexionCourseOrientation
+    setModeConnexion={setModeConnexion}
+    setPage={setPage}
+    setProfesseur={setProfesseur}
+    setNouveauCodeUnique={setNouveauCodeUnique}
+    setEleveConnecte={setEleveConnecte}
+    professeurs={professeurs}
+    groupes={groupes}
+  />
+)}
 
-          {/* Connexion rapide via code secret */}
-          <div style={{ textAlign: "center", marginTop: "20px" }}>
-            <h3>Connexion rapide 🔐</h3>
-            <button
-              onClick={() => {
-                const FAKE_PROF = {
-                  nom: "Professeur Secret",
-                  email: "codesecret",
-                  code: "SECRET123",
-                  password: "codesecret",
-                };
-                setProfesseur(FAKE_PROF);
-                setNouveauCodeUnique("SECRET123");
-                setModeConnexion("prof");
-              }}
-            >
-              Se connecter avec le code secret
-            </button>
-          </div>
 
-          {/* Bloc PROFESSEUR */}
-          <div style={{ borderBottom: "1px solid #ccc", paddingBottom: 20 }}>
-            <h2>Espace professeur</h2>
-            <input
-              type="email"
-              placeholder="Adresse email"
-              value={newProfEmail}
-              onChange={(e) => setNewProfEmail(e.target.value)}
-            />
-            <input
-              type="password"
-              placeholder="Mot de passe"
-              value={newProfPassword}
-              onChange={(e) => setNewProfPassword(e.target.value)}
-            />
 
-            <button
-              onClick={async () => {
-                const { data, error } = await supabase.auth.signInWithPassword({
-                  email: newProfEmail.trim().toLowerCase(),
-                  password: newProfPassword,
-                });
-
-                if (error) {
-                  alert("Email ou mot de passe incorrect.");
-                  console.error(error);
-                  return;
-                }
-
-                // Aller chercher le professeur lié à cet user_id
-                const { data: profData, error: profError } = await supabase
-                  .from("professeurs")
-                  .select("*")
-                  .eq("user_id", data.user.id)
-                  .single();
-
-                if (profError || !profData) {
-                  alert("Aucun profil professeur lié à ce compte.");
-                  console.error(profError);
-                  return;
-                }
-
-                setProfesseur(profData);
-                setNouveauCodeUnique(profData.code);
-                setModeConnexion("prof");
-                setPage("accueil");
-
-                alert("Connexion réussie !");
-              }}
-            >
-              Connexion prof
-            </button>
-            <button
-              onClick={() => {
-                setPage("motDePasseOublie");
-              }}
-            >
-              Mot de passe oublié ?
-            </button>
-          </div>
-
-          {/* Bloc ÉLÈVE */}
-          <div style={{ marginTop: 30 }}>
-            <h2>Espace élève</h2>
-            <input
-              placeholder="Code unique professeur"
-              value={codeProfEleve}
-              onChange={(e) => setCodeProfEleve(e.target.value.toUpperCase())}
-            />
-            <input
-              placeholder="Code élève"
-              value={codeEleve}
-              onChange={(e) => setCodeEleve(e.target.value)}
-              maxLength={6}
-            />
-            <button
-              onClick={() => {
-                const prof = professeurs.find((p) => p.code === codeProfEleve);
-                if (!prof) {
-                  alert("Professeur introuvable");
-                  return;
-                }
-
-                let eleveTrouve = null;
-                for (const groupe of groupes) {
-                  for (const eleve of groupe.eleves) {
-                    if (eleve.code === codeEleve) {
-                      eleveTrouve = eleve;
-                      break;
-                    }
-                  }
-                  if (eleveTrouve) break;
-                }
-
-                if (!eleveTrouve) {
-                  alert("Aucun élève trouvé avec ce code.");
-                  return;
-                }
-
-                setEleveConnecte(eleveTrouve);
-                setModeConnexion("eleve");
-                setPage("eleve");
-              }}
-            >
-              Connexion élève
-            </button>
-          </div>
-        </>
       ) : page === "personnaliserParParcours" ? (
         <div
           style={{
