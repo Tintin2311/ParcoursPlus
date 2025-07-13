@@ -32,17 +32,19 @@ interface Partage {
   type: "dossier" | "parcours";
   date?: number;
   expediteur?: string;
-  // Ajoutez d'autres propriétés selon vos besoins
-  contenu?: any; // ou un type plus spécifique selon votre structure
+  contenu?: any;
 }
 
+
 interface Professeur {
+  user_id: string;
   code: string;
   nom?: string;
   email?: string;
+  refuserPartage?: boolean;
   partagesRecus: Partage[];
-  // Ajoutez d'autres propriétés selon votre structure existante
 }
+
 function Groupes({
   parcoursGlobaux,
   groupes,
@@ -111,7 +113,50 @@ function genererCodeEleveUnique(groupes) {
 }
 
 export default function App() {
-  const [page, setPage] = useState("accueil");
+const pages = [
+  "accueil",
+  "espaceProf",
+  "espaceEleve",
+  "gestionResultats",
+  "nouveauMotDePasse",
+  "motDePasseOublie",
+  "confirmationEmail",
+  "creationCompteProf",
+  "CreerUnNouveauParcours",
+  "partageParcours",
+  "partageRecevoir",
+  "partageEnvoyer",
+  "parametres",
+  "modifierMotDePasse",
+  "gestionGroupes",
+  "gestionBalises",
+  "gestionParcours",
+  "gestionResultatsTentatives",
+  "gestionResultatsProgressivite",
+  "personnaliserParParcours",
+  "CreerUnGroupe",
+  "MesParcours",
+  "associationParcoursGroupe",
+  "infosGroupe",
+  "infosEleve",
+  "ecrireResultat",
+  "gestionPoints",
+  "saisieResultat",
+  "statistiquesEleve",
+  "mesGroupes",
+  "eleve",
+  "connexion",
+  "temporaire",
+] as const;
+
+type PageType = typeof pages[number];
+
+
+const [page, setPage] = useState<PageType>("accueil");
+
+
+
+
   useEffect(() => {
     const hash = window.location.hash; // ex: #access_token=...&type=recovery
     const params = new URLSearchParams(hash.substring(1));
@@ -244,12 +289,22 @@ export default function App() {
     dossierSelectionPourAjoutParcours,
     setDossierSelectionPourAjoutParcours,
   ] = useState(null);
-  const [baremeEvaluation, setBaremeEvaluation] = useState([
-    { type: "=", tentatives: 1, couleur: "green" },
-    { type: "=", tentatives: 2, couleur: "yellow" },
-    { type: "=", tentatives: 3, couleur: "orange" },
-    { type: "≥", tentatives: 4, couleur: "red" },
-  ]);
+  type BaremeEvaluation = {
+  type: "=" | "≥" | "≤" | "entre";
+  tentatives?: number;
+  minTentatives?: number;
+  maxTentatives?: number;
+  couleur: string;
+  points?: number | string;
+};
+
+  const [baremeEvaluation, setBaremeEvaluation] = useState<BaremeEvaluation[]>([
+  { type: "=", tentatives: 1, couleur: "green", points: 1 },
+  { type: "=", tentatives: 2, couleur: "yellow", points: 0.5 },
+  { type: "=", tentatives: 3, couleur: "orange", points: 0 },
+  { type: "≥", tentatives: 4, couleur: "red", points: -1 },
+]);
+
 
   const handleConnexion = async () => {
     const { data, error } = await supabase.auth.signInWithPassword({
@@ -725,19 +780,18 @@ export default function App() {
               📈 Barème tentatives
             </button>
             <button
-              onClick={() => setPage("gestionPoints")}
-              style={{
-                padding: "10px 20px",
-                backgroundColor:
-                  page === "gestionPoints" ? "#4CAF50" : "#f0f0f0",
-                color: page === "gestionPoints" ? "white" : "black",
-                border: "none",
-                borderRadius: "5px",
-                cursor: "pointer",
-              }}
-            >
-              🏆 Mode d'attribution des points
-            </button>
+  onClick={() => setPage("gestionPoints")}
+  style={{
+    padding: "10px 20px",
+    backgroundColor: "#f0f0f0",  // Style fixe
+    color: "black",              // Style fixe
+    border: "none",
+    borderRadius: "5px",
+    cursor: "pointer",
+  }}
+>
+  🏆 Mode d'attribution des points
+</button>
             <button
               onClick={() => setPage("gestionResultatsProgressivite")}
               style={{
@@ -817,11 +871,12 @@ export default function App() {
                   }}
                 >
                   <label>Condition :</label>
-                  <select
-                    value={bareme.type}
-                    onChange={(e) => {
-                      const newBareme = [...baremeEvaluation];
-                      newBareme[index].type = e.target.value;
+                 <select
+  value={bareme.type}
+  onChange={(e) => {
+    const value = e.target.value as "=" | "≥" | "≤" | "entre"; // ✅ Cast sécurisé
+    const newBareme = [...baremeEvaluation];
+    newBareme[index].type = value;
                       if (e.target.value === "entre") {
                         newBareme[index].minTentatives = 1;
                         newBareme[index].maxTentatives = 2;
@@ -1199,25 +1254,7 @@ export default function App() {
           </button>
         </div>
      ) : modeConnexion === "accueil" ? (
-  <ParcoursPlus
-    modeConnexion={modeConnexion}
-    setModeConnexion={setModeConnexion}
-    page={page}
-    setPage={setPage}
-    newProfEmail={newProfEmail}
-    setNewProfEmail={setNewProfEmail}
-    newProfPassword={newProfPassword}
-    setNewProfPassword={setNewProfPassword}
-    codeProfEleve={codeProfEleve}
-    setCodeProfEleve={setCodeProfEleve}
-    codeEleve={codeEleve}
-    setCodeEleve={setCodeEleve}
-    setProfesseur={setProfesseur}
-    setNouveauCodeUnique={setNouveauCodeUnique}
-    setEleveConnecte={setEleveConnecte}
-    professeurs={professeurs}
-    groupes={groupes}
-  />
+  <ParcoursPlus />
 
       ) : page === "parametres" ? (
         <div>
@@ -2055,13 +2092,15 @@ export default function App() {
                 return;
               }
 
-              const nouveauProf = {
-                nom: newProfName + " " + newProfPrenom,
-                email: newProfEmail,
-                code: genererCodeUnique(professeurs),
-                password: newProfPassword,
-                refuserPartage: false,
-              };
+             const nouveauProf = {
+  nom: newProfName + " " + newProfPrenom,
+  email: newProfEmail,
+  code: genererCodeUnique(professeurs),
+  password: newProfPassword,
+  refuserPartage: false,
+  user_id: genererCodeUnique(professeurs),
+  partagesRecus: []
+};
 
               setProfesseurs([...professeurs, nouveauProf]);
               setProfesseur(nouveauProf);
@@ -2860,6 +2899,7 @@ export default function App() {
                               0
                           )
                         );
+                        
                         const bar = baremeEvaluation.find((b) => {
                           if (b.type === "=") return essais === b.tentatives;
                           if (b.type === "≥") return essais >= b.tentatives;
@@ -4631,32 +4671,28 @@ export default function App() {
                   return;
                 }
 
-                const elementsPartages = elementsAEnvoyer.map((item) => {
-                  if (item.type === "dossier") {
-                    const dossier = dossiersParcours.find(
-                      (d) => d.id === item.id
-                    );
-                    return {
-                      expediteur: nom.trim(), // ➜ ajoute l'expéditeur
-                      type: "dossier",
-                      id: dossier.id,
-                      nom: dossier.nom,
-                      parcours: dossier.parcours,
-                    };
-                  } else if (item.type === "parcours") {
-                    const parcours = parcoursGlobaux.find(
-                      (p) => p.id === item.id
-                    );
-                    return {
-                      expediteur: nom.trim(), // ➜ ajoute l'expéditeur
-                      type: "parcours",
-                      id: parcours.id,
-                      nom: parcours.nom,
-                      balises: parcours.balises,
-                      groupesAssocies: parcours.groupesAssocies || [],
-                    };
-                  }
-                });
+                const elementsPartages: Partage[] = elementsAEnvoyer.map((item) => {
+  if (item.type === "dossier") {
+    const dossier = dossiersParcours.find((d) => d.id === item.id);
+    return {
+      expediteur: nom.trim(),
+      type: "dossier" as const, // ← Ajout de "as const"
+      id: dossier.id,
+      nom: dossier.nom,
+      parcours: dossier.parcours,
+    };
+  } else if (item.type === "parcours") {
+    const parcours = parcoursGlobaux.find((p) => p.id === item.id);
+    return {
+      expediteur: nom.trim(),
+      type: "parcours" as const, // ← Ajout de "as const"
+      id: parcours.id,
+      nom: parcours.nom,
+      balises: parcours.balises,
+      groupesAssocies: parcours.groupesAssocies || [],
+    };
+  }
+}).filter(Boolean) as Partage[]; // ← Ajout du filter et du cast final
 
                 const updatedProfesseurs = professeurs.map((p) => {
                   if (p.code === profDestinataire.code) {
