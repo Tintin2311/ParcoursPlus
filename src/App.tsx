@@ -1,6 +1,7 @@
 // Code complet fusionné avec les 371 lignes
 // Ce fichier contient la création de groupes, de parcours, le partage, les paramètres, etc.
 import "./styles.css";
+import ParcoursPlus from "./ParcoursPlus";
 
 import { createClient } from "@supabase/supabase-js";
 import { updateDataWithOwner } from "./supabaseFunctions";
@@ -1197,294 +1198,27 @@ export default function App() {
             📩 Envoyer le lien de réinitialisation
           </button>
         </div>
-      ) : modeConnexion === "accueil" ? (
-        <>
-          {/* Lien vers création de compte */}
-          <div style={{ marginTop: 30, textAlign: "center" }}>
-            <button
-              onClick={() => {
-                setModeConnexion("creationCompteProf");
-                setPage("creationCompteProf");
-              }}
-            >
-              🧑‍🏫 Créer un compte
-            </button>
-          </div>
+     ) : modeConnexion === "accueil" ? (
+  <ParcoursPlus
+    modeConnexion={modeConnexion}
+    setModeConnexion={setModeConnexion}
+    page={page}
+    setPage={setPage}
+    newProfEmail={newProfEmail}
+    setNewProfEmail={setNewProfEmail}
+    newProfPassword={newProfPassword}
+    setNewProfPassword={setNewProfPassword}
+    codeProfEleve={codeProfEleve}
+    setCodeProfEleve={setCodeProfEleve}
+    codeEleve={codeEleve}
+    setCodeEleve={setCodeEleve}
+    setProfesseur={setProfesseur}
+    setNouveauCodeUnique={setNouveauCodeUnique}
+    setEleveConnecte={setEleveConnecte}
+    professeurs={professeurs}
+    groupes={groupes}
+  />
 
-          {/* Connexion rapide via code secret */}
-          <div style={{ textAlign: "center", marginTop: "20px" }}>
-            <h3>Connexion rapide 🔐</h3>
-            <button
-              onClick={() => {
-                const FAKE_PROF = {
-                  nom: "Professeur Secret",
-                  email: "codesecret",
-                  code: "SECRET123",
-                  password: "codesecret",
-                };
-                setProfesseur(FAKE_PROF);
-                setNouveauCodeUnique("SECRET123");
-                setModeConnexion("prof");
-              }}
-            >
-              Se connecter avec le code secret
-            </button>
-          </div>
-
-          {/* Bloc PROFESSEUR */}
-          <div style={{ borderBottom: "1px solid #ccc", paddingBottom: 20 }}>
-            <h2>Espace professeur</h2>
-            <input
-              type="email"
-              placeholder="Adresse email"
-              value={newProfEmail}
-              onChange={(e) => setNewProfEmail(e.target.value)}
-            />
-            <input
-              type="password"
-              placeholder="Mot de passe"
-              value={newProfPassword}
-              onChange={(e) => setNewProfPassword(e.target.value)}
-            />
-
-            <button
-              onClick={async () => {
-                const { data, error } = await supabase.auth.signInWithPassword({
-                  email: newProfEmail.trim().toLowerCase(),
-                  password: newProfPassword,
-                });
-
-                if (error) {
-                  alert("Email ou mot de passe incorrect.");
-                  console.error(error);
-                  return;
-                }
-
-                // Aller chercher le professeur lié à cet user_id
-                const { data: profData, error: profError } = await supabase
-                  .from("professeurs")
-                  .select("*")
-                  .eq("user_id", data.user.id)
-                  .single();
-
-                if (profError || !profData) {
-                  alert("Aucun profil professeur lié à ce compte.");
-                  console.error(profError);
-                  return;
-                }
-
-                setProfesseur(profData);
-                setNouveauCodeUnique(profData.code);
-                setModeConnexion("prof");
-                setPage("accueil");
-
-                alert("Connexion réussie !");
-              }}
-            >
-              Connexion prof
-            </button>
-            <button
-              onClick={() => {
-                setPage("motDePasseOublie");
-              }}
-            >
-              Mot de passe oublié ?
-            </button>
-          </div>
-
-          {/* Bloc ÉLÈVE */}
-          <div style={{ marginTop: 30 }}>
-            <h2>Espace élève</h2>
-            <input
-              placeholder="Code unique professeur"
-              value={codeProfEleve}
-              onChange={(e) => setCodeProfEleve(e.target.value.toUpperCase())}
-            />
-            <input
-              placeholder="Code élève"
-              value={codeEleve}
-              onChange={(e) => setCodeEleve(e.target.value)}
-              maxLength={6}
-            />
-            <button
-              onClick={() => {
-                const prof = professeurs.find((p) => p.code === codeProfEleve);
-                if (!prof) {
-                  alert("Professeur introuvable");
-                  return;
-                }
-
-                let eleveTrouve = null;
-                for (const groupe of groupes) {
-                  for (const eleve of groupe.eleves) {
-                    if (eleve.code === codeEleve) {
-                      eleveTrouve = eleve;
-                      break;
-                    }
-                  }
-                  if (eleveTrouve) break;
-                }
-
-                if (!eleveTrouve) {
-                  alert("Aucun élève trouvé avec ce code.");
-                  return;
-                }
-
-                setEleveConnecte(eleveTrouve);
-                setModeConnexion("eleve");
-                setPage("eleve");
-              }}
-            >
-              Connexion élève
-            </button>
-          </div>
-        </>
-      ) : page === "personnaliserParParcours" ? (
-        <div
-          style={{
-            padding: "20px",
-            maxWidth: "700px",
-            margin: "0 auto",
-            textAlign: "center",
-          }}
-        >
-          <button
-            onClick={() => setPage("gestionPoints")}
-            style={{
-              position: "absolute",
-              top: 10,
-              left: "50%",
-              transform: "translateX(-50%)",
-              backgroundColor: "#f0f0f0",
-              border: "1px solid #ccc",
-              borderRadius: "5px",
-              padding: "6px 12px",
-              cursor: "pointer",
-            }}
-          >
-            ⬅️ Retour
-          </button>
-
-          <h2>🎨 Personnaliser par parcours</h2>
-          <p style={{ color: "#555", fontSize: "0.95em" }}>
-            Définissez pour chaque parcours les points attribués, points de
-            tentative (si activé) et points par balise.
-          </p>
-
-          <label
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: "10px",
-              margin: "20px 0",
-            }}
-          >
-            <input
-              type="checkbox"
-              checked={!prendEnCompteTentatives}
-              onChange={(e) => setPrendEnCompteTentatives(!e.target.checked)}
-            />
-            Ne pas prendre en compte le nombre de tentatives
-          </label>
-
-          {parcoursGlobaux.length === 0 ? (
-            <p style={{ marginTop: "40px", color: "#777" }}>
-              Aucun parcours disponible.
-            </p>
-          ) : (
-            parcoursGlobaux.map((parcours) => (
-              <div
-                key={parcours.id}
-                style={{
-                  border: "1px solid #ccc",
-                  borderRadius: "8px",
-                  padding: "15px",
-                  margin: "15px 0",
-                  background: "#f9f9f9",
-                  textAlign: "left",
-                }}
-              >
-                <strong>📋 {parcours.nom}</strong>
-                <div
-                  style={{
-                    marginTop: "10px",
-                    display: "flex",
-                    flexWrap: "wrap",
-                    gap: "15px",
-                    alignItems: "center",
-                  }}
-                >
-                  <label>
-                    Points si terminé :
-                    <input
-                      type="number"
-                      min={0}
-                      value={
-                        baremePointsParcours[parcours.id]?.pointsParcours ?? 0
-                      }
-                      onChange={(e) =>
-                        setBaremePointsParcours({
-                          ...baremePointsParcours,
-                          [parcours.id]: {
-                            ...(baremePointsParcours[parcours.id] ?? {}),
-                            pointsParcours: parseInt(e.target.value),
-                          },
-                        })
-                      }
-                      style={{ marginLeft: "10px", width: "80px" }}
-                    />
-                  </label>
-
-                  {!prendEnCompteTentatives && (
-                    <label>
-                      Points par tentative :
-                      <input
-                        type="number"
-                        min={0}
-                        value={
-                          baremePointsParcours[parcours.id]?.pointsTentatives ??
-                          0
-                        }
-                        onChange={(e) =>
-                          setBaremePointsParcours({
-                            ...baremePointsParcours,
-                            [parcours.id]: {
-                              ...(baremePointsParcours[parcours.id] ?? {}),
-                              pointsTentatives: parseInt(e.target.value),
-                            },
-                          })
-                        }
-                        style={{ marginLeft: "10px", width: "80px" }}
-                      />
-                    </label>
-                  )}
-
-                  <label>
-                    Points par balise :
-                    <input
-                      type="number"
-                      min={0}
-                      value={
-                        baremePointsParcours[parcours.id]?.pointsParBalise ?? 0
-                      }
-                      onChange={(e) =>
-                        setBaremePointsParcours({
-                          ...baremePointsParcours,
-                          [parcours.id]: {
-                            ...(baremePointsParcours[parcours.id] ?? {}),
-                            pointsParBalise: parseInt(e.target.value),
-                          },
-                        })
-                      }
-                      style={{ marginLeft: "10px", width: "80px" }}
-                    />
-                  </label>
-                </div>
-              </div>
-            ))
-          )}
-        </div>
       ) : page === "parametres" ? (
         <div>
           <h2 style={{ textAlign: "center", marginTop: "80px" }}>

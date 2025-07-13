@@ -1,6 +1,20 @@
-import React, { useState, useEffect } from 'react';
-import { MapPin, Users, Play, Trophy, ChevronRight, Eye, EyeOff, Compass, Target, Award, BookOpen, ArrowRight, ArrowLeft } from 'lucide-react';
-import supabaseClient from './supabaseClient';
+import React, { useState, useEffect } from "react";
+import {
+  MapPin,
+  Users,
+  Play,
+  Trophy,
+  ChevronRight,
+  Eye,
+  EyeOff,
+  Compass,
+  Target,
+  Award,
+  BookOpen,
+  ArrowRight,
+  ArrowLeft,
+} from "lucide-react";
+import supabaseClient from "./src/supabaseClient";
 const ConnexionCourseOrientation = ({
   setModeConnexion,
   setPage,
@@ -8,7 +22,7 @@ const ConnexionCourseOrientation = ({
   setNouveauCodeUnique,
   setEleveConnecte,
   professeurs,
-  groupes
+  groupes,
 }) => {
   const [modeLocalConnexion, setModeLocalConnexion] = useState("accueil"); // ← utilisé pour animation locale si besoin
   const [newProfEmail, setNewProfEmail] = useState("");
@@ -101,8 +115,14 @@ const ConnexionCourseOrientation = ({
         {/* Animated Background Elements */}
         <div className="absolute inset-0 overflow-hidden">
           <div className="absolute -top-40 -right-40 w-80 h-80 bg-purple-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-pulse"></div>
-          <div className="absolute -bottom-40 -left-40 w-80 h-80 bg-cyan-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-pulse" style={{animationDelay: '2s'}}></div>
-          <div className="absolute top-1/2 left-1/2 w-40 h-40 bg-emerald-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-pulse transform -translate-x-1/2 -translate-y-1/2" style={{animationDelay: '4s'}}></div>
+          <div
+            className="absolute -bottom-40 -left-40 w-80 h-80 bg-cyan-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-pulse"
+            style={{ animationDelay: "2s" }}
+          ></div>
+          <div
+            className="absolute top-1/2 left-1/2 w-40 h-40 bg-emerald-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-pulse transform -translate-x-1/2 -translate-y-1/2"
+            style={{ animationDelay: "4s" }}
+          ></div>
         </div>
 
         {/* Geometric Patterns */}
@@ -112,7 +132,11 @@ const ConnexionCourseOrientation = ({
           <div className="absolute top-1/3 right-1/4 w-16 h-16 border-2 border-white rotate-45"></div>
         </div>
 
-        <div className={`relative z-10 container mx-auto px-4 py-8 transition-all duration-1000 ${isLoaded ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-10'}`}>
+        <div
+          className={`relative z-10 container mx-auto px-4 py-8 transition-all duration-1000 ${
+            isLoaded ? "opacity-100 translate-y-0" : "opacity-0 translate-y-10"
+          }`}
+        >
           {/* Header */}
           <div className="text-center mb-12">
             <div className="inline-flex items-center justify-center w-24 h-24 bg-gradient-to-br from-emerald-400 via-cyan-500 to-blue-600 rounded-2xl mb-6 shadow-2xl transform hover:scale-110 transition-all duration-500 hover:rotate-3 relative overflow-hidden group">
@@ -123,20 +147,27 @@ const ConnexionCourseOrientation = ({
               Parcours+
             </h1>
             <p className="text-xl text-slate-300 max-w-3xl mx-auto leading-relaxed font-light">
-              Plateforme numérique pour l'enseignement de la course d'orientation
+              Plateforme numérique pour l'enseignement de la course
+              d'orientation
             </p>
             {/* Subtle Feature Icons */}
             <div className="flex justify-center items-center gap-8 mt-8 opacity-60">
               <div className="group cursor-pointer" title="Gestion des groupes">
                 <Users className="w-6 h-6 text-emerald-400 group-hover:scale-125 transition-transform duration-300" />
               </div>
-              <div className="group cursor-pointer" title="Sessions interactives">
+              <div
+                className="group cursor-pointer"
+                title="Sessions interactives"
+              >
                 <Target className="w-6 h-6 text-cyan-400 group-hover:scale-125 transition-transform duration-300" />
               </div>
               <div className="group cursor-pointer" title="Suivi des progrès">
                 <Award className="w-6 h-6 text-purple-400 group-hover:scale-125 transition-transform duration-300" />
               </div>
-              <div className="group cursor-pointer" title="Ressources pédagogiques">
+              <div
+                className="group cursor-pointer"
+                title="Ressources pédagogiques"
+              >
                 <BookOpen className="w-6 h-6 text-orange-400 group-hover:scale-125 transition-transform duration-300" />
               </div>
             </div>
@@ -151,13 +182,17 @@ const ConnexionCourseOrientation = ({
             >
               {/* Effet de brillance animé */}
               <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/5 to-transparent -skew-x-12 group-hover:translate-x-full transition-transform duration-1000 ease-out"></div>
-              
+
               <div className="relative z-10">
                 <div className="w-20 h-20 bg-gradient-to-r from-emerald-400 to-cyan-500 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg group-hover:rotate-6 transition-transform duration-300">
                   <span className="text-4xl">🧑‍🏫</span>
                 </div>
-                <h2 className="text-3xl font-bold text-white mb-2">Espace Professeur</h2>
-                <p className="text-emerald-300 text-sm">Créez et gérez vos parcours</p>
+                <h2 className="text-3xl font-bold text-white mb-2">
+                  Espace Professeur
+                </h2>
+                <p className="text-emerald-300 text-sm">
+                  Créez et gérez vos parcours
+                </p>
               </div>
             </button>
 
@@ -168,13 +203,17 @@ const ConnexionCourseOrientation = ({
             >
               {/* Effet de brillance animé */}
               <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/5 to-transparent -skew-x-12 group-hover:translate-x-full transition-transform duration-1000 ease-out"></div>
-              
+
               <div className="relative z-10">
                 <div className="w-20 h-20 bg-gradient-to-r from-blue-400 to-purple-500 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg group-hover:rotate-6 transition-transform duration-300">
                   <span className="text-4xl">🎓</span>
                 </div>
-                <h2 className="text-3xl font-bold text-white mb-2">Espace Élève</h2>
-                <p className="text-blue-300 text-sm">Rejoignez votre parcours</p>
+                <h2 className="text-3xl font-bold text-white mb-2">
+                  Espace Élève
+                </h2>
+                <p className="text-blue-300 text-sm">
+                  Rejoignez votre parcours
+                </p>
               </div>
             </button>
           </div>
@@ -219,7 +258,10 @@ const ConnexionCourseOrientation = ({
 
           {/* Footer */}
           <div className="text-center text-slate-500 text-xs">
-            <p>© 2025 Parcours+ - Plateforme éducative pour la course d'orientation</p>
+            <p>
+              © 2025 Parcours+ - Plateforme éducative pour la course
+              d'orientation
+            </p>
           </div>
         </div>
       </div>
@@ -233,10 +275,17 @@ const ConnexionCourseOrientation = ({
         {/* Animated Background Elements */}
         <div className="absolute inset-0 overflow-hidden">
           <div className="absolute -top-40 -right-40 w-80 h-80 bg-emerald-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-pulse"></div>
-          <div className="absolute -bottom-40 -left-40 w-80 h-80 bg-cyan-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-pulse" style={{animationDelay: '2s'}}></div>
+          <div
+            className="absolute -bottom-40 -left-40 w-80 h-80 bg-cyan-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-pulse"
+            style={{ animationDelay: "2s" }}
+          ></div>
         </div>
 
-        <div className={`relative z-10 container mx-auto px-4 py-8 transition-all duration-1000 ${isLoaded ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-10'}`}>
+        <div
+          className={`relative z-10 container mx-auto px-4 py-8 transition-all duration-1000 ${
+            isLoaded ? "opacity-100 translate-y-0" : "opacity-0 translate-y-10"
+          }`}
+        >
           {/* Header avec bouton retour */}
           <div className="flex items-center justify-between mb-8">
             <button
@@ -246,7 +295,6 @@ const ConnexionCourseOrientation = ({
               <ArrowLeft className="w-5 h-5 mr-2 group-hover:-translate-x-1 transition-transform duration-200" />
               <span className="text-sm">Retour à l'accueil</span>
             </button>
-            
             <div className="text-center">
               <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-emerald-400 to-cyan-500 rounded-2xl mb-3 shadow-2xl">
                 <span className="text-2xl">🧑‍🏫</span>
@@ -255,7 +303,6 @@ const ConnexionCourseOrientation = ({
                 Espace Professeur
               </h1>
             </div>
-            
             <div className="w-24"></div> {/* Spacer pour centrer le titre */}
           </div>
 
@@ -324,10 +371,17 @@ const ConnexionCourseOrientation = ({
         {/* Animated Background Elements */}
         <div className="absolute inset-0 overflow-hidden">
           <div className="absolute -top-40 -right-40 w-80 h-80 bg-blue-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-pulse"></div>
-          <div className="absolute -bottom-40 -left-40 w-80 h-80 bg-purple-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-pulse" style={{animationDelay: '2s'}}></div>
+          <div
+            className="absolute -bottom-40 -left-40 w-80 h-80 bg-purple-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-pulse"
+            style={{ animationDelay: "2s" }}
+          ></div>
         </div>
 
-        <div className={`relative z-10 container mx-auto px-4 py-8 transition-all duration-1000 ${isLoaded ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-10'}`}>
+        <div
+          className={`relative z-10 container mx-auto px-4 py-8 transition-all duration-1000 ${
+            isLoaded ? "opacity-100 translate-y-0" : "opacity-0 translate-y-10"
+          }`}
+        >
           {/* Header avec bouton retour */}
           <div className="flex items-center justify-between mb-8">
             <button
@@ -337,7 +391,6 @@ const ConnexionCourseOrientation = ({
               <ArrowLeft className="w-5 h-5 mr-2 group-hover:-translate-x-1 transition-transform duration-200" />
               <span className="text-sm">Retour à l'accueil</span>
             </button>
-            
             <div className="text-center">
               <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-blue-400 to-purple-500 rounded-2xl mb-3 shadow-2xl">
                 <span className="text-2xl">🎓</span>
@@ -346,7 +399,6 @@ const ConnexionCourseOrientation = ({
                 Espace Élève
               </h1>
             </div>
-            
             <div className="w-24"></div> {/* Spacer pour centrer le titre */}
           </div>
 
@@ -359,7 +411,9 @@ const ConnexionCourseOrientation = ({
                     type="text"
                     placeholder="Code unique professeur"
                     value={codeProfEleve}
-                    onChange={(e) => setCodeProfEleve(e.target.value.toUpperCase())}
+                    onChange={(e) =>
+                      setCodeProfEleve(e.target.value.toUpperCase())
+                    }
                     className="w-full px-4 py-4 rounded-xl bg-white/5 backdrop-blur-sm border border-white/20 text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500/50 transition-all duration-300 hover:bg-white/10 uppercase tracking-widest font-mono"
                   />
                 </div>
@@ -392,8 +446,12 @@ const ConnexionCourseOrientation = ({
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-800 flex items-center justify-center">
       <div className="bg-white/10 backdrop-blur-xl rounded-3xl p-8 text-center border border-white/20 max-w-md w-full mx-4">
-        <h2 className="text-white text-3xl font-bold mb-6">Mode {modeConnexion}</h2>
-        <p className="text-slate-400 mb-8">Cette fonctionnalité sera bientôt disponible</p>
+        <h2 className="text-white text-3xl font-bold mb-6">
+          Mode {modeConnexion}
+        </h2>
+        <p className="text-slate-400 mb-8">
+          Cette fonctionnalité sera bientôt disponible
+        </p>
         <button
           onClick={() => setModeConnexion("accueil")}
           className="bg-gradient-to-r from-emerald-500 to-cyan-600 text-white px-8 py-4 rounded-2xl font-semibold hover:from-emerald-600 hover:to-cyan-700 transition-all duration-300 hover:scale-105 flex items-center justify-center mx-auto"
