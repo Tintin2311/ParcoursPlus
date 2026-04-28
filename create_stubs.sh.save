@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(pwd)"
+ts() { date +%Y%m%d-%H%M%S; }
+
+echo "➡️  Génération des fichiers minimaux…"
+
+# 1) MinimalScreen utilitaire (racine)
+if [[ -f MinimalScreen.tsx ]]; then
+  cp MinimalScreen.tsx "MinimalScreen.tsx.bak.$(ts)"
+fi
+cat > MinimalScreen.tsx <<'TSX'
+import React from "react";
+import { View, Text, Pressable } from "react-native";
+
+type Props = { setPage?: (p: string) => void; title?: string };
+
+export default function MinimalScreen({ title = "Écran", setPage }: Props) {
+  return (
+    <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <Text style={{ fontSize: 22, fontWeight: "700", marginBottom: 8 }}>{title}</Text>
+      <Text style={{ opacity: 0.7, marginBottom: 16 }}>
+        Placeholder minimal — web / iOS / Android
+      </Text>
+      {setPage && (
+        <Pressable
+          onPress={() => setPage("accueil")}
+          style={{ paddingHorizontal: 16, paddingVertical: 10, backgroundColor: "#2563eb", 
+borderRadius: 10 }}
+        >
+          <Text style={{ color: "#fff", fontWeight: "600" }}>Retour à l’accueil</Text>
+        </Pressable>
+      )}
+    </View>
+  );
+}
+TSX
+
+# 2) Liste des écrans à stub
+screens=(
+  AccueilProf Parametres GestionGroupes GestionEleves GestionBalises GestionParcours
+  CreerUnNouveauParcours MesParcours NouveauMotDePasse GestionResultats
+  GestionResultatsTentatives GestionResultatsProgressivite GestionPoints
+  Association AccueilEleve EcrireResultat StatistiquesEleve MotDePasseOublie
+  PartageParcours ObjectifsEleve ConfigurationPersonnalisee
+)
+
+# 3) Créer chaque stub
+for name in "${screens[@]}"; do
+  file="$ROOT/$name.tsx"
+  if [[ -f "$file" ]]; then
+    cp "$file" "$file.bak.$(ts)"
+  fi
+  cat > "$file" <<TSX
+import MinimalScreen from "./MinimalScreen";
+export default function $name(props:any){ return <MinimalScreen title="${name//_/ }" {...props} />; }
+TSX
+  echo "✅ $name.tsx"
+done
+
+# 4) Wrapper App.tsx à la racine
+if [[ -f App.tsx ]]; then
+  cp App.tsx "App.tsx.bak.$(ts)"
+fi
+cat > App.tsx <<'TSX'
+// App.tsx (wrapper racine)
+export { default } from "./src/App";
+TSX
+echo "✅ App.tsx (wrapper) régénéré"
+
+# 5) Vérification des fichiers critiques
+if [[ ! -f src/ParcoursPlus.tsx ]]; then
+  echo "⚠️  src/ParcoursPlus.tsx est introuvable !"
+fi
+if [[ ! -f src/supabaseClient.ts ]]; then
+  echo "⚠️  src/supabaseClient.ts est introuvable !"
+fi
+
+# 6) Purge cache Expo et relance
+echo "🧹 Purge du cache Expo…"
+rm -rf .expo || true
+echo "🚀 Lancement Expo (web)…"
+npx expo start --web -c
+
+

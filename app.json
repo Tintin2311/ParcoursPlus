@@ -1,0 +1,37 @@
+{
+  "expo": {
+    "name": "ParcoursPlusV2",
+    "slug": "parcoursplusv2",
+    "scheme": "parcoursplusv2",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./Images/icon.png",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "image": "./Images/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.parcoursplus.v2"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./Images/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "package": "com.parcoursplus.v2"
+    },
+    "web": {
+      "bundler": "metro",
+      "favicon": "./Images/favicon.png"
+    },
+    "plugins": [
+      "expo-barcode-scanner"
+    ]
+  }
+}
