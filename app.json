@@ -28,7 +28,7 @@
     },
     "web": {
       "bundler": "metro",
-      "favicon": "./Images/icon.png"
+      "favicon": "./web/favicon.png"
     },
     "plugins": [
       "expo-barcode-scanner"
