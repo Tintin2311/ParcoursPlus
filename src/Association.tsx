@@ -28,19 +28,19 @@ type Props = {
 type ParcoursRow = {
   id: string;
   nom?: string | null;
-  name?: string | null;
   folder_id?: string | null;
-  groupes_associes?: string[] | null;
+  groupes_associes?: any;
+  created_at?: string | null;
   [key: string]: any;
 };
 
 type FolderRow = {
   id: string;
   nom?: string | null;
-  name?: string | null;
   parent_folder_id?: string | null;
   parent_id?: string | null;
-  groupes_associes?: string[] | null;
+  groupes_associes?: any;
+  created_at?: string | null;
   [key: string]: any;
 };
 
@@ -49,6 +49,7 @@ type GroupRow = {
   nom?: string | null;
   name?: string | null;
   folder_id?: string | null;
+  created_at?: string | null;
   [key: string]: any;
 };
 
@@ -201,6 +202,46 @@ function InformationAssociations({
 }
 
 /* ======================= Helpers ======================= */
+const normalizeGroupesAssocies = (value: any): string[] => {
+  if (!value) return [];
+
+  if (Array.isArray(value)) {
+    return value.map((v) => String(v).trim()).filter(Boolean);
+  }
+
+  if (typeof value === "string") {
+    const raw = value.trim();
+    if (!raw) return [];
+
+    if (raw.startsWith("{") && raw.endsWith("}")) {
+      return raw
+        .slice(1, -1)
+        .split(",")
+        .map((v) => v.trim().replace(/^"(.*)"$/, "$1"))
+        .filter(Boolean);
+    }
+
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed.map((v) => String(v).trim()).filter(Boolean);
+      }
+    } catch {
+      // ignore
+    }
+
+    return [raw];
+  }
+
+  return [];
+};
+
+const sameStringArray = (a: string[], b: string[]) => {
+  const aa = [...new Set(a)].sort();
+  const bb = [...new Set(b)].sort();
+  return JSON.stringify(aa) === JSON.stringify(bb);
+};
+
 const pastelByStatus = (status: AssocStatus) => {
   switch (status) {
     case "full":
@@ -374,10 +415,7 @@ function GroupPickerModal({
         }}
         style={[
           styles.modalOption,
-          {
-            marginLeft: depth * 14,
-            opacity: disabled ? 0.45 : 1,
-          },
+          { marginLeft: depth * 14, opacity: disabled ? 0.45 : 1 },
           selected && {
             borderColor: palette.border,
             backgroundColor: palette.tint,
@@ -391,7 +429,7 @@ function GroupPickerModal({
             end={{ x: 1, y: 1 }}
             style={styles.modalOptionAvatar}
           >
-            <Text style={[styles.modalOptionAvatarText, { color: palette.text }]}>
+            <Text style={[styles.modalOptionAvatarText, { color: palette.text }]}> 
               {shortCode(getDisplayName(group))}
             </Text>
           </LinearGradient>
@@ -534,12 +572,6 @@ export default function GestionAssociationsParcours({
   const [isCopying, setIsCopying] = useState(false);
   const [copyStatus, setCopyStatus] = useState<null | "success" | "error" | "warning">(null);
 
-  const normalizeGroupesAssocies = (value: any): string[] => {
-    if (!value) return [];
-    if (Array.isArray(value)) return value.filter(Boolean);
-    return [];
-  };
-
   useEffect(() => {
     if (
       selectedSourceGroup &&
@@ -598,11 +630,12 @@ export default function GestionAssociationsParcours({
   );
 
   const updateParcoursInSupabase = useCallback(async (parcoursId: string, newGroupesAssocies: string[]) => {
+    const cleanAssociations = [...new Set(normalizeGroupesAssocies(newGroupesAssocies))];
     setSavingStatus((prev) => ({ ...prev, [`parcours-${parcoursId}`]: "saving" }));
 
     const { error } = await supabase
       .from("parcours")
-      .update({ groupes_associes: newGroupesAssocies })
+      .update({ groupes_associes: cleanAssociations })
       .eq("id", parcoursId);
 
     if (error) {
@@ -620,11 +653,12 @@ export default function GestionAssociationsParcours({
   }, []);
 
   const updateFolderInSupabase = useCallback(async (folderId: string, newGroupesAssocies: string[]) => {
+    const cleanAssociations = [...new Set(normalizeGroupesAssocies(newGroupesAssocies))];
     setSavingStatus((prev) => ({ ...prev, [`dossier-${folderId}`]: "saving" }));
 
     const { error } = await supabase
       .from("parcours_folders")
-      .update({ groupes_associes: newGroupesAssocies })
+      .update({ groupes_associes: cleanAssociations })
       .eq("id", folderId);
 
     if (error) {
@@ -653,19 +687,17 @@ export default function GestionAssociationsParcours({
         const folder = parcoursFoldersData.find((f) => f.id === currentFolderId);
         if (!folder) break;
 
-        const nestedParcours = (() => {
-          const gather = (folderId: string): ParcoursRow[] => {
-            const direct = updatedParcoursSnapshot.filter((p) => p.folder_id === folderId);
-            const childFolders = parcoursFoldersData.filter((f) => (getParentFolderId(f) ?? null) === folderId);
-            let res = [...direct];
-            childFolders.forEach((child) => {
-              res = [...res, ...gather(child.id)];
-            });
-            return res;
-          };
-          return gather(folder.id);
-        })();
+        const gather = (folderId: string): ParcoursRow[] => {
+          const direct = updatedParcoursSnapshot.filter((p) => p.folder_id === folderId);
+          const childFolders = parcoursFoldersData.filter((f) => (getParentFolderId(f) ?? null) === folderId);
+          let res = [...direct];
+          childFolders.forEach((child) => {
+            res = [...res, ...gather(child.id)];
+          });
+          return res;
+        };
 
+        const nestedParcours = gather(folder.id);
         const shouldBeAssociated = nestedParcours.some((p) =>
           normalizeGroupesAssocies(p.groupes_associes).includes(groupeId)
         );
@@ -681,15 +713,11 @@ export default function GestionAssociationsParcours({
           nextAssociations = currentAssociations.filter((id) => id !== groupeId);
         }
 
-        if (JSON.stringify(nextAssociations) !== JSON.stringify(currentAssociations)) {
+        if (!sameStringArray(nextAssociations, currentAssociations)) {
           setParcoursFoldersData((prev) =>
             prev.map((f) => (f.id === folder.id ? { ...f, groupes_associes: nextAssociations } : f))
           );
-          try {
-            await updateFolderInSupabase(folder.id, nextAssociations);
-          } catch {
-            // noop
-          }
+          await updateFolderInSupabase(folder.id, nextAssociations);
         }
 
         currentFolderId = getParentFolderId(folder);
@@ -1023,7 +1051,7 @@ export default function GestionAssociationsParcours({
 
     if (status === "saving") {
       return (
-        <View style={[styles.savePill, { backgroundColor: "rgba(59,130,246,0.10)" }]}>
+        <View style={[styles.savePill, { backgroundColor: "rgba(59,130,246,0.10)" }]}> 
           <ActivityIndicator size="small" color="#2563EB" />
         </View>
       );
@@ -1031,14 +1059,14 @@ export default function GestionAssociationsParcours({
 
     if (status === "saved") {
       return (
-        <View style={[styles.savePill, { backgroundColor: "rgba(16,185,129,0.12)" }]}>
+        <View style={[styles.savePill, { backgroundColor: "rgba(16,185,129,0.12)" }]}> 
           <Feather name="check" size={11} color="#059669" />
         </View>
       );
     }
 
     return (
-      <View style={[styles.savePill, { backgroundColor: "rgba(239,68,68,0.12)" }]}>
+      <View style={[styles.savePill, { backgroundColor: "rgba(239,68,68,0.12)" }]}> 
         <Feather name="x" size={11} color="#DC2626" />
       </View>
     );
@@ -1111,17 +1139,16 @@ export default function GestionAssociationsParcours({
     const isFolder = item.type === "dossier";
     const leftPadding = 8 + item.indentation * (isPhone ? 12 : 18);
 
-    const leftPalette =
-      isFolder
-        ? pastelByStatus(
-            selectedSourceGroup ? getFolderStatus(item, selectedSourceGroup) : "not_associated"
-          )
-        : pastelByStatus(
-            selectedSourceGroup &&
-              normalizeGroupesAssocies(item.groupes_associes).includes(selectedSourceGroup)
-              ? "parcours_on"
-              : "parcours_off"
-          );
+    const leftPalette = isFolder
+      ? pastelByStatus(
+          selectedSourceGroup ? getFolderStatus(item, selectedSourceGroup) : "not_associated"
+        )
+      : pastelByStatus(
+          selectedSourceGroup &&
+            normalizeGroupesAssocies(item.groupes_associes).includes(selectedSourceGroup)
+            ? "parcours_on"
+            : "parcours_off"
+        );
 
     return (
       <View key={`${item.type}-${item.id}`} style={styles.tableRow}>
@@ -1192,7 +1219,7 @@ export default function GestionAssociationsParcours({
   };
 
   return (
-    <SafeAreaView style={[styles.root, { backgroundColor: C_BG }]}>
+    <SafeAreaView style={[styles.root, { backgroundColor: C_BG }]}> 
       <View style={styles.header}>
         <TouchableOpacity
           activeOpacity={0.9}
@@ -1246,7 +1273,7 @@ export default function GestionAssociationsParcours({
                 style={styles.searchInput}
               />
               {!!searchTerm && (
-                <TouchableOpacity activeOpacity={0.9} onPress={() => setSearchTerm("")}>
+                <TouchableOpacity activeOpacity={0.9} onPress={() => setSearchTerm("")}> 
                   <Feather name="x" size={18} color={C_MUTED} />
                 </TouchableOpacity>
               )}

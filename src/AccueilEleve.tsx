@@ -8,13 +8,17 @@ import {
   Pressable,
   Modal,
   ActivityIndicator,
+  useWindowDimensions,
 } from "react-native";
 import { Feather } from "@expo/vector-icons";
 import BottomBarEleve from "./ui/BottomBarEleve";
 import { supabase } from "./supabaseClient";
 
-const BG =
+const BG_MOBILE =
   "https://aswhubzprehjnunbpkwc.supabase.co/storage/v1/object/public/background/AccueilEleveBackground.png";
+
+const BG_PAYSAGE =
+  "https://aswhubzprehjnunbpkwc.supabase.co/storage/v1/object/public/background/AccueilElevePaysage.png";
 
 type EleveMin = {
   id?: string | null;
@@ -36,6 +40,13 @@ const AccueilEleve: React.FC<Props> = ({
   eleveConnecte,
   handleDeconnexion,
 }) => {
+  const { width, height } = useWindowDimensions();
+
+  const isLandscape = width > height;
+  const isLargeScreen = width >= 768;
+
+  const backgroundImage = isLandscape || isLargeScreen ? BG_PAYSAGE : BG_MOBILE;
+
   const nom = (
     eleveConnecte?.display_name ??
     eleveConnecte?.name ??
@@ -49,7 +60,6 @@ const AccueilEleve: React.FC<Props> = ({
   const [confirmVisible, setConfirmVisible] = React.useState(false);
   const [loggingOut, setLoggingOut] = React.useState(false);
 
-  // 🔥 LOAD SCORE FROM SUPABASE
   React.useEffect(() => {
     const loadScore = async () => {
       if (!eleveConnecte?.id) {
@@ -78,6 +88,7 @@ const AccueilEleve: React.FC<Props> = ({
 
   const onLogout = async () => {
     if (loggingOut) return;
+
     try {
       setLoggingOut(true);
       await handleDeconnexion();
@@ -89,12 +100,14 @@ const AccueilEleve: React.FC<Props> = ({
 
   return (
     <View style={styles.root}>
-      <ImageBackground source={{ uri: BG }} style={styles.bg}>
+      <ImageBackground
+        source={{ uri: backgroundImage }}
+        style={styles.bg}
+        resizeMode="cover"
+      >
         <View style={styles.overlay} />
 
-        {/* TOP HUD */}
         <View style={styles.topHud}>
-          {/* SCORE */}
           <View style={styles.scoreChip}>
             {loading ? (
               <ActivityIndicator color="white" size="small" />
@@ -106,10 +119,16 @@ const AccueilEleve: React.FC<Props> = ({
             )}
           </View>
 
-          {/* NAME */}
-          <Text style={styles.name}>{nom}</Text>
+          <Text
+            style={[
+              styles.name,
+              isLargeScreen && styles.nameLargeScreen,
+            ]}
+            numberOfLines={1}
+          >
+            {nom}
+          </Text>
 
-          {/* LOGOUT BUTTON */}
           <Pressable
             onPress={() => setConfirmVisible(true)}
             style={styles.logoutBtn}
@@ -118,7 +137,6 @@ const AccueilEleve: React.FC<Props> = ({
           </Pressable>
         </View>
 
-        {/* MODAL */}
         <Modal transparent visible={confirmVisible} animationType="fade">
           <View style={styles.modalBg}>
             <View style={styles.modalBox}>
@@ -131,14 +149,14 @@ const AccueilEleve: React.FC<Props> = ({
                   style={styles.cancelBtn}
                   onPress={() => setConfirmVisible(false)}
                 >
-                  <Text style={{ color: "#ccc" }}>Annuler</Text>
+                  <Text style={styles.cancelText}>Annuler</Text>
                 </Pressable>
 
                 <Pressable style={styles.confirmBtn} onPress={onLogout}>
                   {loggingOut ? (
                     <ActivityIndicator color="#fff" />
                   ) : (
-                    <Text style={{ color: "#fff" }}>Déconnexion</Text>
+                    <Text style={styles.confirmText}>Déconnexion</Text>
                   )}
                 </Pressable>
               </View>
@@ -146,7 +164,6 @@ const AccueilEleve: React.FC<Props> = ({
           </View>
         </Modal>
 
-        {/* BOTTOM BAR */}
         <BottomBarEleve
           currentPage="AccueilEleve"
           onNavigate={(page) => setPage(page)}
@@ -159,8 +176,14 @@ const AccueilEleve: React.FC<Props> = ({
 export default AccueilEleve;
 
 const styles = StyleSheet.create({
-  root: { flex: 1 },
-  bg: { flex: 1 },
+  root: {
+    flex: 1,
+  },
+
+  bg: {
+    flex: 1,
+  },
+
   overlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: "rgba(0,0,0,0.15)",
@@ -173,13 +196,16 @@ const styles = StyleSheet.create({
     right: 12,
     alignItems: "center",
     justifyContent: "center",
+    zIndex: 20,
   },
 
   scoreChip: {
     position: "absolute",
     left: 0,
     flexDirection: "row",
-    padding: 8,
+    alignItems: "center",
+    paddingVertical: 8,
+    paddingHorizontal: 10,
     borderRadius: 20,
     backgroundColor: "rgba(0,0,0,0.4)",
   },
@@ -189,16 +215,25 @@ const styles = StyleSheet.create({
     fontWeight: "900",
     fontSize: 14,
   },
+
   unit: {
     color: "#ccc",
     fontSize: 12,
+    fontWeight: "800",
   },
 
   name: {
+    maxWidth: "55%",
     color: "#fff",
     fontSize: 26,
     fontWeight: "900",
     letterSpacing: 2,
+    textAlign: "center",
+  },
+
+  nameLargeScreen: {
+    fontSize: 32,
+    maxWidth: "70%",
   },
 
   logoutBtn: {
@@ -221,6 +256,7 @@ const styles = StyleSheet.create({
 
   modalBox: {
     width: "85%",
+    maxWidth: 420,
     padding: 20,
     borderRadius: 20,
     backgroundColor: "#111827",
@@ -231,20 +267,38 @@ const styles = StyleSheet.create({
     fontSize: 18,
     textAlign: "center",
     marginBottom: 20,
+    fontWeight: "700",
   },
 
   modalActions: {
     flexDirection: "row",
     justifyContent: "space-between",
+    gap: 12,
   },
 
   cancelBtn: {
+    flex: 1,
     padding: 12,
+    alignItems: "center",
+    borderRadius: 10,
+    backgroundColor: "rgba(255,255,255,0.08)",
   },
 
   confirmBtn: {
+    flex: 1,
     padding: 12,
+    alignItems: "center",
     backgroundColor: "#dc2626",
     borderRadius: 10,
+  },
+
+  cancelText: {
+    color: "#ccc",
+    fontWeight: "800",
+  },
+
+  confirmText: {
+    color: "#fff",
+    fontWeight: "900",
   },
 });

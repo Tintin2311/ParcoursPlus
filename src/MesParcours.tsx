@@ -440,6 +440,7 @@ const buildDeleteErrorMessage = (e: any, fallback: string) => {
 const MesParcours: React.FC<Props> = ({
   setPage,
   setParcoursId = () => {},
+  professeur = null,
 }) => {
   const [items, setItems] = useState<TreeItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -745,14 +746,25 @@ const MesParcours: React.FC<Props> = ({
 
         const nextOrdre = Math.max(-1, ...baseList.map((i) => i.ordre ?? 0)) + 1;
 
-        const { error } = await supabase.from("parcours_folders").insert({
-          name: finalName,
-          description: folderDescription.trim() || null,
-          color: folderColor,
-          icon: folderIcon,
-          parent_folder_id: currentFolder?.id ?? null,
-          ordre: nextOrdre,
-        });
+       const { data: authData, error: authError } = await supabase.auth.getUser();
+
+if (authError) throw authError;
+
+const ownerId = authData.user?.id ?? null;
+
+if (!ownerId) {
+  throw new Error("Impossible de créer le dossier : utilisateur non connecté.");
+}
+
+const { error } = await supabase.from("parcours_folders").insert({
+  name: finalName,
+  description: folderDescription.trim() || null,
+  color: folderColor,
+  icon: folderIcon,
+  parent_folder_id: currentFolder?.id ?? null,
+  ordre: nextOrdre,
+  user_id: ownerId,
+});
 
         if (error) throw error;
       } else if (editingFolderId) {
@@ -777,7 +789,7 @@ const MesParcours: React.FC<Props> = ({
     } finally {
       setSavingFolder(false);
     }
-  }, [
+   }, [
     folderName,
     folderDescription,
     folderColor,

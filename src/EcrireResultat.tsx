@@ -1,3 +1,4 @@
+// src/EcrireResultat.tsx
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
@@ -39,6 +40,7 @@ type RpcStudentRow = {
 type GroupRow = {
   id: string;
   name?: string | null;
+  nom?: string | null;
 };
 
 type ParcoursRow = {
@@ -48,6 +50,7 @@ type ParcoursRow = {
   folder_id?: string | null;
   groupes_associes?: any;
   balises_ordre?: any;
+  ordre?: number | null;
   created_at?: string | null;
   [key: string]: any;
 };
@@ -58,9 +61,23 @@ type FolderRow = {
   name?: string | null;
   parent_folder_id?: string | null;
   groupes_associes?: any;
+  ordre?: number | null;
   created_at?: string | null;
   [key: string]: any;
 };
+
+type ParcoursStatRow = {
+  parcours_id: string;
+  best_score?: number | null;
+  last_score?: number | null;
+  total_balises?: number | null;
+  tentatives_count?: number | null;
+  parcours_termine?: boolean | null;
+  best_points?: number | null;
+  last_points?: number | null;
+};
+
+type ParcoursStatus = "not_started" | "started" | "completed";
 
 type RenderedNode =
   | (FolderRow & {
@@ -99,6 +116,20 @@ const C_BLUE = "#60A5FA";
 ========================= */
 const getDisplayName = (row: any) =>
   String(row?.nom ?? row?.name ?? "Sans nom");
+
+const sortByOrdreThenDate = (a: any, b: any) => {
+  const ordreA = Number.isFinite(Number(a?.ordre)) ? Number(a.ordre) : 999999;
+  const ordreB = Number.isFinite(Number(b?.ordre)) ? Number(b.ordre) : 999999;
+
+  if (ordreA !== ordreB) return ordreA - ordreB;
+
+  const dateA = a?.created_at ? new Date(a.created_at).getTime() : 0;
+  const dateB = b?.created_at ? new Date(b.created_at).getTime() : 0;
+
+  if (dateA !== dateB) return dateA - dateB;
+
+  return getDisplayName(a).localeCompare(getDisplayName(b), "fr");
+};
 
 const normalizeAssoc = (value: any): string[] => {
   if (!value) return [];
@@ -176,6 +207,25 @@ const parseStoredStudent = (raw: string | null): EleveConnecte | null => {
   }
 };
 
+const getStatusFromStat = (stat?: ParcoursStatRow | null): ParcoursStatus => {
+  if (!stat) return "not_started";
+
+  const bestScore = Number(stat.best_score ?? 0);
+  const lastScore = Number(stat.last_score ?? 0);
+  const totalBalises = Number(stat.total_balises ?? 0);
+  const tentativesCount = Number(stat.tentatives_count ?? 0);
+
+  const completedByBool = stat.parcours_termine === true;
+  const completedByScore =
+    totalBalises > 0 && (bestScore >= totalBalises || lastScore >= totalBalises);
+
+  if (completedByBool || completedByScore) return "completed";
+
+  if (tentativesCount > 0 || bestScore > 0 || lastScore > 0) return "started";
+
+  return "not_started";
+};
+
 /* =========================
    Component
 ========================= */
@@ -194,11 +244,13 @@ const EcrireResultat: React.FC<Props> = ({
 
   const [parcoursData, setParcoursData] = useState<ParcoursRow[]>([]);
   const [foldersData, setFoldersData] = useState<FolderRow[]>([]);
+  const [parcoursStats, setParcoursStats] = useState<Record<string, ParcoursStatRow>>({});
 
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [searchTerm, setSearchTerm] = useState("");
 
   const groupId = resolvedEleve?.group_id ?? null;
+  const studentId = resolvedEleve?.id ?? resolvedEleve?.uuid ?? null;
   const eleveNom = resolvedEleve?.display_name ?? "Élève";
 
   const resolveEleveAndClasse = useCallback(async () => {
@@ -245,12 +297,12 @@ const EcrireResultat: React.FC<Props> = ({
     if (merged.group_id) {
       const { data: groupData, error: groupError } = await supabase
         .from("groups")
-        .select("id, name")
+        .select("id, name, nom")
         .eq("id", merged.group_id)
         .maybeSingle();
 
       if (!groupError && groupData) {
-        groupName = (groupData as GroupRow).name ?? null;
+        groupName = getDisplayName(groupData as GroupRow);
       }
     }
 
@@ -266,12 +318,40 @@ const EcrireResultat: React.FC<Props> = ({
     return merged;
   }, [eleveConnecte]);
 
+  const fetchParcoursStats = useCallback(async (resolvedStudentId: string | null) => {
+    if (!resolvedStudentId) {
+      setParcoursStats({});
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("eleve_parcours_stats")
+      .select(
+        "parcours_id,best_score,last_score,total_balises,tentatives_count,parcours_termine,best_points,last_points"
+      )
+      .eq("student_id", resolvedStudentId);
+
+    if (error) {
+      console.warn("Impossible de charger les stats parcours élève :", error);
+      setParcoursStats({});
+      return;
+    }
+
+    const map: Record<string, ParcoursStatRow> = {};
+    ((data as ParcoursStatRow[]) || []).forEach((row) => {
+      if (row?.parcours_id) map[String(row.parcours_id)] = row;
+    });
+
+    setParcoursStats(map);
+  }, []);
+
   const fetchData = useCallback(async () => {
     setLoading(true);
     setScreenError(null);
 
     try {
-      await resolveEleveAndClasse();
+      const eleve = await resolveEleveAndClasse();
+      const resolvedStudentId = eleve?.id ?? eleve?.uuid ?? null;
 
       let nextParcours = Array.isArray(parcoursGlobaux) ? parcoursGlobaux : [];
       let nextFolders = Array.isArray(dossiersParcours) ? dossiersParcours : [];
@@ -280,6 +360,7 @@ const EcrireResultat: React.FC<Props> = ({
         const { data, error } = await supabase
           .from("parcours")
           .select("*")
+          .order("ordre", { ascending: true, nullsFirst: false })
           .order("created_at", { ascending: true });
 
         if (error) throw error;
@@ -290,27 +371,33 @@ const EcrireResultat: React.FC<Props> = ({
         const { data, error } = await supabase
           .from("parcours_folders")
           .select("*")
+          .order("ordre", { ascending: true, nullsFirst: false })
           .order("created_at", { ascending: true });
 
         if (error) throw error;
         nextFolders = data || [];
       }
 
-      setParcoursData(
-        (nextParcours || []).map((p) => ({
+      const normalizedParcours = (nextParcours || [])
+        .map((p) => ({
           ...p,
           nom: getDisplayName(p),
           groupes_associes: normalizeAssoc(p.groupes_associes),
         }))
-      );
+        .sort(sortByOrdreThenDate);
 
-      setFoldersData(
-        (nextFolders || []).map((f) => ({
+      const normalizedFolders = (nextFolders || [])
+        .map((f) => ({
           ...f,
           nom: getDisplayName(f),
           groupes_associes: normalizeAssoc(f.groupes_associes),
         }))
-      );
+        .sort(sortByOrdreThenDate);
+
+      setParcoursData(normalizedParcours);
+      setFoldersData(normalizedFolders);
+
+      await fetchParcoursStats(resolvedStudentId);
 
       setExpandedFolders(new Set());
     } catch (err: any) {
@@ -319,7 +406,7 @@ const EcrireResultat: React.FC<Props> = ({
     } finally {
       setLoading(false);
     }
-  }, [parcoursGlobaux, dossiersParcours, resolveEleveAndClasse]);
+  }, [parcoursGlobaux, dossiersParcours, resolveEleveAndClasse, fetchParcoursStats]);
 
   useEffect(() => {
     fetchData();
@@ -336,13 +423,17 @@ const EcrireResultat: React.FC<Props> = ({
 
   const getDirectFolders = useCallback(
     (parentId: string | null) =>
-      foldersData.filter((f) => (f.parent_folder_id ?? null) === parentId),
+      foldersData
+        .filter((f) => (f.parent_folder_id ?? null) === parentId)
+        .sort(sortByOrdreThenDate),
     [foldersData]
   );
 
   const getDirectParcours = useCallback(
     (folderId: string | null) =>
-      parcoursData.filter((p) => (p.folder_id ?? null) === folderId),
+      parcoursData
+        .filter((p) => (p.folder_id ?? null) === folderId)
+        .sort(sortByOrdreThenDate),
     [parcoursData]
   );
 
@@ -432,20 +523,69 @@ const EcrireResultat: React.FC<Props> = ({
     const depth = Math.min(item.depth, 6);
     const offset = depth * 16;
 
+    const stat = !isFolder ? parcoursStats[item.id] : null;
+    const status = !isFolder ? getStatusFromStat(stat) : "not_started";
+
+    const isCompleted = status === "completed";
+    const isStarted = status === "started";
+
+    const parcoursCardStyle = isCompleted
+      ? styles.parcoursCardDone
+      : isStarted
+      ? styles.parcoursCardStarted
+      : styles.parcoursCard;
+
+    const iconColors = isFolder
+      ? ["#1E3A8A", "#2563EB"]
+      : isCompleted
+      ? ["#16A34A", "#22C55E"]
+      : isStarted
+      ? ["#F59E0B", "#FB923C"]
+      : ["#7C3AED", "#2563EB"];
+
+    const rightIcon = isFolder
+      ? expandedFolders.has(item.id)
+        ? "chevron-down"
+        : "chevron-right"
+      : isCompleted
+      ? "check-circle"
+      : isStarted
+      ? "clock"
+      : "arrow-right-circle";
+
+    const rightColor = isFolder
+      ? C_MUTED
+      : isCompleted
+      ? "#86EFAC"
+      : isStarted
+      ? "#FDBA74"
+      : "#FCD34D";
+
+    const subtitle = isFolder
+      ? "Dossier"
+      : isCompleted
+      ? "Parcours validé"
+      : isStarted
+      ? "Parcours commencé"
+      : "Parcours";
+
     return (
       <View
         style={[
           styles.nodeCard,
-          isFolder ? styles.folderCard : styles.parcoursCard,
+          isFolder ? styles.folderCard : parcoursCardStyle,
           depth > 0 && {
             marginLeft: offset,
             borderLeftWidth: 4,
-            borderLeftColor:
-              depth === 1
-                ? "rgba(96,165,250,0.35)"
-                : depth === 2
-                ? "rgba(167,139,250,0.35)"
-                : "rgba(245,158,11,0.35)",
+            borderLeftColor: isCompleted
+              ? "rgba(34,197,94,0.55)"
+              : isStarted
+              ? "rgba(245,158,11,0.55)"
+              : depth === 1
+              ? "rgba(96,165,250,0.35)"
+              : depth === 2
+              ? "rgba(167,139,250,0.35)"
+              : "rgba(245,158,11,0.35)",
           },
         ]}
       >
@@ -459,7 +599,7 @@ const EcrireResultat: React.FC<Props> = ({
             }}
           >
             <LinearGradient
-              colors={isFolder ? ["#1E3A8A", "#2563EB"] : ["#7C3AED", "#2563EB"]}
+              colors={iconColors as [string, string]}
               start={{ x: 0, y: 0 }}
               end={{ x: 1, y: 1 }}
               style={styles.nodeIcon}
@@ -470,6 +610,10 @@ const EcrireResultat: React.FC<Props> = ({
                     ? expandedFolders.has(item.id)
                       ? "folder-minus"
                       : "folder"
+                    : isCompleted
+                    ? "check"
+                    : isStarted
+                    ? "clock"
                     : "play"
                 }
                 size={16}
@@ -481,20 +625,10 @@ const EcrireResultat: React.FC<Props> = ({
               <Text numberOfLines={1} style={styles.nodeTitle}>
                 {item.displayName}
               </Text>
-              <Text style={styles.nodeSubtitle}>
-                {isFolder ? "Dossier" : "Parcours"}
-              </Text>
+              <Text style={styles.nodeSubtitle}>{subtitle}</Text>
             </View>
 
-            {isFolder ? (
-              <Feather
-                name={expandedFolders.has(item.id) ? "chevron-down" : "chevron-right"}
-                size={16}
-                color={C_MUTED}
-              />
-            ) : (
-              <Feather name="arrow-right-circle" size={18} color="#FCD34D" />
-            )}
+            <Feather name={rightIcon as any} size={18} color={rightColor} />
           </TouchableOpacity>
         </View>
       </View>
@@ -719,6 +853,15 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.03)",
     borderColor: "rgba(167,139,250,0.18)",
   },
+  parcoursCardStarted: {
+    backgroundColor: "rgba(245,158,11,0.13)",
+    borderColor: "rgba(245,158,11,0.45)",
+  },
+  parcoursCardDone: {
+    backgroundColor: "rgba(34,197,94,0.13)",
+    borderColor: "rgba(34,197,94,0.48)",
+  },
+
   nodeRow: {
     minHeight: 56,
     justifyContent: "center",

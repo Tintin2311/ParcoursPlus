@@ -1,3 +1,4 @@
+// src/EcrireCodeBaliseEleve.tsx
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
@@ -23,7 +24,6 @@ import {
   ParcoursBaremeTentativeRow,
   ParcoursPointsConfig,
   TentativeRow,
-  buildProgressFromAttempts,
   buildTentativesDebugState,
   computeCurrentDisplayedScore,
   computeTentativeGainBreakdown,
@@ -33,6 +33,7 @@ import {
   loadParcoursTentativeBaremeRows,
   loadResolvedTentativeConfig,
   parseNumeric,
+  recomputeAndSyncStats,
   sanitize,
   saveTentativeWithStats,
 } from "./CalculPointTentatives";
@@ -114,6 +115,46 @@ const isUuidLike = (value: string) =>
   );
 
 const isIntegerLike = (value: string) => /^\d+$/.test(value.trim());
+
+const safeParseObject = (value: any): any => {
+  if (!value) return null;
+  if (typeof value === "object") return value;
+  if (typeof value !== "string") return null;
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+};
+
+const toBool = (value: any, fallback = false): boolean => {
+  if (typeof value === "boolean") return value;
+  if (value == null) return fallback;
+  if (typeof value === "number") return value !== 0;
+
+  const s = String(value).trim().toLowerCase();
+  if (["true", "1", "yes", "oui", "on"].includes(s)) return true;
+  if (["false", "0", "no", "non", "off"].includes(s)) return false;
+  return fallback;
+};
+
+const parseJsonObject = (value: any): any => {
+  const parsed = safeParseObject(value);
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+};
+
+const parseAssignments = (value: any): Record<string, number> => {
+  const obj = parseJsonObject(value);
+  const out: Record<string, number> = {};
+
+  Object.entries(obj).forEach(([key, raw]) => {
+    const n = Number(raw);
+    if (key && Number.isFinite(n) && n >= 1) out[key] = n;
+  });
+
+  return out;
+};
 
 const extractTokens = (value: any): string[] => {
   if (value == null) return [];
@@ -235,6 +276,160 @@ const formatConditionLabel = (
   return `${row.condition_type} ${row.attempts_value ?? "?"}`;
 };
 
+const getModesFromRow = (row: any) => {
+  const modes = parseJsonObject(row?.modes);
+  const config = parseJsonObject(row?.config);
+  const settings = parseJsonObject(row?.settings_json);
+
+  return {
+    balises: toBool(
+      modes?.balises ?? config?.modes?.balises ?? config?.balises ?? settings?.modes?.balises ?? settings?.balises,
+      false
+    ),
+    parcours: toBool(
+      modes?.parcours ?? config?.modes?.parcours ?? config?.parcours ?? settings?.modes?.parcours ?? settings?.parcours,
+      false
+    ),
+    tentatives: toBool(
+      modes?.tentatives ?? config?.modes?.tentatives ?? config?.tentatives ?? settings?.modes?.tentatives ?? settings?.tentatives,
+      false
+    ),
+  };
+};
+
+const getNumberFromRow = (row: any, keys: string[], fallback = 0) => {
+  const config = parseJsonObject(row?.config);
+  const settings = parseJsonObject(row?.settings_json);
+
+  for (const key of keys) {
+    const value = row?.[key] ?? config?.[key] ?? settings?.[key];
+    if (value != null) return parseNumeric(value, fallback);
+  }
+
+  return fallback;
+};
+
+const scoreConfigRow = (row: any) => {
+  const modes = getModesFromRow(row);
+  const pointsParParcours = getNumberFromRow(row, ["points_par_parcours", "pointsParParcours"], 0);
+  const updated = row?.updated_at ? new Date(row.updated_at).getTime() : 0;
+
+  return (
+    (pointsParParcours > 0 ? 1_000_000 : 0) +
+    (modes.parcours ? 500_000 : 0) +
+    (modes.balises ? 50_000 : 0) +
+    (modes.tentatives ? 50_000 : 0) +
+    pointsParParcours +
+    (Number.isFinite(updated) ? updated / 1_000_000_000_000 : 0)
+  );
+};
+
+const mergeConfigWithBestSupabaseRow = async (
+  groupId: string | null,
+  parcoursId: string | undefined,
+  baseConfig: ParcoursPointsConfig
+): Promise<ParcoursPointsConfig> => {
+  if (!groupId) return baseConfig;
+
+  const { data, error } = await supabase
+    .from("group_points_configs")
+    .select("*")
+    .eq("group_id", groupId)
+    .order("updated_at", { ascending: false, nullsFirst: false })
+    .limit(20);
+
+  if (error || !data || !Array.isArray(data) || data.length === 0) {
+    return baseConfig;
+  }
+
+  const bestRow = [...data].sort((a, b) => scoreConfigRow(b) - scoreConfigRow(a))[0];
+  const rowModes = getModesFromRow(bestRow);
+  const pointsParParcours = getNumberFromRow(
+    bestRow,
+    ["points_par_parcours", "pointsParParcours"],
+    baseConfig.pointsParParcours
+  );
+  const pointsParBalise = getNumberFromRow(
+    bestRow,
+    ["points_par_balise", "pointsParBalise"],
+    baseConfig.pointsParBalise
+  );
+  const pointsPerCorrect = getNumberFromRow(
+    bestRow,
+    ["points_per_correct", "pointsPerCorrect"],
+    baseConfig.pointsPerCorrect
+  );
+
+  const tentativePageMode =
+    bestRow?.tentative_page_mode === "personnalise" || bestRow?.tentativePageMode === "personnalise"
+      ? "personnalise"
+      : "general";
+
+  const tentativePageDefault =
+    bestRow?.tentative_page_default == null && bestRow?.tentativePageDefault == null
+      ? baseConfig.tentativePageDefault
+      : Number(bestRow?.tentative_page_default ?? bestRow?.tentativePageDefault) || null;
+
+  const assignments = parseAssignments(
+    bestRow?.tentative_page_assignments ?? bestRow?.tentativePageAssignments
+  );
+
+  const modes = {
+    balises: rowModes.balises || baseConfig.modes.balises,
+    parcours: rowModes.parcours || baseConfig.modes.parcours || pointsParParcours > 0,
+    tentatives: rowModes.tentatives || baseConfig.modes.tentatives,
+  };
+
+  if (!modes.balises && !modes.parcours && !modes.tentatives) {
+    modes.balises = true;
+  }
+
+  const fixedConfig: ParcoursPointsConfig = {
+    ...baseConfig,
+    modes,
+    pointsParParcours,
+    pointsParBalise,
+    pointsPerCorrect,
+    tentativePageMode,
+    tentativePageDefault,
+    tentativePageAssignments: Object.keys(assignments).length
+      ? assignments
+      : baseConfig.tentativePageAssignments,
+  };
+
+  console.log("CONFIG FORCEE DEPUIS group_points_configs", {
+    groupId,
+    parcoursId,
+    row: {
+      id: bestRow?.id,
+      modes: bestRow?.modes,
+      points_par_parcours: bestRow?.points_par_parcours,
+      updated_at: bestRow?.updated_at,
+      score: scoreConfigRow(bestRow),
+    },
+    fixedConfig,
+  });
+
+  return fixedConfig;
+};
+
+const loadStatParcoursTermine = async (
+  studentId: string | null,
+  parcoursId: string | undefined
+): Promise<boolean> => {
+  if (!studentId || !parcoursId) return false;
+
+  const { data, error } = await supabase
+    .from("eleve_parcours_stats")
+    .select("parcours_termine")
+    .eq("student_id", studentId)
+    .eq("parcours_id", parcoursId)
+    .maybeSingle();
+
+  if (error) return false;
+  return data?.parcours_termine === true;
+};
+
 /* =========================
    Component
 ========================= */
@@ -266,6 +461,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   const [tentativesCount, setTentativesCount] = useState(0);
   const [savedPointsTotal, setSavedPointsTotal] = useState(0);
   const [lastPointsGain, setLastPointsGain] = useState(0);
+  const [parcoursTermineDb, setParcoursTermineDb] = useState(false);
 
   const [pointsConfig, setPointsConfig] = useState<ParcoursPointsConfig>(
     getDefaultPointsConfig()
@@ -281,6 +477,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   const parcoursNom = useMemo(() => getDisplayName(parcoursActif), [parcoursActif]);
   const validatedSet = useMemo(() => new Set(validatedBaliseIds), [validatedBaliseIds]);
   const isCompleted = balises.length > 0 && validatedBaliseIds.length >= balises.length;
+  const isCompletedEffective = isCompleted || parcoursTermineDb;
 
   const statCardWidth = useMemo(() => {
     const gap = 8;
@@ -314,6 +511,28 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     };
   }, [eleveConnecte?.code, eleveConnecte?.group_id, eleveConnecte?.id]);
 
+  const forceParcoursBonusIfNeeded = useCallback(
+    ({
+      rawTotal,
+      score,
+      config,
+      isTermine,
+    }: {
+      rawTotal: number;
+      score: ReturnType<typeof computeCurrentDisplayedScore>;
+      config: ParcoursPointsConfig;
+      isTermine: boolean;
+    }) => {
+      if (!isTermine) return rawTotal;
+      if (!config.modes.parcours) return rawTotal;
+      if (!config.pointsParParcours || config.pointsParParcours <= 0) return rawTotal;
+      if (score.parcoursPoints > 0) return rawTotal;
+
+      return rawTotal + Number(config.pointsParParcours || 0);
+    },
+    []
+  );
+
   const loadAttemptsAndConfig = useCallback(
     async (
       resolvedStudentId: string | null,
@@ -321,41 +540,129 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       resolvedParcoursId?: string,
       orderedBalises: BaliseAffichee[] = []
     ) => {
-      const [attempts, resolvedConfig] = await Promise.all([
-        loadAttemptsHistory(resolvedStudentId, resolvedParcoursId),
-        loadResolvedTentativeConfig(resolvedGroupId, resolvedParcoursId),
-      ]);
+      const baseResolvedConfig = await loadResolvedTentativeConfig(
+        resolvedGroupId,
+        resolvedParcoursId
+      );
+
+      const fixedPointsConfig = await mergeConfigWithBestSupabaseRow(
+        resolvedGroupId,
+        resolvedParcoursId,
+        baseResolvedConfig.pointsConfig
+      );
+
+      const fixedAttemptPage =
+        fixedPointsConfig.tentativePageMode === "personnalise"
+          ? resolvedParcoursId
+            ? fixedPointsConfig.tentativePageAssignments[resolvedParcoursId] ?? null
+            : null
+          : fixedPointsConfig.tentativePageDefault ?? baseResolvedConfig.resolvedAttemptPage;
 
       const baremes = await loadParcoursTentativeBaremeRows(
-        resolvedConfig.resolvedProfesseurId,
-        resolvedConfig.resolvedAttemptPage
+        baseResolvedConfig.resolvedProfesseurId,
+        fixedAttemptPage
       );
 
-      const progress = buildProgressFromAttempts(
-        attempts,
-        orderedBalises.length,
-        orderedBalises,
-        resolvedConfig.pointsConfig,
-        baremes
-      );
+      const progress = await recomputeAndSyncStats({
+        studentId: resolvedStudentId,
+        parcoursId: resolvedParcoursId,
+        balises: orderedBalises,
+        pointsConfig: fixedPointsConfig,
+        tentativeBaremeRows: baremes,
+      });
+
+      const [attempts, dbTermine] = await Promise.all([
+        loadAttemptsHistory(resolvedStudentId, resolvedParcoursId),
+        loadStatParcoursTermine(resolvedStudentId, resolvedParcoursId),
+      ]);
+
+      const effectiveTermine =
+        dbTermine || progress.parcoursTermine ||
+        (orderedBalises.length > 0 && progress.validatedIds.length >= orderedBalises.length);
+
+      const scoreNow = computeCurrentDisplayedScore({
+        balises: orderedBalises,
+        validatedIds: progress.validatedIds,
+        completionAttemptNumber: progress.completionAttemptNumber,
+        pointsConfig: fixedPointsConfig,
+        tentativeBaremeRows: baremes,
+      });
+
+      const correctedTotal = forceParcoursBonusIfNeeded({
+        rawTotal: scoreNow.totalPoints,
+        score: scoreNow,
+        config: fixedPointsConfig,
+        isTermine: effectiveTermine,
+      });
+
+      if (
+        resolvedStudentId &&
+        resolvedParcoursId &&
+        effectiveTermine &&
+        correctedTotal !== progress.totalPoints
+      ) {
+        await supabase
+          .from("eleve_parcours_stats")
+          .update({
+            best_points: correctedTotal,
+            last_points: correctedTotal,
+            parcours_termine: true,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("student_id", resolvedStudentId)
+          .eq("parcours_id", resolvedParcoursId);
+      }
+
+      console.log("DEBUG SCORE PARCOURS FINAL", {
+        modes: fixedPointsConfig.modes,
+        pointsParParcours: fixedPointsConfig.pointsParParcours,
+        totalBalises: orderedBalises.length,
+        validatedCount: progress.validatedIds.length,
+        completionAttemptNumber: progress.completionAttemptNumber,
+        parcoursTermineDb: dbTermine,
+        effectiveTermine,
+        scoreNow,
+        correctedTotal,
+        baremeRows: baremes.length,
+        fixedAttemptPage,
+      });
 
       setAttemptsHistory(attempts);
       setValidatedBaliseIds(progress.validatedIds);
       setCompletionAttemptNumber(progress.completionAttemptNumber);
       setSavedScore(progress.validatedCount);
       setTentativesCount(progress.tentativesCount);
-      setSavedPointsTotal(progress.totalPoints);
+      setSavedPointsTotal(correctedTotal);
       setLastPointsGain(progress.lastPointsGain);
+      setParcoursTermineDb(effectiveTermine);
 
-      setPointsConfig(resolvedConfig.pointsConfig);
-      setResolvedTentativePage(resolvedConfig.resolvedAttemptPage);
-      setResolvedTentativeGroupId(resolvedConfig.resolvedGroupId);
-      setResolvedProfesseurId(resolvedConfig.resolvedProfesseurId);
-      setSupportParcoursId(resolvedConfig.supportParcoursId);
+      setPointsConfig(fixedPointsConfig);
+      setResolvedTentativePage(fixedAttemptPage);
+      setResolvedTentativeGroupId(baseResolvedConfig.resolvedGroupId);
+      setResolvedProfesseurId(baseResolvedConfig.resolvedProfesseurId);
+      setSupportParcoursId(baseResolvedConfig.supportParcoursId);
       setTentativeBaremeRows(baremes);
     },
-    []
+    [forceParcoursBonusIfNeeded]
   );
+
+  const resetProgress = useCallback(() => {
+    setBalises([]);
+    setAttemptsHistory([]);
+    setValidatedBaliseIds([]);
+    setCompletionAttemptNumber(null);
+    setSavedScore(0);
+    setTentativesCount(0);
+    setSavedPointsTotal(0);
+    setLastPointsGain(0);
+    setParcoursTermineDb(false);
+    setPointsConfig(getDefaultPointsConfig());
+    setTentativeBaremeRows([]);
+    setResolvedTentativePage(null);
+    setResolvedTentativeGroupId(null);
+    setResolvedProfesseurId(null);
+    setSupportParcoursId(null);
+  }, []);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -363,20 +670,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
 
     try {
       if (!parcoursActif?.id) {
-        setBalises([]);
-        setAttemptsHistory([]);
-        setValidatedBaliseIds([]);
-        setCompletionAttemptNumber(null);
-        setSavedScore(0);
-        setTentativesCount(0);
-        setSavedPointsTotal(0);
-        setLastPointsGain(0);
-        setPointsConfig(getDefaultPointsConfig());
-        setTentativeBaremeRows([]);
-        setResolvedTentativePage(null);
-        setResolvedTentativeGroupId(null);
-        setResolvedProfesseurId(null);
-        setSupportParcoursId(null);
+        resetProgress();
         return;
       }
 
@@ -454,43 +748,46 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     } catch (err: any) {
       console.error("Erreur EcrireCodeBaliseEleve:", err);
       setScreenError(err?.message || "Impossible de charger les données du parcours.");
-      setBalises([]);
-      setAttemptsHistory([]);
-      setValidatedBaliseIds([]);
-      setCompletionAttemptNumber(null);
-      setSavedScore(0);
-      setTentativesCount(0);
-      setSavedPointsTotal(0);
-      setLastPointsGain(0);
-      setPointsConfig(getDefaultPointsConfig());
-      setTentativeBaremeRows([]);
-      setResolvedTentativePage(null);
-      setResolvedTentativeGroupId(null);
-      setResolvedProfesseurId(null);
-      setSupportParcoursId(null);
+      resetProgress();
     } finally {
       setLoading(false);
     }
-  }, [loadAttemptsAndConfig, parcoursActif, resolveStudent]);
+  }, [loadAttemptsAndConfig, parcoursActif, resetProgress, resolveStudent]);
 
   useEffect(() => {
     loadAll();
   }, [loadAll]);
 
   const liveScore = useMemo(() => {
-    return computeCurrentDisplayedScore({
+    const score = computeCurrentDisplayedScore({
       balises,
       validatedIds: validatedBaliseIds,
       completionAttemptNumber,
       pointsConfig,
       tentativeBaremeRows,
     });
+
+    if (
+      isCompletedEffective &&
+      pointsConfig.modes.parcours &&
+      pointsConfig.pointsParParcours > 0 &&
+      score.parcoursPoints <= 0
+    ) {
+      return {
+        ...score,
+        parcoursPoints: pointsConfig.pointsParParcours,
+        totalPoints: score.totalPoints + pointsConfig.pointsParParcours,
+      };
+    }
+
+    return score;
   }, [
     balises,
     validatedBaliseIds,
     completionAttemptNumber,
     pointsConfig,
     tentativeBaremeRows,
+    isCompletedEffective,
   ]);
 
   const debugState = useMemo(() => {
@@ -555,6 +852,14 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     lines.push(`Balises validées : ${validatedBaliseIds.length}/${balises.length}`);
     lines.push(`Tentatives effectuées : ${tentativesCount}`);
     lines.push(`Dernier gain : ${formatPoints(lastPointsGain)} pts`);
+    lines.push("");
+
+    lines.push(`Modes actifs :`);
+    lines.push(`• Balises : ${pointsConfig.modes.balises ? "oui" : "non"}`);
+    lines.push(`• Parcours terminé : ${pointsConfig.modes.parcours ? "oui" : "non"}`);
+    lines.push(`• Tentatives : ${pointsConfig.modes.tentatives ? "oui" : "non"}`);
+    lines.push(`Bonus parcours : ${formatPoints(pointsConfig.pointsParParcours)} pts`);
+    lines.push(`parcours_termine DB : ${parcoursTermineDb ? "true" : "false"}`);
     lines.push("");
 
     lines.push(`Mode tentatives : ${pointsConfig.tentativePageMode}`);
@@ -630,9 +935,8 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     balises.length,
     tentativesCount,
     lastPointsGain,
-    pointsConfig.tentativePageMode,
-    pointsConfig.pointsPerCorrect,
-    pointsConfig.pointsParBalise,
+    pointsConfig,
+    parcoursTermineDb,
     resolvedTentativePage,
     studentGroupId,
     resolvedTentativeGroupId,
@@ -676,6 +980,53 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         new Set([...validatedBaliseIds, ...result.newlyValidatedIds])
       );
 
+      const nextCompletionAttemptNumber =
+        breakdown.willComplete && completionAttemptNumber == null
+          ? breakdown.tentativeNumero
+          : completionAttemptNumber;
+
+      const nextProgress = await recomputeAndSyncStats({
+        studentId,
+        parcoursId: parcoursActif.id,
+        balises,
+        pointsConfig,
+        tentativeBaremeRows,
+      });
+
+      const dbTermine = await loadStatParcoursTermine(studentId, parcoursActif.id);
+      const effectiveTermine =
+        dbTermine ||
+        nextProgress.parcoursTermine ||
+        (balises.length > 0 && nextProgress.validatedIds.length >= balises.length);
+
+      const recomputedScore = computeCurrentDisplayedScore({
+        balises,
+        validatedIds: nextProgress.validatedIds.length ? nextProgress.validatedIds : nextValidatedIds,
+        completionAttemptNumber: nextProgress.completionAttemptNumber ?? nextCompletionAttemptNumber,
+        pointsConfig,
+        tentativeBaremeRows,
+      });
+
+      const correctedTotal = forceParcoursBonusIfNeeded({
+        rawTotal: recomputedScore.totalPoints,
+        score: recomputedScore,
+        config: pointsConfig,
+        isTermine: effectiveTermine,
+      });
+
+      if (effectiveTermine) {
+        await supabase
+          .from("eleve_parcours_stats")
+          .update({
+            best_points: correctedTotal,
+            last_points: correctedTotal,
+            parcours_termine: true,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("student_id", studentId)
+          .eq("parcours_id", parcoursActif.id);
+      }
+
       const newAttemptRow: TentativeRow = {
         student_id: studentId,
         parcours_id: parcoursActif.id,
@@ -686,30 +1037,14 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         details: result.details as AttemptDetail[],
       };
 
-      const nextAttemptsHistory = [...attemptsHistory, newAttemptRow];
-      const nextCompletionAttemptNumber =
-        breakdown.willComplete && completionAttemptNumber == null
-          ? breakdown.tentativeNumero
-          : completionAttemptNumber;
-
-      const recomputedScore = computeCurrentDisplayedScore({
-        balises,
-        validatedIds: nextValidatedIds,
-        completionAttemptNumber: nextCompletionAttemptNumber,
-        pointsConfig,
-        tentativeBaremeRows,
-      });
-
-      setAttemptsHistory(nextAttemptsHistory);
-      setValidatedBaliseIds(nextValidatedIds);
-      setSavedScore(result.nextValidatedCount);
-      setTentativesCount(result.nextTentativesCount);
-      setSavedPointsTotal(recomputedScore.totalPoints);
+      setAttemptsHistory((prev) => [...prev, newAttemptRow]);
+      setValidatedBaliseIds(nextProgress.validatedIds.length ? nextProgress.validatedIds : nextValidatedIds);
+      setSavedScore(nextProgress.validatedCount || result.nextValidatedCount);
+      setTentativesCount(nextProgress.tentativesCount || result.nextTentativesCount);
+      setSavedPointsTotal(correctedTotal);
       setLastPointsGain(breakdown.totalGain);
-
-      if (breakdown.willComplete && completionAttemptNumber == null) {
-        setCompletionAttemptNumber(breakdown.tentativeNumero);
-      }
+      setCompletionAttemptNumber(nextProgress.completionAttemptNumber ?? nextCompletionAttemptNumber);
+      setParcoursTermineDb(effectiveTermine);
 
       setCodesSaisis((prev) => {
         const next = { ...prev };
@@ -732,9 +1067,9 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
 
       return {
         breakdown,
-        nextSavedPointsTotal: recomputedScore.totalPoints,
-        nextValidatedCount: result.nextValidatedCount,
-        nextTentativesCount: result.nextTentativesCount,
+        nextSavedPointsTotal: correctedTotal,
+        nextValidatedCount: nextProgress.validatedCount || result.nextValidatedCount,
+        nextTentativesCount: nextProgress.tentativesCount || result.nextTentativesCount,
       };
     },
     [
@@ -747,9 +1082,9 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       codesSaisis,
       pointsConfig,
       savedPointsTotal,
-      attemptsHistory,
       completionAttemptNumber,
       tentativeBaremeRows,
+      forceParcoursBonusIfNeeded,
       validatedSet,
     ]
   );
@@ -798,7 +1133,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         `Points tentatives : ${formatPoints(breakdown.tentativesPoints)}`,
         `Gain total : ${formatPoints(breakdown.totalGain)}`,
         `Score enregistré : ${nextValidatedCount}/${balises.length}`,
-        `Total enregistré : ${formatPoints(nextSavedPointsTotal)} pts`,
+        `Total recalculé : ${formatPoints(nextSavedPointsTotal)} pts`,
         `Tentatives : ${nextTentativesCount}`,
       ];
 
@@ -849,9 +1184,11 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     const alreadyValidated = validatedSet.has(item.id);
     const result = alreadyValidated ? true : resultats[item.id];
     const saisie = codesSaisis[item.id] ?? "";
-    const displayBalisePoints = Number.isFinite(Number(item.points))
-      ? Number(item.points)
-      : pointsConfig.pointsParBalise;
+    const displayBalisePoints = pointsConfig.modes.balises
+      ? Number.isFinite(Number(item.points))
+        ? Number(item.points)
+        : pointsConfig.pointsParBalise
+      : 0;
 
     return (
       <View
@@ -940,19 +1277,19 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
           showsVerticalScrollIndicator={false}
         >
           <View style={styles.statsRow}>
-            <View style={[styles.statBox, { width: statCardWidth }]}>
+            <View style={[styles.statBox, { width: statCardWidth }]}> 
               <Text style={styles.statValue}>{balises.length}</Text>
               <Text style={styles.statLabel}>Balises</Text>
             </View>
 
-            <View style={[styles.statBox, { width: statCardWidth }]}>
+            <View style={[styles.statBox, { width: statCardWidth }]}> 
               <Text style={styles.statValue}>
                 {savedScore}/{balises.length}
               </Text>
               <Text style={styles.statLabel}>Score</Text>
             </View>
 
-            <View style={[styles.statBox, { width: statCardWidth }]}>
+            <View style={[styles.statBox, { width: statCardWidth }]}> 
               <Text style={styles.statValue}>{tentativesCount}</Text>
               <Text style={styles.statLabel}>Tentatives</Text>
             </View>
@@ -962,7 +1299,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
             <View style={styles.infoCard}>
               <View style={styles.infoHeader}>
                 <Feather name="shield" size={16} color="#93C5FD" />
-                <Text style={styles.infoTitle}>Progression enregistrée</Text>
+                <Text style={styles.infoTitle}>Progression recalculée automatiquement</Text>
               </View>
 
               <Text style={styles.infoLine}>
@@ -972,11 +1309,25 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
                 </Text>
               </Text>
               <Text style={styles.infoLine}>
-                Dernier gain :{" "}
-                <Text style={styles.infoStrong}>{formatPoints(lastPointsGain)} pts</Text>
+                Total : <Text style={styles.infoStrong}>{formatPoints(savedPointsTotal)} pts</Text>
               </Text>
               <Text style={styles.infoLine}>
-                Total : <Text style={styles.infoStrong}>{formatPoints(savedPointsTotal)} pts</Text>
+                Bonus parcours :{" "}
+                <Text style={styles.infoStrong}>
+                  {pointsConfig.modes.parcours ? `${formatPoints(pointsConfig.pointsParParcours)} pts` : "désactivé"}
+                </Text>
+              </Text>
+              <Text style={styles.infoLine}>
+                parcours_termine DB :{" "}
+                <Text style={styles.infoStrong}>{parcoursTermineDb ? "TRUE" : "FALSE"}</Text>
+              </Text>
+              <Text style={styles.infoLine}>
+                Parcours terminé :{" "}
+                <Text style={styles.infoStrong}>{isCompletedEffective ? "oui" : "non"}</Text>
+              </Text>
+              <Text style={styles.infoLine}>
+                Points parcours appliqués :{" "}
+                <Text style={styles.infoStrong}>{formatPoints(liveScore.parcoursPoints)} pts</Text>
               </Text>
               <Text style={styles.infoLine}>
                 Page tentatives :{" "}
@@ -985,30 +1336,8 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
                 </Text>
               </Text>
               <Text style={styles.infoLine}>
-                Classe source :{" "}
-                <Text style={styles.infoStrong}>
-                  {resolvedTentativeGroupId ?? "aucune"}
-                </Text>
-              </Text>
-              <Text style={styles.infoLine}>
-                Professeur source :{" "}
-                <Text style={styles.infoStrong}>
-                  {resolvedProfesseurId ?? "aucun"}
-                </Text>
-              </Text>
-              <Text style={styles.infoLine}>
-                Parcours support :{" "}
-                <Text style={styles.infoStrong}>
-                  {supportParcoursId ?? "aucun"}
-                </Text>
-              </Text>
-              <Text style={styles.infoLine}>
                 Barème chargé :{" "}
                 <Text style={styles.infoStrong}>{tentativeBaremeRows.length} ligne(s)</Text>
-              </Text>
-              <Text style={styles.infoLine}>
-                Parcours terminé :{" "}
-                <Text style={styles.infoStrong}>{isCompleted ? "oui" : "non"}</Text>
               </Text>
 
               {completionAttemptNumber != null ? (

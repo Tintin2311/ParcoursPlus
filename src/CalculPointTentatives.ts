@@ -47,13 +47,20 @@ export type GroupPointsConfigRow = {
   id?: string;
   group_id: string;
   professeur_id?: string | null;
+  teacher_id?: string | null;
   modes?: any;
   points_par_parcours?: number | string | null;
+  pointsParParcours?: number | string | null;
   points_per_correct?: number | string | null;
+  pointsPerCorrect?: number | string | null;
   points_par_balise?: number | string | null;
+  pointsParBalise?: number | string | null;
   tentative_page_mode?: TentativePageMode | string | null;
+  tentativePageMode?: TentativePageMode | string | null;
   tentative_page_default?: number | string | null;
+  tentativePageDefault?: number | string | null;
   tentative_page_assignments?: any;
+  tentativePageAssignments?: any;
   settings_json?: any;
   config?: any;
   updated_at?: string | null;
@@ -92,6 +99,7 @@ export type ProgressState = {
   lastPointsGain: number;
   tentativesCount: number;
   completionAttemptNumber: number | null;
+  parcoursTermine: boolean;
 };
 
 export type GainBreakdown = {
@@ -144,14 +152,15 @@ export type DebugTentativesState = {
 };
 
 /* =========================================================
-   CONSTANTES
+   TABLES
 ========================================================= */
 
 const TABLE_GROUP_CONFIGS = "group_points_configs";
 const TABLE_ATTEMPTS = "eleve_parcours_tentatives";
 const TABLE_STATS = "eleve_parcours_stats";
 const TABLE_BAREMES = "group_tentative_baremes";
-const TABLE_BAREME_PAGES = "group_tentative_bareme_pages";
+const TABLE_GROUPS = "groups";
+const TABLE_PARCOURS = "parcours";
 
 /* =========================================================
    HELPERS
@@ -169,8 +178,10 @@ export const parseNumeric = (
 };
 
 export const formatPoints = (value: number): string => {
-  if (Number.isInteger(value)) return String(value);
-  return value.toFixed(2).replace(/\.?0+$/, "");
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "0";
+  if (Number.isInteger(n)) return String(n);
+  return n.toFixed(2).replace(/\.?0+$/, "");
 };
 
 const safeParseObject = (value: any): any => {
@@ -191,11 +202,14 @@ const toBool = (value: any, fallback = false): boolean => {
   if (typeof value === "number") return value !== 0;
 
   const s = String(value).trim().toLowerCase();
-  if (["true", "1", "yes", "oui"].includes(s)) return true;
-  if (["false", "0", "no", "non"].includes(s)) return false;
+  if (["true", "1", "yes", "oui", "on"].includes(s)) return true;
+  if (["false", "0", "no", "non", "off"].includes(s)) return false;
 
   return fallback;
 };
+
+const uniqueStrings = (values: Array<string | null | undefined>) =>
+  Array.from(new Set(values.map((v) => String(v ?? "").trim()).filter(Boolean)));
 
 const sanitizeAssignments = (value: any): Record<string, number> => {
   if (!value) return {};
@@ -217,7 +231,17 @@ const parseDetailsArray = (value: any): AttemptDetail[] => {
   return Array.isArray(parsed) ? parsed : [];
 };
 
-async function resolveTeacherId(): Promise<string | null> {
+const getTeacherIdFromAnyRow = (row: any): string | null => {
+  const candidates = uniqueStrings([
+    row?.professeur_id,
+    row?.teacher_id,
+    row?.user_id,
+    row?.owner_id,
+  ]);
+  return candidates[0] ?? null;
+};
+
+async function resolveAuthTeacherId(): Promise<string | null> {
   try {
     const { data } = await supabase.auth.getUser();
     return data?.user?.id ?? null;
@@ -226,13 +250,64 @@ async function resolveTeacherId(): Promise<string | null> {
   }
 }
 
+const loadGroupTeacherId = async (groupId: string | null): Promise<string | null> => {
+  if (!groupId) return null;
+
+  const { data, error } = await supabase
+    .from(TABLE_GROUPS)
+    .select("*")
+    .eq("id", groupId)
+    .limit(1);
+
+  if (error) return null;
+
+  const row = ((data as any[]) ?? [])[0] ?? null;
+  return getTeacherIdFromAnyRow(row);
+};
+
+const loadParcoursTeacherId = async (
+  parcoursId?: string | null
+): Promise<string | null> => {
+  if (!parcoursId) return null;
+
+  const { data, error } = await supabase
+    .from(TABLE_PARCOURS)
+    .select("*")
+    .eq("id", parcoursId)
+    .limit(1);
+
+  if (error) return null;
+
+  const row = ((data as any[]) ?? [])[0] ?? null;
+  return getTeacherIdFromAnyRow(row);
+};
+
+const loadExistingStats = async (
+  studentId: string,
+  parcoursId: string
+): Promise<any | null> => {
+  const { data, error } = await supabase
+    .from(TABLE_STATS)
+    .select("*")
+    .eq("student_id", studentId)
+    .eq("parcours_id", parcoursId)
+    .limit(1);
+
+  if (error) return null;
+  return ((data as any[]) ?? [])[0] ?? null;
+};
+
 /* =========================================================
    CONFIG PAR DÉFAUT
 ========================================================= */
 
 export const getDefaultPointsConfig = (): ParcoursPointsConfig => ({
   enabled: true,
-  modes: { tentatives: true, balises: false, parcours: false },
+  modes: {
+    tentatives: false,
+    balises: true,
+    parcours: false,
+  },
   pointsPerCorrect: 0,
   pointsParParcours: 0,
   pointsParBalise: 0,
@@ -242,66 +317,196 @@ export const getDefaultPointsConfig = (): ParcoursPointsConfig => ({
 });
 
 /* =========================================================
-   RÉSOLUTION CONFIG DE CLASSE
+   LECTURE ROBUSTE DES CONFIGS
 ========================================================= */
 
-const resolveGroupPointsConfig = (
-  row: GroupPointsConfigRow | null
-): ParcoursPointsConfig => {
-  if (!row) return getDefaultPointsConfig();
+const readModes = (row: GroupPointsConfigRow | null): ModesCumules => {
+  if (!row) return getDefaultPointsConfig().modes;
 
   const configObj = safeParseObject(row?.config);
   const settingsObj = safeParseObject(row?.settings_json);
   const modesObj = safeParseObject(row?.modes);
 
-  const modes: ModesCumules = {
-    tentatives: toBool(
-      modesObj?.tentatives ?? configObj?.tentatives ?? settingsObj?.tentatives,
-      false
-    ),
+  return {
     balises: toBool(
-      modesObj?.balises ?? configObj?.balises ?? settingsObj?.balises,
-      false
+      modesObj?.balises ??
+        configObj?.modes?.balises ??
+        configObj?.balises ??
+        settingsObj?.modes?.balises ??
+        settingsObj?.balises,
+      true
     ),
     parcours: toBool(
-      modesObj?.parcours ?? configObj?.parcours ?? settingsObj?.parcours,
+      modesObj?.parcours ??
+        configObj?.modes?.parcours ??
+        configObj?.parcours ??
+        settingsObj?.modes?.parcours ??
+        settingsObj?.parcours,
+      false
+    ),
+    tentatives: toBool(
+      modesObj?.tentatives ??
+        configObj?.modes?.tentatives ??
+        configObj?.tentatives ??
+        settingsObj?.modes?.tentatives ??
+        settingsObj?.tentatives,
       false
     ),
   };
+};
 
-  if (!modes.tentatives && !modes.balises && !modes.parcours) {
-    modes.tentatives = true;
+const getRowPointsParParcours = (row: GroupPointsConfigRow | null): number => {
+  if (!row) return 0;
+
+  const configObj = safeParseObject(row?.config);
+  const settingsObj = safeParseObject(row?.settings_json);
+
+  return parseNumeric(
+    row?.points_par_parcours ??
+      row?.pointsParParcours ??
+      configObj?.points_par_parcours ??
+      configObj?.pointsParParcours ??
+      settingsObj?.points_par_parcours ??
+      settingsObj?.pointsParParcours,
+    0
+  );
+};
+
+const getRowUpdatedTime = (row: GroupPointsConfigRow): number => {
+  const t = row.updated_at ? new Date(row.updated_at).getTime() : 0;
+  return Number.isFinite(t) ? t : 0;
+};
+
+const rowScore = (row: GroupPointsConfigRow): number => {
+  const modes = readModes(row);
+  const pointsParParcours = getRowPointsParParcours(row);
+  const hasParcours = modes.parcours || pointsParParcours > 0;
+
+  return (
+    (pointsParParcours > 0 ? 1_000_000 : 0) +
+    (hasParcours ? 500_000 : 0) +
+    (modes.balises ? 50_000 : 0) +
+    (modes.tentatives ? 50_000 : 0) +
+    pointsParParcours +
+    getRowUpdatedTime(row) / 10_000_000_000
+  );
+};
+
+const pickBestConfigRow = (
+  rows: GroupPointsConfigRow[],
+  candidateTeacherIds: string[] = []
+): GroupPointsConfigRow | null => {
+  if (!rows.length) return null;
+
+  const rowsWithParcours = rows.filter((r) => readModes(r).parcours || getRowPointsParParcours(r) > 0);
+  const rowPool = rowsWithParcours.length > 0 ? rowsWithParcours : rows;
+
+  const sorted = [...rowPool].sort((a, b) => {
+    const scoreDiff = rowScore(b) - rowScore(a);
+    if (scoreDiff !== 0) return scoreDiff;
+    return getRowUpdatedTime(b) - getRowUpdatedTime(a);
+  });
+
+  const selected = sorted[0] ?? null;
+
+  console.log("CONFIG CHOISIE POUR POINTS", {
+    candidateTeacherIds,
+    selected: selected
+      ? {
+          id: selected.id,
+          group_id: selected.group_id,
+          professeur_id: selected.professeur_id ?? selected.teacher_id ?? null,
+          modes: selected.modes,
+          points_par_parcours: selected.points_par_parcours,
+          score: rowScore(selected),
+        }
+      : null,
+    allRows: rows.map((r) => ({
+      id: r.id,
+      professeur_id: r.professeur_id ?? r.teacher_id ?? null,
+      modes: r.modes,
+      points_par_parcours: r.points_par_parcours,
+      score: rowScore(r),
+    })),
+  });
+
+  return selected;
+};
+
+const resolveGroupPointsConfig = (row: GroupPointsConfigRow | null): ParcoursPointsConfig => {
+  if (!row) return getDefaultPointsConfig();
+
+  const configObj = safeParseObject(row?.config);
+  const settingsObj = safeParseObject(row?.settings_json);
+
+  const modes = readModes(row);
+  const pointsParParcours = getRowPointsParParcours(row);
+
+  const rawPointsPerCorrect =
+    row?.points_per_correct ??
+    row?.pointsPerCorrect ??
+    configObj?.points_per_correct ??
+    configObj?.pointsPerCorrect ??
+    settingsObj?.points_per_correct ??
+    settingsObj?.pointsPerCorrect;
+
+  const rawPointsParBalise =
+    row?.points_par_balise ??
+    row?.pointsParBalise ??
+    configObj?.points_par_balise ??
+    configObj?.pointsParBalise ??
+    settingsObj?.points_par_balise ??
+    settingsObj?.pointsParBalise;
+
+  if (pointsParParcours > 0) {
+    modes.parcours = true;
+  }
+
+  if (!modes.balises && !modes.parcours && !modes.tentatives) {
+    modes.balises = true;
   }
 
   const tentativePageMode: TentativePageMode =
-    row?.tentative_page_mode === "personnalise" ? "personnalise" : "general";
+    row?.tentative_page_mode === "personnalise" ||
+    row?.tentativePageMode === "personnalise" ||
+    configObj?.tentative_page_mode === "personnalise" ||
+    configObj?.tentativePageMode === "personnalise" ||
+    settingsObj?.tentative_page_mode === "personnalise" ||
+    settingsObj?.tentativePageMode === "personnalise"
+      ? "personnalise"
+      : "general";
 
-  return {
+  const tentativePageDefaultRaw =
+    row?.tentative_page_default ??
+    row?.tentativePageDefault ??
+    configObj?.tentative_page_default ??
+    configObj?.tentativePageDefault ??
+    settingsObj?.tentative_page_default ??
+    settingsObj?.tentativePageDefault;
+
+  const rawAssignments =
+    row?.tentative_page_assignments ??
+    row?.tentativePageAssignments ??
+    configObj?.tentative_page_assignments ??
+    configObj?.tentativePageAssignments ??
+    settingsObj?.tentative_page_assignments ??
+    settingsObj?.tentativePageAssignments;
+
+  const pointsConfig: ParcoursPointsConfig = {
     enabled: true,
     modes,
-    pointsPerCorrect: parseNumeric(
-      row?.points_per_correct ??
-        configObj?.points_per_correct ??
-        settingsObj?.points_per_correct,
-      0
-    ),
-    pointsParParcours: parseNumeric(
-      row?.points_par_parcours ??
-        configObj?.points_par_parcours ??
-        settingsObj?.points_par_parcours,
-      0
-    ),
-    pointsParBalise: parseNumeric(
-      row?.points_par_balise ??
-        configObj?.points_par_balise ??
-        settingsObj?.points_par_balise,
-      0
-    ),
+    pointsPerCorrect: parseNumeric(rawPointsPerCorrect, 0),
+    pointsParParcours,
+    pointsParBalise: parseNumeric(rawPointsParBalise, 0),
     tentativePageMode,
     tentativePageDefault:
-      row?.tentative_page_default == null ? null : Number(row.tentative_page_default) || null,
-    tentativePageAssignments: sanitizeAssignments(row?.tentative_page_assignments),
+      tentativePageDefaultRaw == null ? null : Number(tentativePageDefaultRaw) || null,
+    tentativePageAssignments: sanitizeAssignments(rawAssignments),
   };
+
+  console.log("CONFIG POINTS RÉSOLUE", pointsConfig);
+
+  return pointsConfig;
 };
 
 /* =========================================================
@@ -315,12 +520,13 @@ export async function resolveSupportParcoursId(
 }
 
 /* =========================================================
-   CHARGEMENT DE LA CONFIG RÉSOLUE
+   CHARGEMENT CONFIG + DÉDOUBLONNAGE AUTOMATIQUE
 ========================================================= */
 
 export const loadResolvedTentativeConfig = async (
   groupId: string | null,
-  parcoursId?: string
+  parcoursId?: string,
+  _studentId?: string | null
 ): Promise<ResolvedTentativeConfig> => {
   if (!groupId) {
     return {
@@ -332,42 +538,67 @@ export const loadResolvedTentativeConfig = async (
     };
   }
 
-  const authTeacherId = await resolveTeacherId();
+  const [authTeacherId, groupTeacherId, parcoursTeacherId] = await Promise.all([
+    resolveAuthTeacherId(),
+    loadGroupTeacherId(groupId),
+    loadParcoursTeacherId(parcoursId),
+  ]);
 
-  let query = supabase
+  const candidateTeacherIds = uniqueStrings([
+    authTeacherId,
+    groupTeacherId,
+    parcoursTeacherId,
+  ]);
+
+  const { data, error } = await supabase
     .from(TABLE_GROUP_CONFIGS)
     .select("*")
     .eq("group_id", groupId)
-    .order("updated_at", { ascending: false })
-    .limit(5);
-
-  if (authTeacherId) {
-    query = query.eq("professeur_id", authTeacherId);
-  }
-
-  const { data, error } = await query;
+    .order("updated_at", { ascending: false, nullsFirst: false })
+    .limit(50);
 
   if (error) throw error;
 
-  const row = ((data as GroupPointsConfigRow[] | null) ?? [])[0] ?? null;
-  const pointsConfig = resolveGroupPointsConfig(row);
+  const rows = ((data as GroupPointsConfigRow[]) || []).filter(Boolean);
+  const bestRow = pickBestConfigRow(rows, candidateTeacherIds);
 
-  let resolvedAttemptPage: number | null = null;
+  if (bestRow && rows.length > 1) {
+    const idsToDelete = rows
+      .filter((r) => r.id && r.id !== bestRow.id)
+      .map((r) => String(r.id));
 
-  if (pointsConfig.tentativePageMode === "personnalise") {
-    resolvedAttemptPage = parcoursId
-      ? pointsConfig.tentativePageAssignments[parcoursId] ?? null
-      : null;
-  } else {
-    resolvedAttemptPage = pointsConfig.tentativePageDefault ?? null;
+    if (idsToDelete.length > 0) {
+      supabase
+        .from(TABLE_GROUP_CONFIGS)
+        .delete()
+        .in("id", idsToDelete)
+        .then(({ error: deleteError }) => {
+          if (deleteError) {
+            console.warn("Déduplication group_points_configs échouée :", deleteError);
+          } else {
+            console.log(
+              `Déduplication group_points_configs : ${idsToDelete.length} doublon(s) supprimé(s) pour group_id=${groupId}`
+            );
+          }
+        });
+    }
   }
 
+  const pointsConfig = resolveGroupPointsConfig(bestRow);
+
+  const resolvedAttemptPage =
+    pointsConfig.tentativePageMode === "personnalise"
+      ? parcoursId
+        ? pointsConfig.tentativePageAssignments[parcoursId] ?? null
+        : null
+      : pointsConfig.tentativePageDefault ?? null;
+
   const resolvedProfesseurId =
-    row?.professeur_id != null
-      ? String(row.professeur_id)
-      : authTeacherId
-      ? String(authTeacherId)
-      : null;
+    getTeacherIdFromAnyRow(bestRow) ??
+    groupTeacherId ??
+    parcoursTeacherId ??
+    authTeacherId ??
+    null;
 
   return {
     pointsConfig,
@@ -379,27 +610,42 @@ export const loadResolvedTentativeConfig = async (
 };
 
 /* =========================================================
-   CHARGEMENT DES BARÈMES
+   BARÈMES TENTATIVES
 ========================================================= */
 
 export const loadParcoursTentativeBaremeRows = async (
   professeurId: string | null,
   attemptPage: number | null
 ): Promise<ParcoursBaremeTentativeRow[]> => {
-  if (!professeurId || !attemptPage) return [];
+  if (!attemptPage) return [];
 
-  const { data, error } = await supabase
-    .from(TABLE_BAREMES)
-    .select("*")
-    .eq("teacher_id", professeurId)
-    .eq("attempt_page", attemptPage)
-    .order("order_index", { ascending: true });
+  let rows: any[] = [];
 
-  if (error) throw error;
+  if (professeurId) {
+    const { data, error } = await supabase
+      .from(TABLE_BAREMES)
+      .select("*")
+      .eq("teacher_id", professeurId)
+      .eq("attempt_page", attemptPage)
+      .order("order_index", { ascending: true });
 
-  return ((data as any[]) || []).map((r) => ({
+    if (error) throw error;
+    rows = (data as any[]) || [];
+  }
+
+  if (rows.length === 0) {
+    const { data, error } = await supabase
+      .from(TABLE_BAREMES)
+      .select("*")
+      .eq("attempt_page", attemptPage)
+      .order("order_index", { ascending: true });
+
+    if (!error && data && data.length > 0) rows = data as any[];
+  }
+
+  return rows.map((r) => ({
     id: String(r.id),
-    teacher_id: String(r.teacher_id),
+    teacher_id: String(r.teacher_id ?? professeurId ?? ""),
     order_index: Number(r.order_index ?? 0),
     condition_type: (r.condition_type as ConditionType) || "=",
     attempts_value: r.attempts_value == null ? null : Number(r.attempts_value),
@@ -407,12 +653,12 @@ export const loadParcoursTentativeBaremeRows = async (
     attempts_max: r.attempts_max == null ? null : Number(r.attempts_max),
     points: Number(r.points ?? 0),
     color_hex: r.color_hex ?? null,
-    attempt_page: Number(r.attempt_page ?? 1),
+    attempt_page: Number(r.attempt_page ?? attemptPage),
   }));
 };
 
 /* =========================================================
-   HISTORIQUE DES TENTATIVES
+   HISTORIQUE
 ========================================================= */
 
 export const loadAttemptsHistory = async (
@@ -429,7 +675,6 @@ export const loadAttemptsHistory = async (
     .order("tentatives_numero", { ascending: true });
 
   if (error) throw error;
-
   return ((data as TentativeRow[]) || []).filter(Boolean);
 };
 
@@ -455,7 +700,7 @@ const getCompletionAttemptNumber = (
 
   const validated = new Set<string>();
 
-  for (let i = 0; i < attempts.length; i += 1) {
+  for (let i = 0; i < attempts.length; i++) {
     const attempt = attempts[i];
     const details = parseDetailsArray(attempt.details);
 
@@ -473,31 +718,21 @@ const getCompletionAttemptNumber = (
 };
 
 /* =========================================================
-   MOTEUR DE RÈGLES TENTATIVES
+   CALCUL
 ========================================================= */
 
 const matchesTentativeCondition = (
   row: ParcoursBaremeTentativeRow,
   attemptNumber: number
 ): boolean => {
-  if (row.condition_type === "=") {
-    return attemptNumber === Number(row.attempts_value ?? -999999);
-  }
-
-  if (row.condition_type === "≥") {
-    return attemptNumber >= Number(row.attempts_value ?? 0);
-  }
-
-  if (row.condition_type === "≤") {
-    return attemptNumber <= Number(row.attempts_value ?? 0);
-  }
-
+  if (row.condition_type === "=") return attemptNumber === Number(row.attempts_value ?? -999999);
+  if (row.condition_type === "≥") return attemptNumber >= Number(row.attempts_value ?? 0);
+  if (row.condition_type === "≤") return attemptNumber <= Number(row.attempts_value ?? 0);
   if (row.condition_type === "entre") {
     const min = Number(row.attempts_min ?? 0);
     const max = Number(row.attempts_max ?? 0);
     return attemptNumber >= min && attemptNumber <= max;
   }
-
   return false;
 };
 
@@ -514,10 +749,6 @@ const getTentativeBaremePoints = (
   };
 };
 
-/* =========================================================
-   CALCUL SCORE AFFICHÉ
-========================================================= */
-
 export const computeCurrentDisplayedScore = ({
   balises,
   validatedIds,
@@ -530,31 +761,29 @@ export const computeCurrentDisplayedScore = ({
   completionAttemptNumber: number | null;
   pointsConfig: ParcoursPointsConfig;
   tentativeBaremeRows: ParcoursBaremeTentativeRow[];
-}): {
-  totalPoints: number;
-  balisesPoints: number;
-  parcoursPoints: number;
-  tentativesPoints: number;
-  tentativeBaremeMatched: ParcoursBaremeTentativeRow | null;
-} => {
+}) => {
+  const totalBalises = balises.length;
   const validatedSet = new Set(validatedIds);
   const validatedBalises = balises.filter((b) => validatedSet.has(b.id));
+  const parcoursTermine = totalBalises > 0 && validatedBalises.length >= totalBalises;
 
-  const balisesPoints = validatedBalises.reduce((sum, balise) => {
-    const raw = Number(balise.points);
-    const pts = Number.isFinite(raw) ? raw : pointsConfig.pointsParBalise;
-    return sum + pts;
-  }, 0);
-
-  const isCompleted = balises.length > 0 && validatedIds.length >= balises.length;
+  const balisesPoints = pointsConfig.modes.balises
+    ? validatedBalises.reduce((sum, balise) => {
+        const raw = Number(balise.points);
+        const pts = Number.isFinite(raw) ? raw : pointsConfig.pointsParBalise;
+        return sum + pts;
+      }, 0)
+    : 0;
 
   const parcoursPoints =
-    pointsConfig.modes.parcours && isCompleted ? pointsConfig.pointsParParcours : 0;
+    pointsConfig.modes.parcours && parcoursTermine
+      ? Number(pointsConfig.pointsParParcours || 0)
+      : 0;
 
   let tentativesPoints = 0;
   let tentativeBaremeMatched: ParcoursBaremeTentativeRow | null = null;
 
-  if (pointsConfig.modes.tentatives && isCompleted && completionAttemptNumber != null) {
+  if (pointsConfig.modes.tentatives && parcoursTermine && completionAttemptNumber != null) {
     const result = getTentativeBaremePoints(tentativeBaremeRows, completionAttemptNumber);
     tentativeBaremeMatched = result.matched;
     tentativesPoints = result.matched ? result.points : pointsConfig.pointsPerCorrect;
@@ -578,6 +807,7 @@ export const buildProgressFromAttempts = (
 ): ProgressState => {
   const validatedIds = getValidatedIdsFromAttempts(attempts);
   const completionAttemptNumber = getCompletionAttemptNumber(attempts, totalBalises);
+  const parcoursTermine = totalBalises > 0 && validatedIds.length >= totalBalises;
 
   const score = computeCurrentDisplayedScore({
     balises,
@@ -597,12 +827,9 @@ export const buildProgressFromAttempts = (
     lastPointsGain,
     tentativesCount: attempts.length,
     completionAttemptNumber,
+    parcoursTermine,
   };
 };
-
-/* =========================================================
-   CALCUL DU GAIN DE LA NOUVELLE TENTATIVE
-========================================================= */
 
 export const computeTentativeGainBreakdown = ({
   balises,
@@ -634,20 +861,21 @@ export const computeTentativeGainBreakdown = ({
   );
 
   const tentativeNumero = tentativesCount + 1;
-  const newlyValidatedCount = newlyValidatedBalises.length;
-  const futureValidatedCount = validatedIds.length + newlyValidatedCount;
+  const futureValidatedCount = validatedIds.length + newlyValidatedBalises.length;
   const willComplete = balises.length > 0 && futureValidatedCount >= balises.length;
   const wasAlreadyComplete = balises.length > 0 && validatedIds.length >= balises.length;
 
-  const balisesPoints = newlyValidatedBalises.reduce((sum, balise) => {
-    const raw = Number(balise.points);
-    const pts = Number.isFinite(raw) ? raw : pointsConfig.pointsParBalise;
-    return sum + pts;
-  }, 0);
+  const balisesPoints = pointsConfig.modes.balises
+    ? newlyValidatedBalises.reduce((sum, balise) => {
+        const raw = Number(balise.points);
+        const pts = Number.isFinite(raw) ? raw : pointsConfig.pointsParBalise;
+        return sum + pts;
+      }, 0)
+    : 0;
 
   const parcoursPoints =
     pointsConfig.modes.parcours && willComplete && !wasAlreadyComplete
-      ? pointsConfig.pointsParParcours
+      ? Number(pointsConfig.pointsParParcours || 0)
       : 0;
 
   let tentativesPoints = 0;
@@ -661,7 +889,7 @@ export const computeTentativeGainBreakdown = ({
 
   return {
     tentativeNumero,
-    newlyValidatedCount,
+    newlyValidatedCount: newlyValidatedBalises.length,
     tentativesPoints,
     balisesPoints,
     parcoursPoints,
@@ -676,7 +904,72 @@ export const computeTentativeGainBreakdown = ({
 };
 
 /* =========================================================
-   SAUVEGARDE D’UNE TENTATIVE
+   RECALCUL + STATS
+========================================================= */
+
+export const recomputeAndSyncStats = async ({
+  studentId,
+  parcoursId,
+  balises,
+  pointsConfig,
+  tentativeBaremeRows,
+}: {
+  studentId: string | null;
+  parcoursId: string | undefined;
+  balises: BaliseLite[];
+  pointsConfig: ParcoursPointsConfig;
+  tentativeBaremeRows: ParcoursBaremeTentativeRow[];
+}): Promise<ProgressState> => {
+  if (!studentId || !parcoursId) {
+    return {
+      validatedIds: [],
+      validatedCount: 0,
+      totalPoints: 0,
+      lastPointsGain: 0,
+      tentativesCount: 0,
+      completionAttemptNumber: null,
+      parcoursTermine: false,
+    };
+  }
+
+  const attempts = await loadAttemptsHistory(studentId, parcoursId);
+  const progress = buildProgressFromAttempts(
+    attempts,
+    balises.length,
+    balises,
+    pointsConfig,
+    tentativeBaremeRows
+  );
+
+  const { error } = await supabase.from(TABLE_STATS).upsert(
+    {
+      student_id: studentId,
+      parcours_id: parcoursId,
+      best_score: progress.validatedCount,
+      last_score: progress.validatedCount,
+      total_balises: balises.length,
+      tentatives_count: progress.tentativesCount,
+      last_tentative_at:
+        attempts.length > 0
+          ? attempts[attempts.length - 1]?.created_at ?? new Date().toISOString()
+          : null,
+      best_points: progress.totalPoints,
+      last_points: progress.totalPoints,
+      parcours_termine: progress.parcoursTermine,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "student_id,parcours_id" }
+  );
+
+  if (error) {
+    console.warn("Synchronisation eleve_parcours_stats échouée :", error);
+  }
+
+  return progress;
+};
+
+/* =========================================================
+   SAUVEGARDE TENTATIVE
 ========================================================= */
 
 export const saveTentativeWithStats = async ({
@@ -703,7 +996,7 @@ export const saveTentativeWithStats = async ({
   const validatedSet = new Set(validatedIds);
   const totalBalises = balises.length;
 
-  const details = balises.map((balise) => {
+  const details: AttemptDetail[] = balises.map((balise) => {
     const alreadyValidated = validatedSet.has(balise.id);
     const newlyValidated = !alreadyValidated && nextResults[balise.id] === true;
 
@@ -722,37 +1015,43 @@ export const saveTentativeWithStats = async ({
   const nextValidatedCount = validatedIds.length + breakdown.newlyValidatedCount;
   const nextDisplayedTotal = currentDisplayedTotal + breakdown.totalGain;
   const nextTentativesCount = breakdown.tentativeNumero;
+  const parcoursTermine = totalBalises > 0 && nextValidatedCount >= totalBalises;
 
-  const { error: insertError } = await supabase
-    .from(TABLE_ATTEMPTS)
-    .insert({
-      student_id: studentId,
-      parcours_id: parcoursId,
-      score: nextValidatedCount,
-      total_balises: totalBalises,
-      tentatives_numero: breakdown.tentativeNumero,
-      points_earned: breakdown.totalGain,
-      details,
-    });
+  const { error: insertError } = await supabase.from(TABLE_ATTEMPTS).insert({
+    student_id: studentId,
+    parcours_id: parcoursId,
+    score: nextValidatedCount,
+    total_balises: totalBalises,
+    tentatives_numero: breakdown.tentativeNumero,
+    points_earned: breakdown.totalGain,
+    details,
+  });
 
   if (insertError) throw insertError;
 
-  const { error: upsertStatsError } = await supabase
-    .from(TABLE_STATS)
-    .upsert(
-      {
-        student_id: studentId,
-        parcours_id: parcoursId,
-        best_score: nextValidatedCount,
-        last_score: nextValidatedCount,
-        total_balises: totalBalises,
-        tentatives_count: nextTentativesCount,
-        last_tentative_at: new Date().toISOString(),
-        best_points: nextDisplayedTotal,
-        last_points: breakdown.totalGain,
-      },
-      { onConflict: "student_id,parcours_id" }
-    );
+  const existingStats = await loadExistingStats(studentId, parcoursId);
+  const previousBestScore = parseNumeric(existingStats?.best_score, 0);
+  const previousBestPoints = parseNumeric(existingStats?.best_points, 0);
+
+  const bestScore = Math.max(previousBestScore, nextValidatedCount);
+  const bestPoints = Math.max(previousBestPoints, nextDisplayedTotal);
+
+  const { error: upsertStatsError } = await supabase.from(TABLE_STATS).upsert(
+    {
+      student_id: studentId,
+      parcours_id: parcoursId,
+      best_score: bestScore,
+      last_score: nextValidatedCount,
+      total_balises: totalBalises,
+      tentatives_count: nextTentativesCount,
+      last_tentative_at: new Date().toISOString(),
+      best_points: bestPoints,
+      last_points: nextDisplayedTotal,
+      parcours_termine: parcoursTermine,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "student_id,parcours_id" }
+  );
 
   if (upsertStatsError) {
     console.warn("Upsert stats échoué mais tentative enregistrée :", upsertStatsError);
@@ -768,6 +1067,7 @@ export const saveTentativeWithStats = async ({
     nextValidatedCount,
     nextDisplayedTotal,
     nextTentativesCount,
+    parcoursTermine,
   };
 };
 

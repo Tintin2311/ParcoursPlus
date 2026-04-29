@@ -1,3 +1,4 @@
+// src/GestionPoints.tsx
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
@@ -67,7 +68,6 @@ type ModesActifs = {
   tentatives: boolean;
   balises: boolean;
   parcours: boolean;
-  personnalise: boolean;
 };
 
 type TentativePageMode = "general" | "personnalise";
@@ -79,6 +79,7 @@ type PerGroupConfig = {
   tentativePageDefault: number | null;
   tentativePageAssignments: Record<string, number>;
   updatedAt?: string | null;
+  professeurId?: string | null;
 };
 
 /* ======================= Thème ======================= */
@@ -106,22 +107,33 @@ const PURPLE_TO = "#C4B5FD";
 /* ======================= Helpers ======================= */
 const defaultModes: ModesActifs = {
   tentatives: false,
-  balises: false,
+  balises: true,
   parcours: false,
-  personnalise: true,
 };
 
-const normalizeModes = (value: any): ModesActifs => ({
-  tentatives: !!value?.tentatives,
-  balises: !!value?.balises,
-  parcours: !!value?.parcours,
-  personnalise:
-    value?.personnalise === undefined
-      ? !value?.tentatives && !value?.balises && !value?.parcours
-      : !!value?.personnalise,
-});
-
 const getDisplayName = (row: any) => String(row?.nom ?? row?.name ?? "Sans nom");
+
+const parseJsonObject = (value: any): any => {
+  if (!value) return null;
+  if (typeof value === "object") return value;
+  if (typeof value !== "string") return null;
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+};
+
+const normalizeModes = (value: any): ModesActifs => {
+  const obj = parseJsonObject(value);
+
+  return {
+    tentatives: !!obj?.tentatives,
+    balises: !!obj?.balises,
+    parcours: !!obj?.parcours,
+  };
+};
 
 const shortCode = (name?: string | null) => {
   const n = (name || "").trim();
@@ -141,25 +153,13 @@ const getFolderParentId = (folder: FolderRow) =>
   (folder.parent_id ?? folder.parent_folder_id ?? null) as string | null;
 
 const sanitizeAssignments = (value: any): Record<string, number> => {
-  if (!value) return {};
-  let obj: any = value;
-
-  if (typeof value === "string") {
-    try {
-      obj = JSON.parse(value);
-    } catch {
-      return {};
-    }
-  }
-
+  const obj = parseJsonObject(value);
   if (!obj || typeof obj !== "object" || Array.isArray(obj)) return {};
 
   const out: Record<string, number> = {};
   Object.entries(obj).forEach(([k, v]) => {
     const n = Number(v);
-    if (k && Number.isFinite(n) && n >= 1) {
-      out[k] = n;
-    }
+    if (k && Number.isFinite(n) && n >= 1) out[k] = n;
   });
 
   return out;
@@ -173,6 +173,40 @@ async function resolveTeacherId(): Promise<string | null> {
     return null;
   }
 }
+
+const getGroupTeacherId = (group: GroupRow | null, fallbackTeacherId: string | null) =>
+  group?.teacher_id ?? group?.professeur_id ?? fallbackTeacherId ?? null;
+
+const getRowScore = (row: any) => {
+  const modes = normalizeModes(row?.modes);
+  const pointsParParcours =
+    row?.points_par_parcours == null ? 0 : Number(row.points_par_parcours) || 0;
+  const updatedAt = row?.updated_at ? new Date(row.updated_at).getTime() : 0;
+
+  return (
+    (modes.parcours ? 1_000_000 : 0) +
+    (pointsParParcours > 0 ? 500_000 : 0) +
+    (modes.balises ? 100_000 : 0) +
+    (modes.tentatives ? 100_000 : 0) +
+    pointsParParcours +
+    updatedAt / 10_000_000_000
+  );
+};
+
+const pickBestConfigRows = (rows: any[]) => {
+  const byGroup: Record<string, any> = {};
+
+  [...rows]
+    .filter(Boolean)
+    .sort((a, b) => getRowScore(b) - getRowScore(a))
+    .forEach((row) => {
+      const gid = String(row?.group_id ?? "");
+      if (!gid || byGroup[gid]) return;
+      byGroup[gid] = row;
+    });
+
+  return byGroup;
+};
 
 const pastelByMode = (
   mode: keyof ModesActifs
@@ -201,21 +235,13 @@ const pastelByMode = (
         iconColor: "#1D4ED8",
       };
     case "parcours":
+    default:
       return {
         from: GREEN_FROM,
         to: GREEN_TO,
         bgTint: "rgba(16,185,129,0.12)",
         borderTint: "rgba(16,185,129,0.28)",
         iconColor: "#047857",
-      };
-    case "personnalise":
-    default:
-      return {
-        from: ORANGE_FROM,
-        to: ORANGE_TO,
-        bgTint: "rgba(245,158,11,0.12)",
-        borderTint: "rgba(245,158,11,0.28)",
-        iconColor: "#B45309",
       };
   }
 };
@@ -258,27 +284,17 @@ const groupPalette = (id: string) => {
   }
 };
 
-/* ======================= Modal Info ======================= */
-const INFO_PAGES = [
-  {
-    title: "Page simplifiée",
-    body: [
-      "Choisis d’abord la classe cible.",
-      "Sélectionne ensuite le mode de calcul des points avec les icônes.",
-      "Si le mode Tentatives est actif, choisis une page générale ou une page par parcours.",
-      "Les pages proviennent maintenant du barème global du professeur dans l’écran Tentatives.",
-    ],
-  },
-  {
-    title: "Tentatives : général ou personnalisé",
-    body: [
-      "Général : une seule page de tentatives pour tous les parcours de la classe.",
-      "Personnalisé : une page différente pour chaque parcours.",
-      "Le barème n’est plus lié à une classe dans la page Tentatives : il est global au professeur.",
-    ],
-  },
-];
+const getModeLabel = (modes: ModesActifs) => {
+  const labels = [
+    modes.balises ? "Balises" : null,
+    modes.parcours ? "Parcours" : null,
+    modes.tentatives ? "Tentatives" : null,
+  ].filter(Boolean);
 
+  return labels.length ? labels.join(" + ") : "Aucun mode";
+};
+
+/* ======================= Modal Info ======================= */
 function InformationPoints({
   visible,
   onClose,
@@ -286,62 +302,31 @@ function InformationPoints({
   visible: boolean;
   onClose: () => void;
 }) {
-  const [pageIndex, setPageIndex] = useState(0);
-  const page = INFO_PAGES[pageIndex];
-
-  useEffect(() => {
-    if (visible) setPageIndex(0);
-  }, [visible]);
-
   return (
     <Modal transparent animationType="fade" visible={visible} onRequestClose={onClose}>
       <View style={infoStyles.overlay}>
         <View style={infoStyles.card}>
           <View style={infoStyles.header}>
-            <Text style={infoStyles.title}>{page.title}</Text>
+            <Text style={infoStyles.title}>Principe du calcul</Text>
             <TouchableOpacity onPress={onClose} style={infoStyles.closeBtn} activeOpacity={0.9}>
               <Feather name="x" size={22} color={C_TEXT} />
             </TouchableOpacity>
           </View>
 
-          <View style={infoStyles.pageBadge}>
-            <Text style={infoStyles.pageBadgeText}>
-              Page {pageIndex + 1} / {INFO_PAGES.length}
-            </Text>
-          </View>
-
           <View style={infoStyles.content}>
-            {page.body.map((line, index) => (
-              <Text key={index} style={infoStyles.body}>
-                {line}
-              </Text>
-            ))}
+            <Text style={infoStyles.body}>• Balises : chaque balise validée donne ses points.</Text>
+            <Text style={infoStyles.body}>
+              • Parcours : le bonus est donné uniquement quand toutes les balises sont justes.
+            </Text>
+            <Text style={infoStyles.body}>
+              • Tentatives : le barème choisi donne des points uniquement quand le parcours est terminé.
+            </Text>
+            <Text style={infoStyles.body}>Tu peux activer un seul mode ou les cumuler.</Text>
           </View>
 
-          <View style={infoStyles.actions}>
-            <TouchableOpacity
-              activeOpacity={0.9}
-              onPress={() => setPageIndex((p) => Math.max(0, p - 1))}
-              disabled={pageIndex === 0}
-              style={[infoStyles.secondaryBtn, pageIndex === 0 && infoStyles.btnDisabled]}
-            >
-              <Text style={infoStyles.secondaryBtnText}>Précédent</Text>
-            </TouchableOpacity>
-
-            {pageIndex < INFO_PAGES.length - 1 ? (
-              <TouchableOpacity
-                activeOpacity={0.9}
-                onPress={() => setPageIndex((p) => Math.min(INFO_PAGES.length - 1, p + 1))}
-                style={infoStyles.primaryBtn}
-              >
-                <Text style={infoStyles.primaryBtnText}>Suivant</Text>
-              </TouchableOpacity>
-            ) : (
-              <TouchableOpacity activeOpacity={0.9} onPress={onClose} style={infoStyles.primaryBtn}>
-                <Text style={infoStyles.primaryBtnText}>Fermer</Text>
-              </TouchableOpacity>
-            )}
-          </View>
+          <TouchableOpacity activeOpacity={0.9} onPress={onClose} style={infoStyles.primaryBtn}>
+            <Text style={infoStyles.primaryBtnText}>Compris</Text>
+          </TouchableOpacity>
         </View>
       </View>
     </Modal>
@@ -369,13 +354,13 @@ function GroupPickerModal({
       <View style={styles.modalOverlay}>
         <View style={styles.modalCard}>
           <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>Choisir la classe cible</Text>
+            <Text style={styles.modalTitle}>Choisir la classe</Text>
             <TouchableOpacity activeOpacity={0.9} onPress={onClose} style={styles.modalCloseBtn}>
               <Feather name="x" size={20} color={C_TEXT} />
             </TouchableOpacity>
           </View>
 
-          <ScrollView style={{ maxHeight: 360 }} showsVerticalScrollIndicator={false}>
+          <ScrollView style={{ maxHeight: 390 }} showsVerticalScrollIndicator={false}>
             {groups.map((group) => {
               const isSelected = selectedGroupId === group.id;
               const palette = groupPalette(group.id);
@@ -453,7 +438,7 @@ function TentativePagePickerModal({
             </TouchableOpacity>
           </View>
 
-          <ScrollView style={{ maxHeight: 320 }} showsVerticalScrollIndicator={false}>
+          <ScrollView style={{ maxHeight: 330 }} showsVerticalScrollIndicator={false}>
             {sorted.length === 0 ? (
               <Text style={styles.helperText}>Aucune page de tentative trouvée.</Text>
             ) : (
@@ -470,8 +455,8 @@ function TentativePagePickerModal({
                     style={[
                       styles.modalOption,
                       {
-                        backgroundColor: active ? "rgba(59,130,246,0.08)" : "#FFFFFF",
-                        borderColor: active ? "rgba(59,130,246,0.24)" : C_BORDER,
+                        backgroundColor: active ? "rgba(139,92,246,0.08)" : "#FFFFFF",
+                        borderColor: active ? "rgba(139,92,246,0.24)" : C_BORDER,
                       },
                     ]}
                   >
@@ -481,7 +466,7 @@ function TentativePagePickerModal({
                       </Text>
                       <Text style={styles.helperText}>Page {page.page_number}</Text>
                     </View>
-                    {active ? <Feather name="check" size={18} color="#2563EB" /> : null}
+                    {active ? <Feather name="check" size={18} color="#6D28D9" /> : null}
                   </TouchableOpacity>
                 );
               })
@@ -493,7 +478,7 @@ function TentativePagePickerModal({
   );
 }
 
-/* ======================= Mode Compact ======================= */
+/* ======================= Bouton mode ======================= */
 function CompactModeButton({
   modeKey,
   label,
@@ -559,7 +544,7 @@ function CompactModeButton({
 export default function GestionPoints({ setPage }: Props) {
   const { width: winW, height: winH } = useWindowDimensions();
   const compactHeight = winH <= 820;
-  const modeWidth: DimensionValue = "25%";
+  const modeWidth: DimensionValue = "33.333%";
 
   const [folders, setFolders] = useState<FolderRow[]>([]);
   const [groups, setGroups] = useState<GroupRow[]>([]);
@@ -611,6 +596,16 @@ export default function GestionPoints({ setPage }: Props) {
     [folderById]
   );
 
+  const selectedGroup = useMemo(
+    () => groups.find((g) => g.id === selectedGroupId) ?? null,
+    [groups, selectedGroupId]
+  );
+
+  const ownerTeacherId = useMemo(
+    () => getGroupTeacherId(selectedGroup, teacherId),
+    [selectedGroup, teacherId]
+  );
+
   const fetchData = useCallback(async () => {
     setIsLoading(true);
     setScreenError(null);
@@ -622,15 +617,10 @@ export default function GestionPoints({ setPage }: Props) {
       const [groupsRes, foldersRes, configsRes, pagesRes] = await Promise.all([
         supabase.from("groups").select("*").order("created_at", { ascending: true }),
         supabase.from("folders").select("*").order("created_at", { ascending: true }),
-        (() => {
-          let q = supabase
-            .from("group_points_configs")
-            .select("*")
-            .order("updated_at", { ascending: false });
-
-          if (authTeacherId) q = q.eq("professeur_id", authTeacherId);
-          return q;
-        })(),
+        supabase
+          .from("group_points_configs")
+          .select("*")
+          .order("updated_at", { ascending: false, nullsFirst: false }),
         authTeacherId
           ? supabase
               .from("group_tentative_bareme_pages")
@@ -663,19 +653,14 @@ export default function GestionPoints({ setPage }: Props) {
         created_at: p.created_at ?? null,
       })) as TentativePageRow[];
 
-      const nextConfigs = (configsRes.data ?? []).reduce(
-        (acc: Record<string, PerGroupConfig>, row: any) => {
-          const gid = String(row.group_id);
-          if (!gid || acc[gid]) return acc;
+      const bestRowsByGroup = pickBestConfigRows(configsRes.data ?? []);
 
+      const nextConfigs = Object.entries(bestRowsByGroup).reduce(
+        (acc: Record<string, PerGroupConfig>, [gid, row]: [string, any]) => {
           acc[gid] = {
             modes: normalizeModes(row.modes),
             pointsParParcours:
-              typeof row.points_par_parcours === "number"
-                ? row.points_par_parcours
-                : row.points_par_parcours == null
-                ? null
-                : Number(row.points_par_parcours) || 0,
+              row.points_par_parcours == null ? null : Number(row.points_par_parcours) || 0,
             tentativePageMode:
               row.tentative_page_mode === "personnalise" ? "personnalise" : "general",
             tentativePageDefault:
@@ -684,6 +669,7 @@ export default function GestionPoints({ setPage }: Props) {
                 : Number(row.tentative_page_default) || null,
             tentativePageAssignments: sanitizeAssignments(row.tentative_page_assignments),
             updatedAt: row.updated_at ?? null,
+            professeurId: row.professeur_id ?? null,
           };
           return acc;
         },
@@ -694,6 +680,7 @@ export default function GestionPoints({ setPage }: Props) {
       setFolders(nextFolders);
       setPerGroupConfigs(nextConfigs);
       setAllTentativePages(nextPages);
+      setSelectedGroupId((prev) => prev ?? nextGroups[0]?.id ?? null);
     } catch (err: any) {
       console.error("Erreur chargement GestionPoints :", err);
       setScreenError(`Impossible de charger la page : ${err?.message ?? "erreur inconnue"}.`);
@@ -730,40 +717,26 @@ export default function GestionPoints({ setPage }: Props) {
       setIsLoadingParcours(true);
 
       try {
-        const { data: shareRows, error: shareError } = await supabase
-          .from("partages_parcours")
-          .select("parcours_id")
-          .eq("group_id", groupId);
-
-        if (shareError) throw shareError;
-
-        const parcoursIds = Array.from(
-          new Set(
-            ((shareRows ?? []) as any[])
-              .map((r) => String(r.parcours_id || ""))
-              .filter(Boolean)
-          )
-        );
-
-        if (parcoursIds.length === 0) {
-          setGroupParcours([]);
-          return;
-        }
-
         const { data: parcoursRows, error: parcoursError } = await supabase
           .from("parcours")
-          .select("id, nom, name, created_at")
-          .in("id", parcoursIds)
+          .select("id, nom, name, created_at, groupes_associes")
           .order("created_at", { ascending: true });
 
         if (parcoursError) throw parcoursError;
 
-        const list = ((parcoursRows ?? []) as any[]).map((p) => ({
-          id: String(p.id),
-          nom: getDisplayName(p),
-          name: getDisplayName(p),
-          created_at: p.created_at ?? null,
-        })) as ParcoursRow[];
+        const list = ((parcoursRows ?? []) as any[])
+          .filter((p) => {
+            const raw = p.groupes_associes;
+            if (Array.isArray(raw)) return raw.map(String).includes(groupId);
+            if (typeof raw === "string") return raw.includes(groupId);
+            return false;
+          })
+          .map((p) => ({
+            id: String(p.id),
+            nom: getDisplayName(p),
+            name: getDisplayName(p),
+            created_at: p.created_at ?? null,
+          })) as ParcoursRow[];
 
         setGroupParcours(list);
 
@@ -805,11 +778,6 @@ export default function GestionPoints({ setPage }: Props) {
     fetchGroupParcours(selectedGroupId);
   }, [fetchGroupParcours, selectedGroupId]);
 
-  const selectedGroup = useMemo(
-    () => groups.find((g) => g.id === selectedGroupId) ?? null,
-    [groups, selectedGroupId]
-  );
-
   const selectedGroupPath = useMemo(
     () => pathOf(selectedGroup?.folder_id),
     [selectedGroup, pathOf]
@@ -837,6 +805,7 @@ export default function GestionPoints({ setPage }: Props) {
 
   const canSaveTentativeConfig = useMemo(() => {
     if (!modesActifs.tentatives) return true;
+    if (allTentativePages.length === 0) return false;
 
     if (tentativePageMode === "general") {
       return Number.isFinite(tentativePageDefault || NaN) && Number(tentativePageDefault) >= 1;
@@ -849,6 +818,7 @@ export default function GestionPoints({ setPage }: Props) {
       return Number.isFinite(n) && n >= 1;
     });
   }, [
+    allTentativePages.length,
     groupParcours,
     modesActifs.tentatives,
     tentativePageAssignments,
@@ -856,44 +826,25 @@ export default function GestionPoints({ setPage }: Props) {
     tentativePageMode,
   ]);
 
+  const hasAtLeastOneMode = modesActifs.balises || modesActifs.parcours || modesActifs.tentatives;
+
   const canSave =
     !!selectedGroupId &&
-    !!teacherId &&
-    (modesActifs.tentatives ||
-      modesActifs.balises ||
-      modesActifs.parcours ||
-      modesActifs.personnalise) &&
+    !!ownerTeacherId &&
+    hasAtLeastOneMode &&
     (!modesActifs.parcours ||
       (Number.isFinite(pointsParParcours) && Number(pointsParParcours) >= 0)) &&
     canSaveTentativeConfig;
 
   const toggleMode = (modeId: keyof ModesActifs) => {
-    if (modeId === "personnalise") {
-      setModesActifs({
-        tentatives: false,
-        balises: false,
-        parcours: false,
-        personnalise: true,
-      });
-      return;
-    }
-
-    setModesActifs((prev) => {
-      const next = {
-        ...prev,
-        [modeId]: !prev[modeId],
-        personnalise: false,
-      };
-
-      const hasClassicMode = next.tentatives || next.balises || next.parcours;
-      if (!hasClassicMode) next.personnalise = true;
-
-      return next;
-    });
+    setModesActifs((prev) => ({
+      ...prev,
+      [modeId]: !prev[modeId],
+    }));
   };
 
   const handleSave = useCallback(async () => {
-    if (!canSave || !selectedGroupId || !teacherId) return;
+    if (!canSave || !selectedGroupId || !ownerTeacherId) return;
 
     setIsSaving(true);
 
@@ -910,14 +861,13 @@ export default function GestionPoints({ setPage }: Props) {
 
       const payload = {
         group_id: selectedGroupId,
-        professeur_id: teacherId,
+        professeur_id: ownerTeacherId,
         modes: {
           tentatives: !!modesActifs.tentatives,
           balises: !!modesActifs.balises,
           parcours: !!modesActifs.parcours,
-          personnalise: !!modesActifs.personnalise,
         },
-        points_par_parcours: modesActifs.parcours ? Number(pointsParParcours) || 0 : null,
+        points_par_parcours: modesActifs.parcours ? Number(pointsParParcours) || 0 : 0,
         tentative_page_mode: modesActifs.tentatives ? tentativePageMode : "general",
         tentative_page_default:
           modesActifs.tentatives && tentativePageMode === "general"
@@ -932,11 +882,15 @@ export default function GestionPoints({ setPage }: Props) {
         updated_at: new Date().toISOString(),
       };
 
-      const { error } = await supabase
+      const { error: deleteError } = await supabase
         .from("group_points_configs")
-        .upsert([payload], { onConflict: "group_id,professeur_id" });
+        .delete()
+        .eq("group_id", selectedGroupId);
 
-      if (error) throw error;
+      if (deleteError) throw deleteError;
+
+      const { error: insertError } = await supabase.from("group_points_configs").insert(payload);
+      if (insertError) throw insertError;
 
       setPerGroupConfigs((prev) => ({
         ...prev,
@@ -947,6 +901,7 @@ export default function GestionPoints({ setPage }: Props) {
           tentativePageDefault: payload.tentative_page_default,
           tentativePageAssignments: sanitizeAssignments(payload.tentative_page_assignments),
           updatedAt: payload.updated_at,
+          professeurId: payload.professeur_id,
         },
       }));
 
@@ -966,10 +921,10 @@ export default function GestionPoints({ setPage }: Props) {
   }, [
     canSave,
     modesActifs,
+    ownerTeacherId,
     pointsParParcours,
     selectedGroup,
     selectedGroupId,
-    teacherId,
     tentativePageAssignments,
     tentativePageDefault,
     tentativePageMode,
@@ -1033,9 +988,7 @@ export default function GestionPoints({ setPage }: Props) {
               <Feather name="info" size={24} color="#1F2937" />
             </LinearGradient>
             <Text style={styles.stateTitle}>Aucune classe trouvée</Text>
-            <Text style={styles.stateText}>
-              Il faut au moins une entrée dans la table "groups".
-            </Text>
+            <Text style={styles.stateText}>Il faut au moins une entrée dans la table "groups".</Text>
           </View>
         ) : (
           <>
@@ -1049,7 +1002,7 @@ export default function GestionPoints({ setPage }: Props) {
                   style={styles.targetChip}
                 >
                   <Feather name="users" size={14} color="#1D4ED8" />
-                  <Text style={styles.targetChipText}>
+                  <Text style={styles.targetChipText} numberOfLines={1}>
                     {selectedGroup ? getDisplayName(selectedGroup) : "Choisir"}
                   </Text>
                   <Feather name="chevron-down" size={14} color="#1D4ED8" />
@@ -1103,34 +1056,18 @@ export default function GestionPoints({ setPage }: Props) {
             <View style={[styles.sectionCard, styles.compactCard]}>
               <View style={styles.sectionTopRow}>
                 <View>
-                  <Text style={styles.sectionTitle}>Mode de calcul</Text>
-                  <Text style={styles.sectionSubSmall}>Un clic sur l’icône suffit</Text>
+                  <Text style={styles.sectionTitle}>Modes de calcul</Text>
+                  <Text style={styles.sectionSubSmall}>Tu peux en cumuler plusieurs</Text>
                 </View>
 
                 <View style={styles.modeStatePill}>
-                  <Text style={styles.modeStatePillText}>
-                    {modesActifs.personnalise
-                      ? "Personnalisé"
-                      : [
-                          modesActifs.tentatives ? "Tentatives" : null,
-                          modesActifs.balises ? "Balises" : null,
-                          modesActifs.parcours ? "Parcours" : null,
-                        ]
-                          .filter(Boolean)
-                          .join(" + ")}
+                  <Text style={styles.modeStatePillText} numberOfLines={1}>
+                    {getModeLabel(modesActifs)}
                   </Text>
                 </View>
               </View>
 
               <View style={[styles.modesRow, { marginHorizontal: -5 }]}>
-                <CompactModeButton
-                  modeKey="tentatives"
-                  label="Tentatives"
-                  icon="target"
-                  active={modesActifs.tentatives}
-                  onPress={() => toggleMode("tentatives")}
-                  widthPercent={modeWidth}
-                />
                 <CompactModeButton
                   modeKey="balises"
                   label="Balises"
@@ -1141,21 +1078,27 @@ export default function GestionPoints({ setPage }: Props) {
                 />
                 <CompactModeButton
                   modeKey="parcours"
-                  label="Parcours"
+                  label="Parcours terminé"
                   icon="award"
                   active={modesActifs.parcours}
                   onPress={() => toggleMode("parcours")}
                   widthPercent={modeWidth}
                 />
                 <CompactModeButton
-                  modeKey="personnalise"
-                  label="Perso"
-                  icon="sliders"
-                  active={modesActifs.personnalise}
-                  onPress={() => toggleMode("personnalise")}
+                  modeKey="tentatives"
+                  label="Tentatives"
+                  icon="target"
+                  active={modesActifs.tentatives}
+                  onPress={() => toggleMode("tentatives")}
                   widthPercent={modeWidth}
                 />
               </View>
+
+              {!hasAtLeastOneMode ? (
+                <Text style={styles.warningText}>
+                  Active au moins un mode pour pouvoir enregistrer.
+                </Text>
+              ) : null}
 
               {modesActifs.parcours ? (
                 <View style={styles.inlineSettingRow}>
@@ -1168,7 +1111,12 @@ export default function GestionPoints({ setPage }: Props) {
                     >
                       <Feather name="hash" size={16} color="#047857" />
                     </LinearGradient>
-                    <Text style={styles.inlineSettingLabel}>Points par parcours</Text>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.inlineSettingLabel}>Bonus parcours terminé</Text>
+                      <Text style={styles.helperText}>
+                        Ajouté seulement quand toutes les balises sont justes.
+                      </Text>
+                    </View>
                   </View>
 
                   <View style={styles.inlineInputWrap}>
@@ -1186,34 +1134,23 @@ export default function GestionPoints({ setPage }: Props) {
                   </View>
                 </View>
               ) : null}
-
-              {modesActifs.personnalise ? (
-                <TouchableOpacity
-                  activeOpacity={0.92}
-                  onPress={() => setPage("configurationPersonnalisee")}
-                  style={styles.customBtn}
-                >
-                  <Feather name="settings" size={15} color="#fff" />
-                  <Text style={styles.customBtnText}>Configurer par parcours</Text>
-                </TouchableOpacity>
-              ) : null}
             </View>
 
             {modesActifs.tentatives ? (
               <View style={[styles.sectionCard, styles.compactCard]}>
                 <View style={styles.sectionTopRow}>
                   <View>
-                    <Text style={styles.sectionTitle}>Référence des barèmes tentatives</Text>
-                    <Text style={styles.sectionSubSmall}>Choisis seulement une page</Text>
+                    <Text style={styles.sectionTitle}>Barème de tentatives</Text>
+                    <Text style={styles.sectionSubSmall}>Utilisé quand le parcours est terminé</Text>
                   </View>
                 </View>
 
-                {!teacherId ? (
+                {!ownerTeacherId ? (
                   <Text style={styles.helperText}>
-                    Impossible de retrouver le professeur connecté.
+                    Impossible de retrouver le professeur propriétaire de la classe.
                   </Text>
                 ) : allTentativePages.length === 0 ? (
-                  <Text style={styles.helperText}>
+                  <Text style={styles.warningText}>
                     Aucune page de tentatives trouvée. Crée d’abord une page dans l’écran Tentatives.
                   </Text>
                 ) : (
@@ -1251,7 +1188,7 @@ export default function GestionPoints({ setPage }: Props) {
                             tentativePageMode === "personnalise" && styles.toggleBtnTextActive,
                           ]}
                         >
-                          Personnalisé
+                          Par parcours
                         </Text>
                       </TouchableOpacity>
                     </View>
@@ -1271,7 +1208,7 @@ export default function GestionPoints({ setPage }: Props) {
                           <View style={{ flex: 1 }}>
                             <Text style={styles.inlineSettingLabel}>Page générale</Text>
                             <Text style={styles.helperText}>
-                              La même page sera utilisée pour tous les parcours de la classe.
+                              Même barème pour tous les parcours de cette classe.
                             </Text>
                           </View>
                         </View>
@@ -1281,10 +1218,11 @@ export default function GestionPoints({ setPage }: Props) {
                           onPress={() => setShowGeneralPagePicker(true)}
                           style={styles.pageSelectorChip}
                         >
-                          <Text style={styles.pageSelectorChipText}>
+                          <Text style={styles.pageSelectorChipText} numberOfLines={1}>
                             {tentativePageDefault
-                              ? allTentativePages.find((p) => p.page_number === tentativePageDefault)?.page_name ||
-                                `Page ${tentativePageDefault}`
+                              ? allTentativePages.find(
+                                  (p) => p.page_number === tentativePageDefault
+                                )?.page_name || `Page ${tentativePageDefault}`
                               : "Choisir"}
                           </Text>
                           <Feather name="chevron-down" size={14} color="#6D28D9" />
@@ -1300,9 +1238,7 @@ export default function GestionPoints({ setPage }: Props) {
                         </View>
 
                         {groupParcours.length === 0 ? (
-                          <Text style={styles.helperText}>
-                            Aucun parcours partagé trouvé pour cette classe dans `partages_parcours`.
-                          </Text>
+                          <Text style={styles.helperText}>Aucun parcours associé à cette classe.</Text>
                         ) : (
                           groupParcours.map((parcours) => {
                             const pageValue = tentativePageAssignments[parcours.id] ?? null;
@@ -1316,7 +1252,7 @@ export default function GestionPoints({ setPage }: Props) {
                                     {getDisplayName(parcours)}
                                   </Text>
                                   <Text style={styles.parcoursAssignSub}>
-                                    Pages dispo : {allTentativePages.map((p) => p.page_name).join(" · ")}
+                                    Barème utilisé pour ce parcours
                                   </Text>
                                 </View>
 
@@ -1325,8 +1261,9 @@ export default function GestionPoints({ setPage }: Props) {
                                   onPress={() => setPickerParcoursId(parcours.id)}
                                   style={styles.pageSelectorChip}
                                 >
-                                  <Text style={styles.pageSelectorChipText}>
-                                    {pageObj?.page_name || (pageValue ? `Page ${pageValue}` : "Choisir")}
+                                  <Text style={styles.pageSelectorChipText} numberOfLines={1}>
+                                    {pageObj?.page_name ||
+                                      (pageValue ? `Page ${pageValue}` : "Choisir")}
                                   </Text>
                                   <Feather name="chevron-down" size={14} color="#6D28D9" />
                                 </TouchableOpacity>
@@ -1435,9 +1372,7 @@ export default function GestionPoints({ setPage }: Props) {
 
 /* ======================= Styles ======================= */
 const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-  },
+  root: { flex: 1 },
 
   header: {
     backgroundColor: C_HEADER,
@@ -1450,9 +1385,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 10,
   },
-  headerCenter: {
-    flex: 1,
-  },
+  headerCenter: { flex: 1 },
   headerTitle: {
     color: C_TEXT,
     fontSize: 18,
@@ -1482,10 +1415,7 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
     elevation: 2,
   },
-  compactCard: {
-    paddingTop: 10,
-    paddingBottom: 10,
-  },
+  compactCard: { paddingTop: 10, paddingBottom: 10 },
 
   sectionTopRow: {
     flexDirection: "row",
@@ -1494,11 +1424,7 @@ const styles = StyleSheet.create({
     gap: 10,
     marginBottom: 8,
   },
-  sectionTitle: {
-    color: C_TEXT,
-    fontSize: 16,
-    fontWeight: "800",
-  },
+  sectionTitle: { color: C_TEXT, fontSize: 16, fontWeight: "800" },
   sectionSubSmall: {
     color: C_SUB,
     fontSize: 12,
@@ -1508,6 +1434,7 @@ const styles = StyleSheet.create({
 
   targetChip: {
     minHeight: 36,
+    maxWidth: "56%",
     flexDirection: "row",
     alignItems: "center",
     gap: 7,
@@ -1522,6 +1449,7 @@ const styles = StyleSheet.create({
     color: "#1D4ED8",
     fontWeight: "800",
     fontSize: 12,
+    flexShrink: 1,
   },
 
   selectedClassCard: {
@@ -1554,19 +1482,9 @@ const styles = StyleSheet.create({
     fontWeight: "900",
     fontSize: 11,
   },
-  selectedClassName: {
-    color: C_TEXT,
-    fontSize: 14,
-    fontWeight: "800",
-  },
-  selectedClassPath: {
-    color: C_SUB,
-    fontSize: 11,
-    marginTop: 2,
-  },
-  selectedClassRight: {
-    alignItems: "flex-end",
-  },
+  selectedClassName: { color: C_TEXT, fontSize: 14, fontWeight: "800" },
+  selectedClassPath: { color: C_SUB, fontSize: 11, marginTop: 2 },
+  selectedClassRight: { alignItems: "flex-end" },
 
   configPill: {
     flexDirection: "row",
@@ -1579,11 +1497,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 5,
   },
-  configPillText: {
-    color: "#B45309",
-    fontWeight: "800",
-    fontSize: 11,
-  },
+  configPillText: { color: "#B45309", fontWeight: "800", fontSize: 11 },
   todoPill: {
     borderRadius: 999,
     backgroundColor: "rgba(148,163,184,0.10)",
@@ -1592,26 +1506,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 5,
   },
-  todoPillText: {
-    color: C_MUTED,
-    fontWeight: "800",
-    fontSize: 11,
-  },
-  helperText: {
-    color: C_SUB,
+  todoPillText: { color: C_MUTED, fontWeight: "800", fontSize: 11 },
+  helperText: { color: C_SUB, fontSize: 12, fontWeight: "600" },
+  warningText: {
+    color: "#B45309",
     fontSize: 12,
-    fontWeight: "600",
+    fontWeight: "800",
+    marginTop: 8,
   },
 
-  modesRow: {
-    flexDirection: "row",
-    flexWrap: "nowrap",
-  },
-  compactModeCard: {
-    borderWidth: 1,
-    borderRadius: 14,
-    padding: 6,
-  },
+  modesRow: { flexDirection: "row", flexWrap: "nowrap" },
+  compactModeCard: { borderWidth: 1, borderRadius: 14, padding: 6 },
   compactModeInner: {
     borderRadius: 12,
     alignItems: "center",
@@ -1635,12 +1540,7 @@ const styles = StyleSheet.create({
     textAlign: "center",
     minHeight: 28,
   },
-  compactModeDot: {
-    marginTop: 7,
-    width: 8,
-    height: 8,
-    borderRadius: 999,
-  },
+  compactModeDot: { marginTop: 7, width: 8, height: 8, borderRadius: 999 },
 
   modeStatePill: {
     borderRadius: 999,
@@ -1651,11 +1551,7 @@ const styles = StyleSheet.create({
     borderColor: "rgba(59,130,246,0.18)",
     maxWidth: "56%",
   },
-  modeStatePillText: {
-    color: "#1D4ED8",
-    fontWeight: "800",
-    fontSize: 11,
-  },
+  modeStatePillText: { color: "#1D4ED8", fontWeight: "800", fontSize: 11 },
 
   inlineSettingRow: {
     marginTop: 10,
@@ -1683,16 +1579,8 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  inlineSettingLabel: {
-    color: C_TEXT,
-    fontSize: 13,
-    fontWeight: "800",
-  },
-  inlineInputWrap: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
+  inlineSettingLabel: { color: C_TEXT, fontSize: 13, fontWeight: "800" },
+  inlineInputWrap: { flexDirection: "row", alignItems: "center", gap: 8 },
   inlineInput: {
     width: 64,
     textAlign: "center",
@@ -1706,35 +1594,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: Platform.OS === "web" ? 8 : 7,
   },
-  inlineInputUnit: {
-    color: C_TEXT,
-    fontSize: 13,
-    fontWeight: "800",
-  },
+  inlineInputUnit: { color: C_TEXT, fontSize: 13, fontWeight: "800" },
 
-  customBtn: {
-    marginTop: 10,
-    alignSelf: "flex-start",
-    minHeight: 40,
-    borderRadius: 12,
-    backgroundColor: "#2563EB",
-    paddingHorizontal: 13,
-    paddingVertical: 10,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 7,
-  },
-  customBtnText: {
-    color: "#FFFFFF",
-    fontWeight: "800",
-    fontSize: 13,
-  },
-
-  toggleRow: {
-    flexDirection: "row",
-    gap: 8,
-    marginTop: 4,
-  },
+  toggleRow: { flexDirection: "row", gap: 8, marginTop: 4 },
   toggleBtn: {
     flex: 1,
     minHeight: 40,
@@ -1749,14 +1611,8 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(59,130,246,0.10)",
     borderColor: "rgba(59,130,246,0.26)",
   },
-  toggleBtnText: {
-    color: C_TEXT,
-    fontWeight: "800",
-    fontSize: 13,
-  },
-  toggleBtnTextActive: {
-    color: "#1D4ED8",
-  },
+  toggleBtnText: { color: C_TEXT, fontWeight: "800", fontSize: 13 },
+  toggleBtnTextActive: { color: "#1D4ED8" },
 
   tentativeCard: {
     marginTop: 10,
@@ -1771,12 +1627,7 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     gap: 10,
   },
-  tentativeCardLeft: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    flex: 1,
-  },
+  tentativeCardLeft: { flexDirection: "row", alignItems: "center", gap: 8, flex: 1 },
   tentativeCardHeader: {
     flexDirection: "row",
     alignItems: "center",
@@ -1786,6 +1637,7 @@ const styles = StyleSheet.create({
 
   pageSelectorChip: {
     minHeight: 38,
+    maxWidth: 150,
     borderRadius: 999,
     paddingHorizontal: 12,
     paddingVertical: 8,
@@ -1800,6 +1652,7 @@ const styles = StyleSheet.create({
     color: "#6D28D9",
     fontWeight: "800",
     fontSize: 12,
+    flexShrink: 1,
   },
 
   parcoursAssignRow: {
@@ -1815,16 +1668,8 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 10,
   },
-  parcoursAssignName: {
-    color: C_TEXT,
-    fontSize: 13,
-    fontWeight: "800",
-  },
-  parcoursAssignSub: {
-    color: C_SUB,
-    fontSize: 11,
-    marginTop: 2,
-  },
+  parcoursAssignName: { color: C_TEXT, fontSize: 13, fontWeight: "800" },
+  parcoursAssignSub: { color: C_SUB, fontSize: 11, marginTop: 2 },
 
   stateCard: {
     backgroundColor: C_CARD,
@@ -1848,12 +1693,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     marginBottom: 10,
   },
-  stateTitle: {
-    color: C_TEXT,
-    fontSize: 17,
-    fontWeight: "800",
-    textAlign: "center",
-  },
+  stateTitle: { color: C_TEXT, fontSize: 17, fontWeight: "800", textAlign: "center" },
   stateText: {
     color: C_SUB,
     fontSize: 13,
@@ -1868,11 +1708,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 10,
   },
-  retryBtnText: {
-    color: "#fff",
-    fontWeight: "800",
-    fontSize: 13,
-  },
+  retryBtnText: { color: "#fff", fontWeight: "800", fontSize: 13 },
 
   statsPanel: {
     marginTop: 2,
@@ -1893,17 +1729,8 @@ const styles = StyleSheet.create({
     paddingTop: 14,
     paddingBottom: 8,
   },
-  statsPanelTitle: {
-    color: "#FFFFFF",
-    fontSize: 16,
-    fontWeight: "800",
-  },
-  statsGridHorizontal: {
-    flexDirection: "row",
-    paddingHorizontal: 12,
-    paddingBottom: 14,
-    gap: 10,
-  },
+  statsPanelTitle: { color: "#FFFFFF", fontSize: 16, fontWeight: "800" },
+  statsGridHorizontal: { flexDirection: "row", paddingHorizontal: 12, paddingBottom: 14, gap: 10 },
   statsMiniBlock: {
     flex: 1,
     borderRadius: 14,
@@ -1922,12 +1749,7 @@ const styles = StyleSheet.create({
     textAlign: "center",
     marginBottom: 4,
   },
-  statsMiniValue: {
-    color: "#A7F3D0",
-    fontSize: 24,
-    fontWeight: "900",
-    textAlign: "center",
-  },
+  statsMiniValue: { color: "#A7F3D0", fontSize: 24, fontWeight: "900", textAlign: "center" },
 
   bottomActionBar: {
     position: "absolute",
@@ -1954,11 +1776,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 10,
   },
-  saveButtonText: {
-    color: "#1F2937",
-    fontWeight: "900",
-    fontSize: 15,
-  },
+  saveButtonText: { color: "#1F2937", fontWeight: "900", fontSize: 15 },
 
   modalOverlay: {
     flex: 1,
@@ -1982,11 +1800,7 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     marginBottom: 12,
   },
-  modalTitle: {
-    color: C_TEXT,
-    fontSize: 17,
-    fontWeight: "800",
-  },
+  modalTitle: { color: C_TEXT, fontSize: 17, fontWeight: "800" },
   modalCloseBtn: {
     width: 36,
     height: 36,
@@ -2006,12 +1820,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
   },
-  modalOptionLeft: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    flex: 1,
-  },
+  modalOptionLeft: { flexDirection: "row", alignItems: "center", gap: 10, flex: 1 },
   modalOptionAvatar: {
     width: 34,
     height: 34,
@@ -2019,15 +1828,8 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  modalOptionAvatarText: {
-    fontSize: 11,
-    fontWeight: "900",
-  },
-  modalOptionText: {
-    color: C_TEXT,
-    fontSize: 14,
-    fontWeight: "700",
-  },
+  modalOptionAvatarText: { fontSize: 11, fontWeight: "900" },
+  modalOptionText: { color: C_TEXT, fontSize: 14, fontWeight: "700" },
 });
 
 /* ======================= Styles modal info ======================= */
@@ -2059,12 +1861,7 @@ const infoStyles = StyleSheet.create({
     justifyContent: "space-between",
     gap: 12,
   },
-  title: {
-    flex: 1,
-    color: C_TEXT,
-    fontSize: 19,
-    fontWeight: "800",
-  },
+  title: { flex: 1, color: C_TEXT, fontSize: 19, fontWeight: "800" },
   closeBtn: {
     width: 38,
     height: 38,
@@ -2073,62 +1870,14 @@ const infoStyles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  pageBadge: {
-    alignSelf: "flex-start",
-    marginTop: 10,
-    marginBottom: 12,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 999,
-    backgroundColor: "rgba(59,130,246,0.10)",
-    borderWidth: 1,
-    borderColor: "rgba(59,130,246,0.18)",
-  },
-  pageBadgeText: {
-    color: "#2563EB",
-    fontWeight: "700",
-    fontSize: 12,
-  },
-  content: {
-    minHeight: 120,
-    justifyContent: "flex-start",
-  },
-  body: {
-    color: C_TEXT,
-    fontSize: 15,
-    lineHeight: 22,
-    marginBottom: 10,
-  },
-  actions: {
-    flexDirection: "row",
-    gap: 10,
-    marginTop: 8,
-  },
-  secondaryBtn: {
-    flex: 1,
-    minHeight: 46,
-    borderRadius: 14,
-    backgroundColor: "rgba(0,0,0,0.06)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  secondaryBtnText: {
-    color: C_TEXT,
-    fontWeight: "800",
-  },
+  content: { marginTop: 14, marginBottom: 16 },
+  body: { color: C_TEXT, fontSize: 15, lineHeight: 22, marginBottom: 10 },
   primaryBtn: {
-    flex: 1,
     minHeight: 46,
     borderRadius: 14,
     backgroundColor: "#2563EB",
     alignItems: "center",
     justifyContent: "center",
   },
-  primaryBtnText: {
-    color: "#FFFFFF",
-    fontWeight: "800",
-  },
-  btnDisabled: {
-    opacity: 0.45,
-  },
+  primaryBtnText: { color: "#FFFFFF", fontWeight: "800" },
 });
