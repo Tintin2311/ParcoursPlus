@@ -16,6 +16,7 @@ import {
 import { LinearGradient } from "expo-linear-gradient";
 import { Feather } from "@expo/vector-icons";
 import { supabase } from "./supabaseClient";
+import BottomBarEleve from "./ui/BottomBarEleve";
 
 /* =========================
    Types
@@ -100,16 +101,19 @@ type Props = {
 };
 
 /* =========================
-   Theme
+   Theme lumineux
 ========================= */
-const C_BG = "#07111F";
-const C_BG_2 = "#0B1728";
-const C_CARD = "#101D32";
-const C_TEXT = "#F8FAFC";
-const C_MUTED = "#A9B8D0";
-const C_BORDER = "rgba(255,255,255,0.08)";
+const C_BG = "#EAF6FF";
+const C_BG_2 = "#F8FCFF";
+const C_CARD = "#FFFFFF";
+const C_TEXT = "#12304A";
+const C_MUTED = "#5D7288";
+const C_BORDER = "rgba(31,91,134,0.14)";
 const C_GOLD = "#F59E0B";
-const C_BLUE = "#60A5FA";
+const C_BLUE = "#1F75B8";
+const C_BLUE_DARK = "#1F5B86";
+const C_GREEN = "#16A34A";
+const C_ORANGE = "#F59E0B";
 
 /* =========================
    Helpers
@@ -536,12 +540,12 @@ const EcrireResultat: React.FC<Props> = ({
       : styles.parcoursCard;
 
     const iconColors = isFolder
-      ? ["#1E3A8A", "#2563EB"]
+      ? ["#1F5B86", "#1F75B8"]
       : isCompleted
       ? ["#16A34A", "#22C55E"]
       : isStarted
       ? ["#F59E0B", "#FB923C"]
-      : ["#7C3AED", "#2563EB"];
+      : ["#4F46E5", "#1F75B8"];
 
     const rightIcon = isFolder
       ? expandedFolders.has(item.id)
@@ -556,10 +560,10 @@ const EcrireResultat: React.FC<Props> = ({
     const rightColor = isFolder
       ? C_MUTED
       : isCompleted
-      ? "#86EFAC"
+      ? C_GREEN
       : isStarted
-      ? "#FDBA74"
-      : "#FCD34D";
+      ? C_ORANGE
+      : C_BLUE;
 
     const subtitle = isFolder
       ? "Dossier"
@@ -578,13 +582,13 @@ const EcrireResultat: React.FC<Props> = ({
             marginLeft: offset,
             borderLeftWidth: 4,
             borderLeftColor: isCompleted
-              ? "rgba(34,197,94,0.55)"
+              ? "rgba(22,163,74,0.50)"
               : isStarted
               ? "rgba(245,158,11,0.55)"
               : depth === 1
-              ? "rgba(96,165,250,0.35)"
+              ? "rgba(31,117,184,0.35)"
               : depth === 2
-              ? "rgba(167,139,250,0.35)"
+              ? "rgba(79,70,229,0.30)"
               : "rgba(245,158,11,0.35)",
           },
         ]}
@@ -628,7 +632,7 @@ const EcrireResultat: React.FC<Props> = ({
               <Text style={styles.nodeSubtitle}>{subtitle}</Text>
             </View>
 
-            <Feather name={rightIcon as any} size={18} color={rightColor} />
+            <Feather name={rightIcon as any} size={19} color={rightColor} />
           </TouchableOpacity>
         </View>
       </View>
@@ -640,30 +644,23 @@ const EcrireResultat: React.FC<Props> = ({
       <LinearGradient colors={[C_BG, C_BG_2]} style={styles.container}>
         <View style={styles.topBar}>
           <View style={styles.topBadge}>
-            <Feather name="shield" size={18} color="#FDE68A" />
+            <Feather name="shield" size={18} color="#FFFFFF" />
           </View>
 
           <View style={{ flex: 1 }}>
             <Text style={styles.pageTitle}>Mes parcours</Text>
             <Text style={styles.pageSubtitle}>{sourceDescription}</Text>
           </View>
-
-          <TouchableOpacity
-            activeOpacity={0.9}
-            onPress={() => setPage("AccueilEleve")}
-            style={styles.topRightBtn}
-          >
-            <Feather name="home" size={18} color="#fff" />
-          </TouchableOpacity>
         </View>
 
         <ScrollView
-          contentContainerStyle={{ padding: 14, paddingBottom: 40 }}
+          contentContainerStyle={{ padding: 14, paddingBottom: 118 }}
           keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
         >
           <View style={styles.heroCard}>
             <LinearGradient
-              colors={["rgba(124,58,237,0.22)", "rgba(37,99,235,0.22)"]}
+              colors={["#FFFFFF", "#EEF7FF"]}
               start={{ x: 0, y: 0 }}
               end={{ x: 1, y: 1 }}
               style={styles.heroInner}
@@ -679,7 +676,7 @@ const EcrireResultat: React.FC<Props> = ({
                   value={searchTerm}
                   onChangeText={setSearchTerm}
                   placeholder="Rechercher un dossier ou un parcours..."
-                  placeholderTextColor="#7C8DA8"
+                  placeholderTextColor="#8AA0B7"
                   style={styles.searchInput}
                 />
               </View>
@@ -727,6 +724,8 @@ const EcrireResultat: React.FC<Props> = ({
             </View>
           )}
         </ScrollView>
+
+        <BottomBarEleve currentPage="EcrireResultat" onNavigate={setPage} />
       </LinearGradient>
     </SafeAreaView>
   );
@@ -748,9 +747,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: Platform.OS === "android" ? 14 : 8,
     paddingBottom: 12,
+    backgroundColor: C_BLUE_DARK,
     borderBottomWidth: 1,
-    borderBottomColor: "rgba(255,255,255,0.06)",
-    backgroundColor: "rgba(4,12,24,0.72)",
+    borderBottomColor: "rgba(255,255,255,0.18)",
   },
   topBadge: {
     width: 42,
@@ -758,27 +757,17 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(245,158,11,0.16)",
+    backgroundColor: "rgba(255,255,255,0.16)",
     borderWidth: 1,
-    borderColor: "rgba(245,158,11,0.30)",
-  },
-  topRightBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 12,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(255,255,255,0.08)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.08)",
+    borderColor: "rgba(255,255,255,0.22)",
   },
   pageTitle: {
-    color: C_TEXT,
+    color: "#FFFFFF",
     fontSize: 20,
     fontWeight: "900",
   },
   pageSubtitle: {
-    color: C_MUTED,
+    color: "#DBEAFE",
     fontSize: 12,
     marginTop: 2,
     fontWeight: "700",
@@ -791,6 +780,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: C_BORDER,
     backgroundColor: C_CARD,
+    shadowColor: "#1F5B86",
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
   },
   heroInner: { padding: 16 },
   heroTitle: {
@@ -808,11 +802,11 @@ const styles = StyleSheet.create({
   },
 
   searchBox: {
-    height: 46,
-    borderRadius: 14,
-    backgroundColor: "rgba(255,255,255,0.06)",
+    height: 48,
+    borderRadius: 16,
+    backgroundColor: "#F8FBFF",
     borderWidth: 1,
-    borderColor: C_BORDER,
+    borderColor: "rgba(31,91,134,0.18)",
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
@@ -826,11 +820,16 @@ const styles = StyleSheet.create({
   },
 
   listWrap: {
-    backgroundColor: "rgba(16,29,50,0.70)",
+    backgroundColor: "#FFFFFF",
     borderWidth: 1,
     borderColor: C_BORDER,
-    borderRadius: 18,
+    borderRadius: 22,
     padding: 10,
+    shadowColor: "#1F5B86",
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
   },
   sectionTitle: {
     color: C_TEXT,
@@ -841,41 +840,41 @@ const styles = StyleSheet.create({
   },
 
   nodeCard: {
-    borderRadius: 14,
+    borderRadius: 16,
     borderWidth: 1,
     overflow: "hidden",
   },
   folderCard: {
-    backgroundColor: "rgba(255,255,255,0.05)",
-    borderColor: "rgba(96,165,250,0.18)",
+    backgroundColor: "#F8FBFF",
+    borderColor: "rgba(31,117,184,0.18)",
   },
   parcoursCard: {
-    backgroundColor: "rgba(255,255,255,0.03)",
-    borderColor: "rgba(167,139,250,0.18)",
+    backgroundColor: "#FFFFFF",
+    borderColor: "rgba(79,70,229,0.16)",
   },
   parcoursCardStarted: {
-    backgroundColor: "rgba(245,158,11,0.13)",
+    backgroundColor: "#FFFBEB",
     borderColor: "rgba(245,158,11,0.45)",
   },
   parcoursCardDone: {
-    backgroundColor: "rgba(34,197,94,0.13)",
-    borderColor: "rgba(34,197,94,0.48)",
+    backgroundColor: "#F0FDF4",
+    borderColor: "rgba(22,163,74,0.45)",
   },
 
   nodeRow: {
-    minHeight: 56,
+    minHeight: 58,
     justifyContent: "center",
   },
   nodeLeft: {
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: 10,
-    paddingVertical: 8,
+    paddingVertical: 9,
   },
   nodeIcon: {
-    width: 34,
-    height: 34,
-    borderRadius: 12,
+    width: 36,
+    height: 36,
+    borderRadius: 13,
     alignItems: "center",
     justifyContent: "center",
     marginRight: 10,
@@ -887,7 +886,7 @@ const styles = StyleSheet.create({
   nodeTitle: {
     color: C_TEXT,
     fontSize: 14,
-    fontWeight: "800",
+    fontWeight: "900",
   },
   nodeSubtitle: {
     color: C_MUTED,
@@ -897,13 +896,18 @@ const styles = StyleSheet.create({
   },
 
   stateCard: {
-    backgroundColor: C_CARD,
-    borderRadius: 20,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 22,
     borderWidth: 1,
     borderColor: C_BORDER,
     padding: 24,
     alignItems: "center",
     justifyContent: "center",
+    shadowColor: "#1F5B86",
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
   },
   stateTitle: {
     color: C_TEXT,

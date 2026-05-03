@@ -31,14 +31,21 @@ const CreerUnNouveauParcours = React.lazy(() => import("./CreerUnNouveauParcours
 const ModifierUnParcours = React.lazy(() => import("./ModifierUnParcours"));
 const MesParcours = React.lazy(() => import("./MesParcours"));
 const NouveauMotDePasse = React.lazy(() => import("./NouveauMotDePasse"));
+
 const GestionResultats = React.lazy(() => import("./GestionResultats")) as React.LazyExoticComponent<React.ComponentType<any>>;
 const GestionResultatsTentatives = React.lazy(() => import("./GestionResultatsTentatives")) as React.LazyExoticComponent<React.ComponentType<any>>;
 const GestionResultatsProgressivite = React.lazy(() => import("./GestionResultatsProgressivite")) as React.LazyExoticComponent<React.ComponentType<any>>;
 const GestionPoints = React.lazy(() => import("./GestionPoints")) as React.LazyExoticComponent<React.ComponentType<any>>;
 const Association = React.lazy(() => import("./Association")) as React.LazyExoticComponent<React.ComponentType<any>>;
+
 const AccueilEleve = React.lazy(() => import("./AccueilEleve"));
+const ClassementEleve = React.lazy(() => import("./SessionEleve/ClassementEleve"));
 const EcrireResultat = React.lazy(() => import("./EcrireResultat")) as React.LazyExoticComponent<React.ComponentType<any>>;
 const EcrireCodeBaliseEleve = React.lazy(() => import("./EcrireCodeBaliseEleve")) as React.LazyExoticComponent<React.ComponentType<any>>;
+
+const Jeudeserreurs = React.lazy(() => import("./Jeux/Jeudeserreurs"));
+const CreerJeuDesErreurs = React.lazy(() => import("./Jeux/CreerJeuDesErreurs"));
+
 const StatistiquesEleve = React.lazy(() => import("./StatistiquesEleve"));
 const MotDePasseOublie = React.lazy(() => import("./MotDePasseOublie"));
 const PartageParcours = React.lazy(() => import("./PartageParcours"));
@@ -58,6 +65,7 @@ type Mode = "accueil" | "prof" | "eleve";
 type PageType =
   | "accueil"
   | "AccueilProf"
+  | "ClassementEleve"
   | "Parametres"
   | "gestionGroupes"
   | "GestionEleves"
@@ -65,6 +73,7 @@ type PageType =
   | "CreationBalise"
   | "gestionParcours"
   | "CreerUnNouveauParcours"
+  | "CreerJeuDesErreurs"
   | "ModifierUnParcours"
   | "MesParcours"
   | "GestionResultats"
@@ -74,6 +83,7 @@ type PageType =
   | "Association"
   | "EcrireResultat"
   | "EcrireCodeBaliseEleve"
+  | "Jeudeserreurs"
   | "StatistiquesEleve"
   | "PartageParcours"
   | "CreationCompteProf"
@@ -139,12 +149,14 @@ const storage = {
       return null;
     }
   },
+
   async set(key: string, value: string) {
     try {
       if (Platform.OS === "web") window.localStorage.setItem(key, value);
       else await AsyncStorage.setItem(key, value);
     } catch {}
   },
+
   async multiRemove(keys: string[]) {
     try {
       if (Platform.OS === "web") keys.forEach((k) => window.localStorage.removeItem(k));
@@ -197,6 +209,7 @@ const normalizePage = (value: string | null | undefined): PageType => {
     case "creationbalise": return "CreationBalise";
     case "gestionparcours": return "gestionParcours";
     case "creerunnouveauparcours": return "CreerUnNouveauParcours";
+    case "creerjeudeserreurs": return "CreerJeuDesErreurs";
     case "modifierunparcours": return "ModifierUnParcours";
     case "mesparcours": return "MesParcours";
     case "gestionresultats": return "GestionResultats";
@@ -206,6 +219,7 @@ const normalizePage = (value: string | null | undefined): PageType => {
     case "association": return "Association";
     case "ecrireresultat": return "EcrireResultat";
     case "ecrirecodebaliseeleve": return "EcrireCodeBaliseEleve";
+    case "jeudeserreurs": return "Jeudeserreurs";
     case "statistiqueseleve": return "StatistiquesEleve";
     case "partageparcours": return "PartageParcours";
     case "creationcompteprof": return "CreationCompteProf";
@@ -213,6 +227,7 @@ const normalizePage = (value: string | null | undefined): PageType => {
     case "nouveaumotdepasse": return "NouveauMotDePasse";
     case "motdepassebymail": return "MotDePasseByMail";
     case "accueileleve": return "AccueilEleve";
+    case "classementeleve": return "ClassementEleve";
     case "objectifseleve": return "ObjectifsEleve";
     case "configurationpersonnalisee": return "configurationPersonnalisee";
     case "gestionresultatstentatives_parcours": return "gestionResultatsTentatives_parcours";
@@ -234,8 +249,10 @@ const PROF_TAB_PAGES = new Set<PageType>([
 
 const ELEVE_PAGES = new Set<PageType>([
   "AccueilEleve",
+  "ClassementEleve",
   "EcrireResultat",
   "EcrireCodeBaliseEleve",
+  "Jeudeserreurs",
   "StatistiquesEleve",
   "ObjectifsEleve",
 ]);
@@ -253,6 +270,7 @@ const PROF_EXTRA_PAGES = new Set<PageType>([
   "GestionEleves",
   "CreationBalise",
   "CreerUnNouveauParcours",
+  "CreerJeuDesErreurs",
   "ModifierUnParcours",
   "MesParcours",
   "GestionResultatsTentatives",
@@ -281,22 +299,27 @@ const pageToTabId = (p: PageType) => {
 
   switch (normalized) {
     case "AccueilProf": return "accueil";
+
     case "GestionPoints":
     case "GestionResultatsTentatives":
     case "GestionResultatsProgressivite":
     case "gestionResultatsTentatives_parcours":
     case "GestionResultats":
       return "gestionResultats";
+
     case "CreationBalise":
     case "BaliseCode":
     case "BaliseTableau":
     case "BaliseQRcode":
     case "BalisePoincon":
       return "gestionBalises";
+
     case "CreerUnNouveauParcours":
+    case "CreerJeuDesErreurs":
     case "ModifierUnParcours":
     case "MesParcours":
       return "gestionParcours";
+
     default:
       return normalized;
   }
@@ -855,9 +878,13 @@ export default function App() {
                     <GestionBalises setPage={goStr} professeur={professeur} />
                   )}
 
-                  {page === "gestionParcours" && <GestionParcours setPage={goStr} />}
+                  {page === "gestionParcours" && (
+                    <GestionParcours setPage={goStr} />
+                  )}
 
-                  {page === "GestionResultats" && <GestionResultats setPage={goStr} />}
+                  {page === "GestionResultats" && (
+                    <GestionResultats setPage={goStr} />
+                  )}
 
                   <BottomBar
                     currentPage={pageToTabId(page)}
@@ -905,7 +932,9 @@ export default function App() {
                     />
                   )}
 
-                  {page === "CreationBalise" && <CreationBalise setPage={goStr} />}
+                  {page === "CreationBalise" && (
+                    <CreationBalise setPage={goStr} />
+                  )}
 
                   {page === "BaliseCode" && <BaliseCode setPage={goStr} />}
                   {page === "BaliseTableau" && <BaliseTableau setPage={goStr} />}
@@ -916,6 +945,12 @@ export default function App() {
                     <CreerUnNouveauParcours
                       setPage={goStr}
                       professeur={professeur}
+                    />
+                  )}
+
+                  {page === "CreerJeuDesErreurs" && (
+                    <CreerJeuDesErreurs
+                      setPage={goStr}
                     />
                   )}
 
@@ -981,6 +1016,10 @@ export default function App() {
                     />
                   )}
 
+                  {page === "ClassementEleve" && (
+                    <ClassementEleve setPage={goStr} />
+                  )}
+
                   {page === "EcrireResultat" && (
                     <EcrireResultat
                       setPage={goStr}
@@ -999,22 +1038,14 @@ export default function App() {
                     />
                   )}
 
-                  {page === "StatistiquesEleve" && (
-                    <StatistiquesEleve
+                  {page === "Jeudeserreurs" && (
+                    <Jeudeserreurs
                       setPage={goStr}
-                      eleveConnecte={eleve}
-                      parcoursGlobaux={parcoursGlobaux}
-                      groupes={groupes}
-                      dossiersParcours={dossiersParcours}
-                      parcoursTerminesEleves={parcoursTerminesEleves}
-                      setParcoursActif={setParcoursActif}
-                      setAffichageResultat={setAffichageResultat}
-                      resultatsEleves={resultatsEleves}
-                      modePoints={modePoints}
-                      baremePointsGlobal={baremePointsGlobal}
-                      baremeEvaluation={baremeEvaluation}
-                      baremePointsParcours={baremePointsParcours}
                     />
+                  )}
+
+                  {page === "StatistiquesEleve" && (
+                    <ClassementEleve setPage={goStr} />
                   )}
 
                   {page === "ObjectifsEleve" && (

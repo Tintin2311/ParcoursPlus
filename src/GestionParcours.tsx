@@ -1,23 +1,24 @@
 // src/GestionParcours.tsx
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
 import {
-  SafeAreaView,
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  useWindowDimensions,
+  Modal,
   Platform,
+  SafeAreaView,
   ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
   Image,
+  useWindowDimensions,
 } from "react-native";
-import { Compass } from "lucide-react-native";
+import { Compass, Gamepad2, MapPlus, X } from "lucide-react-native";
 
 /* ======================= Types ======================= */
 type SetPageFn = (page: any) => void;
 
 type MenuItem = {
-  id: "MesParcours" | "CreerUnNouveauParcours" | "Association" | "PartageParcours";
+  id: "MesParcours" | "Creation" | "Association" | "PartageParcours";
   title: string;
   imageUri: string;
   imageStyle?: {
@@ -30,6 +31,13 @@ type MenuItem = {
 };
 
 type Props = { setPage: SetPageFn };
+
+/* ======================= Pages ======================= */
+const PAGE_MES_PARCOURS = "MesParcours";
+const PAGE_CREER_PARCOURS = "CreerUnNouveauParcours";
+const PAGE_CREER_JEU_DES_ERREURS = "CreerJeuDesErreurs";
+const PAGE_ASSOCIATION = "Association";
+const PAGE_PARTAGE = "PartageParcours";
 
 /* ======================= Couleurs ======================= */
 const PAGE_BG = "#EDF2F6";
@@ -44,14 +52,14 @@ const CARD_BG = "#FFFFFF";
 const CARD_BORDER = "#C9D5DF";
 const CARD_TITLE = "#233548";
 
+const DEFAULT_BOTTOM_SPACE = 96;
+
 const IOS_SHADOW = {
   shadowColor: "#000",
   shadowOpacity: 0.08,
   shadowOffset: { width: 0, height: 2 },
   shadowRadius: 8,
 };
-
-const DEFAULT_BOTTOM_SPACE = 96;
 
 /* ======================= Images ======================= */
 const IMG_CREATION =
@@ -74,6 +82,9 @@ function clamp(n: number, min: number, max: number) {
 /* ======================= Composant principal ======================= */
 const GestionParcours: React.FC<Props> = ({ setPage }) => {
   const { width, height } = useWindowDimensions();
+
+  const [creationModalVisible, setCreationModalVisible] = useState(false);
+  const [gameModalVisible, setGameModalVisible] = useState(false);
 
   const isDesktop = width >= 1100;
   const isTablet = width >= 768 && width < 1100;
@@ -107,7 +118,7 @@ const GestionParcours: React.FC<Props> = ({ setPage }) => {
   const items = useMemo<MenuItem[]>(
     () => [
       {
-        id: "MesParcours",
+        id: PAGE_MES_PARCOURS as "MesParcours",
         title: "Mes parcours",
         imageUri: IMG_MES_PARCOURS,
         imageStyle: {
@@ -119,8 +130,8 @@ const GestionParcours: React.FC<Props> = ({ setPage }) => {
         },
       },
       {
-        id: "CreerUnNouveauParcours",
-        title: "Créer un parcours",
+        id: "Creation",
+        title: "Création",
         imageUri: IMG_CREATION,
         imageStyle: {
           scale: 1.06,
@@ -131,7 +142,7 @@ const GestionParcours: React.FC<Props> = ({ setPage }) => {
         },
       },
       {
-        id: "Association",
+        id: PAGE_ASSOCIATION as "Association",
         title: "Associer classes",
         imageUri: IMG_ASSOCIER,
         imageStyle: {
@@ -143,7 +154,7 @@ const GestionParcours: React.FC<Props> = ({ setPage }) => {
         },
       },
       {
-        id: "PartageParcours",
+        id: PAGE_PARTAGE as "PartageParcours",
         title: "Partager",
         imageUri: IMG_PARTAGER,
         imageStyle: {
@@ -158,9 +169,37 @@ const GestionParcours: React.FC<Props> = ({ setPage }) => {
     []
   );
 
+  const handlePressItem = (item: MenuItem) => {
+    if (item.id === "Creation") {
+      setCreationModalVisible(true);
+      return;
+    }
+
+    setPage(item.id);
+  };
+
+  const openGameChoice = () => {
+    setCreationModalVisible(false);
+    setTimeout(() => {
+      setGameModalVisible(true);
+    }, 80);
+  };
+
+  const openCreateParcours = () => {
+    setCreationModalVisible(false);
+    setPage(PAGE_CREER_PARCOURS);
+  };
+
+  const openJeuDesErreursCreator = () => {
+    setGameModalVisible(false);
+
+    // IMPORTANT : ne pas modifier cette ligne.
+    // Le nom doit correspondre exactement à App.tsx.
+    setPage(PAGE_CREER_JEU_DES_ERREURS);
+  };
+
   const content = (
     <View style={styles.fill}>
-      {/* HEADER */}
       <View
         style={[
           styles.header,
@@ -191,7 +230,6 @@ const GestionParcours: React.FC<Props> = ({ setPage }) => {
         </View>
       </View>
 
-      {/* CONTENT */}
       <View
         style={[
           styles.contentZone,
@@ -218,12 +256,50 @@ const GestionParcours: React.FC<Props> = ({ setPage }) => {
                 titleSize={titleSize}
                 isDesktop={isDesktop}
                 isTablet={isTablet}
-                onPress={() => setPage(item.id)}
+                onPress={() => handlePressItem(item)}
               />
             </View>
           ))}
         </View>
       </View>
+
+      <ChoiceModal
+        visible={creationModalVisible}
+        title="Que veux-tu créer ?"
+        onClose={() => setCreationModalVisible(false)}
+      >
+        <ChoiceButton
+          icon={<Gamepad2 size={24} color="#FFFFFF" strokeWidth={2.4} />}
+          title="Créer un jeu"
+          subtitle="Créer une activité ludique pour les élèves"
+          onPress={openGameChoice}
+        />
+
+        <ChoiceButton
+          icon={<MapPlus size={24} color="#FFFFFF" strokeWidth={2.4} />}
+          title="Créer un parcours"
+          subtitle="Créer un parcours classique avec des balises"
+          onPress={openCreateParcours}
+        />
+      </ChoiceModal>
+
+      <ChoiceModal
+        visible={gameModalVisible}
+        title="Choisis ton jeu"
+        onClose={() => setGameModalVisible(false)}
+      >
+        <ChoiceButton
+          icon={<Gamepad2 size={24} color="#FFFFFF" strokeWidth={2.4} />}
+          title="Le jeu des erreurs"
+          subtitle="Créer une carte à corriger : éléments manquants ou faux"
+          onPress={openJeuDesErreursCreator}
+        />
+
+        <View style={styles.disabledChoice}>
+          <Text style={styles.disabledTitle}>Vrai / Faux / Manquant</Text>
+          <Text style={styles.disabledSubtitle}>Disponible plus tard</Text>
+        </View>
+      </ChoiceModal>
     </View>
   );
 
@@ -289,10 +365,76 @@ const MenuCard = ({
         />
 
         <View style={styles.titleOverlay}>
-          <Text style={[styles.cardTitle, { fontSize: titleSize }]} numberOfLines={2}>
+          <Text
+            style={[styles.cardTitle, { fontSize: titleSize }]}
+            numberOfLines={2}
+          >
             {item.title}
           </Text>
         </View>
+      </View>
+    </TouchableOpacity>
+  );
+};
+
+/* ======================= Modal ======================= */
+const ChoiceModal = ({
+  visible,
+  title,
+  onClose,
+  children,
+}: {
+  visible: boolean;
+  title: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) => {
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      onRequestClose={onClose}
+    >
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalCard}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>{title}</Text>
+
+            <TouchableOpacity style={styles.closeBtn} onPress={onClose}>
+              <X size={20} color="#1F5B86" strokeWidth={2.5} />
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.modalContent}>{children}</View>
+        </View>
+      </View>
+    </Modal>
+  );
+};
+
+const ChoiceButton = ({
+  icon,
+  title,
+  subtitle,
+  onPress,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  subtitle: string;
+  onPress: () => void;
+}) => {
+  return (
+    <TouchableOpacity
+      activeOpacity={0.9}
+      style={styles.choiceBtn}
+      onPress={onPress}
+    >
+      <View style={styles.choiceIcon}>{icon}</View>
+
+      <View style={styles.choiceTextBox}>
+        <Text style={styles.choiceTitle}>{title}</Text>
+        <Text style={styles.choiceSubtitle}>{subtitle}</Text>
       </View>
     </TouchableOpacity>
   );
@@ -386,5 +528,110 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     textAlign: "center",
     width: "100%",
+  },
+
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(11,31,48,0.48)",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 18,
+  },
+
+  modalCard: {
+    width: "100%",
+    maxWidth: 520,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 26,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: "#D5E1EA",
+    ...(Platform.OS === "ios" ? IOS_SHADOW : {}),
+    elevation: Platform.OS === "android" ? 4 : 0,
+  },
+
+  modalHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 14,
+  },
+
+  modalTitle: {
+    flex: 1,
+    color: "#1F5B86",
+    fontSize: 20,
+    fontWeight: "900",
+  },
+
+  closeBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: "#EEF6FC",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  modalContent: {
+    gap: 12,
+  },
+
+  choiceBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#F2F8FC",
+    borderRadius: 20,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: "#CFE0EC",
+  },
+
+  choiceIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 16,
+    backgroundColor: "#1F5B86",
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 12,
+  },
+
+  choiceTextBox: {
+    flex: 1,
+  },
+
+  choiceTitle: {
+    color: "#233548",
+    fontSize: 16,
+    fontWeight: "900",
+  },
+
+  choiceSubtitle: {
+    color: "#6B7E8E",
+    fontSize: 13,
+    fontWeight: "700",
+    marginTop: 3,
+    lineHeight: 18,
+  },
+
+  disabledChoice: {
+    backgroundColor: "#F1F1F1",
+    borderRadius: 20,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: "#DDDDDD",
+  },
+
+  disabledTitle: {
+    color: "#87929B",
+    fontSize: 16,
+    fontWeight: "900",
+  },
+
+  disabledSubtitle: {
+    color: "#A1AAB1",
+    fontSize: 13,
+    fontWeight: "700",
+    marginTop: 3,
   },
 });

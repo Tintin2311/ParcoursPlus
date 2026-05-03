@@ -91,16 +91,19 @@ type Props = {
 };
 
 /* =========================
-   Theme
+   Theme lumineux
 ========================= */
-const C_BG = "#07111F";
-const C_BG_2 = "#0B1728";
-const C_CARD = "#101D32";
-const C_TEXT = "#F8FAFC";
-const C_MUTED = "#A9B8D0";
-const C_BORDER = "rgba(255,255,255,0.08)";
-const C_BLUE = "#60A5FA";
+const C_BG = "#EAF6FF";
+const C_BG_2 = "#F8FCFF";
+const C_CARD = "#FFFFFF";
+const C_TEXT = "#12304A";
+const C_MUTED = "#5D7288";
+const C_BORDER = "rgba(31,91,134,0.14)";
+const C_BLUE = "#1F75B8";
+const C_BLUE_DARK = "#1F5B86";
 const C_GOLD = "#F59E0B";
+const C_GREEN = "#16A34A";
+const C_RED = "#DC2626";
 
 /* =========================
    Helpers
@@ -283,15 +286,27 @@ const getModesFromRow = (row: any) => {
 
   return {
     balises: toBool(
-      modes?.balises ?? config?.modes?.balises ?? config?.balises ?? settings?.modes?.balises ?? settings?.balises,
+      modes?.balises ??
+        config?.modes?.balises ??
+        config?.balises ??
+        settings?.modes?.balises ??
+        settings?.balises,
       false
     ),
     parcours: toBool(
-      modes?.parcours ?? config?.modes?.parcours ?? config?.parcours ?? settings?.modes?.parcours ?? settings?.parcours,
+      modes?.parcours ??
+        config?.modes?.parcours ??
+        config?.parcours ??
+        settings?.modes?.parcours ??
+        settings?.parcours,
       false
     ),
     tentatives: toBool(
-      modes?.tentatives ?? config?.modes?.tentatives ?? config?.tentatives ?? settings?.modes?.tentatives ?? settings?.tentatives,
+      modes?.tentatives ??
+        config?.modes?.tentatives ??
+        config?.tentatives ??
+        settings?.modes?.tentatives ??
+        settings?.tentatives,
       false
     ),
   };
@@ -361,7 +376,8 @@ const mergeConfigWithBestSupabaseRow = async (
   );
 
   const tentativePageMode =
-    bestRow?.tentative_page_mode === "personnalise" || bestRow?.tentativePageMode === "personnalise"
+    bestRow?.tentative_page_mode === "personnalise" ||
+    bestRow?.tentativePageMode === "personnalise"
       ? "personnalise"
       : "general";
 
@@ -577,7 +593,8 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       ]);
 
       const effectiveTermine =
-        dbTermine || progress.parcoursTermine ||
+        dbTermine ||
+        progress.parcoursTermine ||
         (orderedBalises.length > 0 && progress.validatedIds.length >= orderedBalises.length);
 
       const scoreNow = computeCurrentDisplayedScore({
@@ -1199,12 +1216,9 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         ]}
       >
         <View style={styles.baliseHeader}>
-          <View style={styles.badgeNumero}>
-            <Text style={styles.badgeNumeroText}>#{item.numero_balise ?? item.ordre}</Text>
-          </View>
-
           <View style={{ flex: 1 }}>
-            <Text style={styles.baliseTitle}>Balise {item.numero_balise ?? item.ordre}</Text>
+            <Text style={styles.baliseTitle}>Balise {item.ordre}</Text>
+            <Text style={styles.baliseSubtitle}>Entre le code trouvé sur cette balise</Text>
           </View>
 
           <View style={styles.pointsBadgeMini}>
@@ -1216,17 +1230,17 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
 
         {alreadyValidated ? (
           <View style={styles.validatedRow}>
-            <Feather name="check-circle" size={18} color="#86EFAC" />
+            <Feather name="check-circle" size={18} color={C_GREEN} />
             <Text style={styles.validatedText}>Balise déjà validée — code masqué</Text>
           </View>
         ) : (
           <View style={styles.inputWrap}>
-            <Feather name="lock" size={16} color={C_MUTED} />
+            <Feather name="lock" size={16} color={C_BLUE_DARK} />
             <TextInput
               value={saisie}
               onChangeText={(txt) => handleChangeCode(item.id, txt)}
               placeholder="Entrer le code"
-              placeholderTextColor="#7C8DA8"
+              placeholderTextColor="#8AA0B7"
               autoCapitalize="characters"
               autoCorrect={false}
               style={styles.input}
@@ -1277,77 +1291,23 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
           showsVerticalScrollIndicator={false}
         >
           <View style={styles.statsRow}>
-            <View style={[styles.statBox, { width: statCardWidth }]}> 
+            <View style={[styles.statBox, { width: statCardWidth }]}>
               <Text style={styles.statValue}>{balises.length}</Text>
               <Text style={styles.statLabel}>Balises</Text>
             </View>
 
-            <View style={[styles.statBox, { width: statCardWidth }]}> 
+            <View style={[styles.statBox, { width: statCardWidth }]}>
               <Text style={styles.statValue}>
                 {savedScore}/{balises.length}
               </Text>
               <Text style={styles.statLabel}>Score</Text>
             </View>
 
-            <View style={[styles.statBox, { width: statCardWidth }]}> 
+            <View style={[styles.statBox, { width: statCardWidth }]}>
               <Text style={styles.statValue}>{tentativesCount}</Text>
               <Text style={styles.statLabel}>Tentatives</Text>
             </View>
           </View>
-
-          {!loading && !screenError && (
-            <View style={styles.infoCard}>
-              <View style={styles.infoHeader}>
-                <Feather name="shield" size={16} color="#93C5FD" />
-                <Text style={styles.infoTitle}>Progression recalculée automatiquement</Text>
-              </View>
-
-              <Text style={styles.infoLine}>
-                Balises validées :{" "}
-                <Text style={styles.infoStrong}>
-                  {validatedBaliseIds.length}/{balises.length}
-                </Text>
-              </Text>
-              <Text style={styles.infoLine}>
-                Total : <Text style={styles.infoStrong}>{formatPoints(savedPointsTotal)} pts</Text>
-              </Text>
-              <Text style={styles.infoLine}>
-                Bonus parcours :{" "}
-                <Text style={styles.infoStrong}>
-                  {pointsConfig.modes.parcours ? `${formatPoints(pointsConfig.pointsParParcours)} pts` : "désactivé"}
-                </Text>
-              </Text>
-              <Text style={styles.infoLine}>
-                parcours_termine DB :{" "}
-                <Text style={styles.infoStrong}>{parcoursTermineDb ? "TRUE" : "FALSE"}</Text>
-              </Text>
-              <Text style={styles.infoLine}>
-                Parcours terminé :{" "}
-                <Text style={styles.infoStrong}>{isCompletedEffective ? "oui" : "non"}</Text>
-              </Text>
-              <Text style={styles.infoLine}>
-                Points parcours appliqués :{" "}
-                <Text style={styles.infoStrong}>{formatPoints(liveScore.parcoursPoints)} pts</Text>
-              </Text>
-              <Text style={styles.infoLine}>
-                Page tentatives :{" "}
-                <Text style={styles.infoStrong}>
-                  {resolvedTentativePage ? `Page ${resolvedTentativePage}` : "aucune"}
-                </Text>
-              </Text>
-              <Text style={styles.infoLine}>
-                Barème chargé :{" "}
-                <Text style={styles.infoStrong}>{tentativeBaremeRows.length} ligne(s)</Text>
-              </Text>
-
-              {completionAttemptNumber != null ? (
-                <Text style={styles.infoLine}>
-                  Tentative de fin :{" "}
-                  <Text style={styles.infoStrong}>n°{completionAttemptNumber}</Text>
-                </Text>
-              ) : null}
-            </View>
-          )}
 
           {loading ? (
             <View style={styles.stateCard}>
@@ -1466,23 +1426,23 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: Platform.OS === "android" ? 14 : 8,
     paddingBottom: 12,
+    backgroundColor: C_BLUE_DARK,
     borderBottomWidth: 1,
-    borderBottomColor: "rgba(255,255,255,0.06)",
-    backgroundColor: "rgba(4,12,24,0.72)",
+    borderBottomColor: "rgba(255,255,255,0.18)",
   },
   iconBtn: {
     width: 40,
     height: 40,
-    borderRadius: 12,
+    borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(255,255,255,0.08)",
+    backgroundColor: "rgba(255,255,255,0.16)",
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.08)",
+    borderColor: "rgba(255,255,255,0.22)",
   },
   pageTitle: {
     flex: 1,
-    color: C_TEXT,
+    color: "#FFFFFF",
     fontSize: 20,
     fontWeight: "900",
     textAlign: "center",
@@ -1490,25 +1450,25 @@ const styles = StyleSheet.create({
 
   bigScorePill: {
     minWidth: 82,
-    height: 40,
-    borderRadius: 14,
+    height: 42,
+    borderRadius: 16,
     paddingHorizontal: 10,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(245,158,11,0.16)",
+    backgroundColor: "#FBBF24",
     borderWidth: 1,
-    borderColor: "rgba(245,158,11,0.30)",
+    borderColor: "rgba(255,255,255,0.30)",
   },
   bigScoreValue: {
-    color: "#FDE68A",
+    color: "#78350F",
     fontSize: 15,
     fontWeight: "900",
     lineHeight: 17,
   },
   bigScoreLabel: {
-    color: "#FCD34D",
+    color: "#92400E",
     fontSize: 10,
-    fontWeight: "800",
+    fontWeight: "900",
     lineHeight: 12,
   },
 
@@ -1520,18 +1480,23 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   statBox: {
-    backgroundColor: "rgba(255,255,255,0.06)",
+    backgroundColor: "#FFFFFF",
     borderWidth: 1,
     borderColor: C_BORDER,
-    borderRadius: 14,
-    paddingVertical: 10,
+    borderRadius: 16,
+    paddingVertical: 12,
     paddingHorizontal: 6,
     alignItems: "center",
     justifyContent: "center",
+    shadowColor: "#1F5B86",
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 5 },
+    elevation: 3,
   },
   statValue: {
-    color: C_TEXT,
-    fontSize: 13,
+    color: C_BLUE_DARK,
+    fontSize: 15,
     fontWeight: "900",
     textAlign: "center",
   },
@@ -1539,54 +1504,29 @@ const styles = StyleSheet.create({
     color: C_MUTED,
     fontSize: 10,
     marginTop: 4,
-    fontWeight: "700",
+    fontWeight: "800",
     textAlign: "center",
-  },
-
-  infoCard: {
-    backgroundColor: "rgba(96,165,250,0.08)",
-    borderWidth: 1,
-    borderColor: "rgba(96,165,250,0.20)",
-    borderRadius: 16,
-    padding: 14,
-    marginBottom: 14,
-  },
-  infoHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    marginBottom: 10,
-  },
-  infoTitle: {
-    color: "#DBEAFE",
-    fontSize: 14,
-    fontWeight: "900",
-  },
-  infoLine: {
-    color: "#BFDBFE",
-    fontSize: 12,
-    lineHeight: 18,
-    marginBottom: 4,
-  },
-  infoStrong: {
-    color: "#FFFFFF",
-    fontWeight: "900",
   },
 
   baliseCard: {
     backgroundColor: C_CARD,
     borderWidth: 1,
     borderColor: C_BORDER,
-    borderRadius: 18,
-    padding: 14,
+    borderRadius: 22,
+    padding: 16,
+    shadowColor: "#1F5B86",
+    shadowOpacity: 0.13,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
   },
   baliseCardOk: {
-    borderColor: "rgba(34,197,94,0.45)",
-    backgroundColor: "rgba(34,197,94,0.08)",
+    borderColor: "rgba(22,163,74,0.38)",
+    backgroundColor: "#F0FDF4",
   },
   baliseCardKo: {
-    borderColor: "rgba(239,68,68,0.45)",
-    backgroundColor: "rgba(239,68,68,0.08)",
+    borderColor: "rgba(220,38,38,0.34)",
+    backgroundColor: "#FEF2F2",
   },
 
   baliseHeader: {
@@ -1595,51 +1535,41 @@ const styles = StyleSheet.create({
     gap: 10,
     marginBottom: 12,
   },
-  badgeNumero: {
-    minWidth: 54,
-    height: 34,
-    borderRadius: 12,
-    paddingHorizontal: 10,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(96,165,250,0.16)",
-    borderWidth: 1,
-    borderColor: "rgba(96,165,250,0.30)",
-  },
-  badgeNumeroText: {
-    color: "#DBEAFE",
-    fontWeight: "900",
-    fontSize: 12,
-  },
   baliseTitle: {
     color: C_TEXT,
-    fontSize: 15,
+    fontSize: 20,
     fontWeight: "900",
+  },
+  baliseSubtitle: {
+    color: C_MUTED,
+    fontSize: 12,
+    fontWeight: "700",
+    marginTop: 2,
   },
 
   pointsBadgeMini: {
-    minWidth: 54,
-    height: 28,
-    borderRadius: 10,
+    minWidth: 58,
+    height: 32,
+    borderRadius: 12,
     paddingHorizontal: 8,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(245,158,11,0.14)",
+    backgroundColor: "#FEF3C7",
     borderWidth: 1,
-    borderColor: "rgba(245,158,11,0.24)",
+    borderColor: "#FCD34D",
   },
   pointsBadgeMiniText: {
-    color: "#FDE68A",
+    color: "#92400E",
     fontSize: 11,
     fontWeight: "900",
   },
 
   inputWrap: {
-    height: 48,
-    borderRadius: 14,
-    backgroundColor: "rgba(255,255,255,0.06)",
+    height: 50,
+    borderRadius: 16,
+    backgroundColor: "#F8FBFF",
     borderWidth: 1,
-    borderColor: C_BORDER,
+    borderColor: "rgba(31,91,134,0.18)",
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
@@ -1648,16 +1578,16 @@ const styles = StyleSheet.create({
   input: {
     flex: 1,
     color: C_TEXT,
-    fontSize: 14,
+    fontSize: 15,
     fontWeight: "800",
   },
 
   validatedRow: {
-    minHeight: 48,
-    borderRadius: 14,
-    backgroundColor: "rgba(34,197,94,0.08)",
+    minHeight: 50,
+    borderRadius: 16,
+    backgroundColor: "#DCFCE7",
     borderWidth: 1,
-    borderColor: "rgba(34,197,94,0.24)",
+    borderColor: "rgba(22,163,74,0.25)",
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
@@ -1665,32 +1595,37 @@ const styles = StyleSheet.create({
   },
   validatedText: {
     flex: 1,
-    color: "#DCFCE7",
+    color: "#14532D",
     fontSize: 13,
     fontWeight: "800",
   },
 
   okText: {
     marginTop: 10,
-    color: "#86EFAC",
+    color: C_GREEN,
     fontWeight: "900",
     fontSize: 13,
   },
   koText: {
     marginTop: 10,
-    color: "#FCA5A5",
+    color: C_RED,
     fontWeight: "900",
     fontSize: 13,
   },
 
   stateCard: {
-    backgroundColor: C_CARD,
-    borderRadius: 20,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 22,
     borderWidth: 1,
     borderColor: C_BORDER,
     padding: 24,
     alignItems: "center",
     justifyContent: "center",
+    shadowColor: "#1F5B86",
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
   },
   stateTitle: {
     color: C_TEXT,
@@ -1714,17 +1649,22 @@ const styles = StyleSheet.create({
     bottom: 14,
   },
   verifyAllBtn: {
-    minHeight: 52,
-    borderRadius: 16,
-    backgroundColor: "#2563EB",
+    minHeight: 54,
+    borderRadius: 18,
+    backgroundColor: C_BLUE,
     alignItems: "center",
     justifyContent: "center",
     flexDirection: "row",
     gap: 10,
     paddingHorizontal: 16,
+    shadowColor: "#1F5B86",
+    shadowOpacity: 0.28,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 4,
   },
   verifyAllBtnDone: {
-    backgroundColor: "#16A34A",
+    backgroundColor: C_GREEN,
   },
   verifyAllBtnText: {
     color: "#fff",
@@ -1734,7 +1674,7 @@ const styles = StyleSheet.create({
 
   modalBackdrop: {
     flex: 1,
-    backgroundColor: "rgba(2,8,18,0.72)",
+    backgroundColor: "rgba(15,37,58,0.45)",
     alignItems: "center",
     justifyContent: "center",
     padding: 20,
@@ -1743,8 +1683,8 @@ const styles = StyleSheet.create({
     width: "100%",
     maxWidth: 560,
     maxHeight: "85%",
-    backgroundColor: C_CARD,
-    borderRadius: 20,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 22,
     borderWidth: 1,
     borderColor: C_BORDER,
     padding: 16,
@@ -1767,10 +1707,10 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(255,255,255,0.08)",
+    backgroundColor: C_BLUE_DARK,
   },
   modalLine: {
-    color: "#E2E8F0",
+    color: "#334155",
     fontSize: 13,
     lineHeight: 19,
     marginBottom: 2,
