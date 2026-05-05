@@ -4,6 +4,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   ActivityIndicator,
   FlatList,
+  ImageBackground,
   Platform,
   SafeAreaView,
   ScrollView,
@@ -18,9 +19,9 @@ import { Feather } from "@expo/vector-icons";
 import { supabase } from "./supabaseClient";
 import BottomBarEleve from "./ui/BottomBarEleve";
 
-/* =========================
-   Types
-========================= */
+const BG_GAME =
+  "https://aswhubzprehjnunbpkwc.supabase.co/storage/v1/object/public/background/AccueilElevePaysage.png";
+
 type SetPageFn = (page: any) => void;
 
 type EleveConnecte = {
@@ -36,12 +37,7 @@ type RpcStudentRow = {
   id?: string;
   name?: string | null;
   group_id?: string | null;
-};
-
-type GroupRow = {
-  id: string;
-  name?: string | null;
-  nom?: string | null;
+  group_name?: string | null;
 };
 
 type ParcoursRow = {
@@ -81,16 +77,8 @@ type ParcoursStatRow = {
 type ParcoursStatus = "not_started" | "started" | "completed";
 
 type RenderedNode =
-  | (FolderRow & {
-      type: "folder";
-      depth: number;
-      displayName: string;
-    })
-  | (ParcoursRow & {
-      type: "parcours";
-      depth: number;
-      displayName: string;
-    });
+  | (FolderRow & { type: "folder"; displayName: string })
+  | (ParcoursRow & { type: "parcours"; displayName: string });
 
 type Props = {
   setPage: SetPageFn;
@@ -100,24 +88,13 @@ type Props = {
   setParcoursActif?: (p: any) => void;
 };
 
-/* =========================
-   Theme lumineux
-========================= */
-const C_BG = "#EAF6FF";
-const C_BG_2 = "#F8FCFF";
-const C_CARD = "#FFFFFF";
-const C_TEXT = "#12304A";
-const C_MUTED = "#5D7288";
-const C_BORDER = "rgba(31,91,134,0.14)";
-const C_GOLD = "#F59E0B";
+const C_TEXT = "#0B2540";
+const C_MUTED = "#57708A";
+const C_GOLD = "#FBBF24";
 const C_BLUE = "#1F75B8";
-const C_BLUE_DARK = "#1F5B86";
-const C_GREEN = "#16A34A";
-const C_ORANGE = "#F59E0B";
+const C_GREEN = "#22C55E";
+const C_ORANGE = "#F97316";
 
-/* =========================
-   Helpers
-========================= */
 const getDisplayName = (row: any) =>
   String(row?.nom ?? row?.name ?? "Sans nom");
 
@@ -174,8 +151,7 @@ const isParcoursVisibleForGroup = (
   groupId: string | null | undefined
 ) => {
   if (!groupId) return false;
-  const assoc = normalizeAssoc(parcours.groupes_associes);
-  return assoc.includes(String(groupId));
+  return normalizeAssoc(parcours.groupes_associes).includes(String(groupId));
 };
 
 const isFolderVisibleForGroup = (
@@ -219,20 +195,17 @@ const getStatusFromStat = (stat?: ParcoursStatRow | null): ParcoursStatus => {
   const totalBalises = Number(stat.total_balises ?? 0);
   const tentativesCount = Number(stat.tentatives_count ?? 0);
 
-  const completedByBool = stat.parcours_termine === true;
-  const completedByScore =
-    totalBalises > 0 && (bestScore >= totalBalises || lastScore >= totalBalises);
-
-  if (completedByBool || completedByScore) return "completed";
+  if (
+    stat.parcours_termine === true ||
+    (totalBalises > 0 && (bestScore >= totalBalises || lastScore >= totalBalises))
+  ) {
+    return "completed";
+  }
 
   if (tentativesCount > 0 || bestScore > 0 || lastScore > 0) return "started";
-
   return "not_started";
 };
 
-/* =========================
-   Component
-========================= */
 const EcrireResultat: React.FC<Props> = ({
   setPage,
   eleveConnecte,
@@ -242,20 +215,25 @@ const EcrireResultat: React.FC<Props> = ({
 }) => {
   const [loading, setLoading] = useState(true);
   const [screenError, setScreenError] = useState<string | null>(null);
-
   const [resolvedEleve, setResolvedEleve] = useState<EleveConnecte | null>(null);
   const [classeNom, setClasseNom] = useState<string | null>(null);
-
   const [parcoursData, setParcoursData] = useState<ParcoursRow[]>([]);
   const [foldersData, setFoldersData] = useState<FolderRow[]>([]);
   const [parcoursStats, setParcoursStats] = useState<Record<string, ParcoursStatRow>>({});
-
-  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
+  const [folderHistory, setFolderHistory] = useState<(string | null)[]>([]);
+  const [searchVisible, setSearchVisible] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
 
   const groupId = resolvedEleve?.group_id ?? null;
-  const studentId = resolvedEleve?.id ?? resolvedEleve?.uuid ?? null;
   const eleveNom = resolvedEleve?.display_name ?? "Élève";
+
+  const currentFolder = useMemo(
+    () => foldersData.find((f) => f.id === currentFolderId) ?? null,
+    [foldersData, currentFolderId]
+  );
+
+  const pageTitle = currentFolder ? getDisplayName(currentFolder) : "PARCOURS";
 
   const resolveEleveAndClasse = useCallback(async () => {
     let baseEleve: EleveConnecte | null = eleveConnecte ?? null;
@@ -271,47 +249,33 @@ const EcrireResultat: React.FC<Props> = ({
       return null;
     }
 
-    if (!baseEleve.code) {
-      setResolvedEleve(baseEleve);
-      setClasseNom(null);
-      return baseEleve;
-    }
+    let rpcRow: RpcStudentRow | null = null;
 
-    const rpc = await supabase.rpc("student_name_by_code", {
-      p_code: baseEleve.code,
-    });
+    if (baseEleve.code) {
+      const rpc = await supabase.rpc("student_name_and_group_by_code", {
+        p_code: baseEleve.code,
+      });
 
-    if (rpc.error || !rpc.data) {
-      setResolvedEleve(baseEleve);
-      setClasseNom(null);
-      return baseEleve;
-    }
-
-    const row: RpcStudentRow = Array.isArray(rpc.data) ? rpc.data[0] : rpc.data;
-
-    const merged: EleveConnecte = {
-      ...baseEleve,
-      id: row?.id ?? baseEleve.id,
-      display_name: row?.name ?? baseEleve.display_name ?? null,
-      group_id: row?.group_id ?? baseEleve.group_id ?? null,
-    };
-
-    let groupName: string | null = null;
-
-    if (merged.group_id) {
-      const { data: groupData, error: groupError } = await supabase
-        .from("groups")
-        .select("id, name, nom")
-        .eq("id", merged.group_id)
-        .maybeSingle();
-
-      if (!groupError && groupData) {
-        groupName = getDisplayName(groupData as GroupRow);
+      if (!rpc.error && rpc.data) {
+        rpcRow = Array.isArray(rpc.data) ? rpc.data[0] : rpc.data;
       }
     }
 
+    const studentId = rpcRow?.id ?? baseEleve.id ?? baseEleve.uuid ?? null;
+    const studentName = rpcRow?.name ?? baseEleve.display_name ?? null;
+    const studentGroupId = rpcRow?.group_id ?? baseEleve.group_id ?? null;
+    const studentGroupName = rpcRow?.group_name ?? null;
+
+    const merged: EleveConnecte = {
+      ...baseEleve,
+      id: studentId ?? baseEleve.id,
+      uuid: baseEleve.uuid,
+      display_name: studentName ?? baseEleve.display_name ?? null,
+      group_id: studentGroupId ?? null,
+    };
+
     setResolvedEleve(merged);
-    setClasseNom(groupName);
+    setClasseNom(studentGroupName);
 
     try {
       await AsyncStorage.setItem("eleveConnecte", JSON.stringify(merged));
@@ -336,7 +300,6 @@ const EcrireResultat: React.FC<Props> = ({
       .eq("student_id", resolvedStudentId);
 
     if (error) {
-      console.warn("Impossible de charger les stats parcours élève :", error);
       setParcoursStats({});
       return;
     }
@@ -382,30 +345,33 @@ const EcrireResultat: React.FC<Props> = ({
         nextFolders = data || [];
       }
 
-      const normalizedParcours = (nextParcours || [])
-        .map((p) => ({
-          ...p,
-          nom: getDisplayName(p),
-          groupes_associes: normalizeAssoc(p.groupes_associes),
-        }))
-        .sort(sortByOrdreThenDate);
+      setParcoursData(
+        (nextParcours || [])
+          .map((p) => ({
+            ...p,
+            nom: getDisplayName(p),
+            groupes_associes: normalizeAssoc(p.groupes_associes),
+          }))
+          .sort(sortByOrdreThenDate)
+      );
 
-      const normalizedFolders = (nextFolders || [])
-        .map((f) => ({
-          ...f,
-          nom: getDisplayName(f),
-          groupes_associes: normalizeAssoc(f.groupes_associes),
-        }))
-        .sort(sortByOrdreThenDate);
-
-      setParcoursData(normalizedParcours);
-      setFoldersData(normalizedFolders);
+      setFoldersData(
+        (nextFolders || [])
+          .map((f) => ({
+            ...f,
+            nom: getDisplayName(f),
+            groupes_associes: normalizeAssoc(f.groupes_associes),
+          }))
+          .sort(sortByOrdreThenDate)
+      );
 
       await fetchParcoursStats(resolvedStudentId);
 
-      setExpandedFolders(new Set());
+      setCurrentFolderId(null);
+      setFolderHistory([]);
+      setSearchTerm("");
+      setSearchVisible(false);
     } catch (err: any) {
-      console.error("Erreur EcrireResultat:", err);
       setScreenError(err?.message || "Impossible de charger les données.");
     } finally {
       setLoading(false);
@@ -415,15 +381,6 @@ const EcrireResultat: React.FC<Props> = ({
   useEffect(() => {
     fetchData();
   }, [fetchData]);
-
-  const toggleFolder = useCallback((folderId: string) => {
-    setExpandedFolders((prev) => {
-      const next = new Set(prev);
-      if (next.has(folderId)) next.delete(folderId);
-      else next.add(folderId);
-      return next;
-    });
-  }, []);
 
   const getDirectFolders = useCallback(
     (parentId: string | null) =>
@@ -441,77 +398,134 @@ const EcrireResultat: React.FC<Props> = ({
     [parcoursData]
   );
 
-  const visibleNodes = useMemo(() => {
-    if (!groupId) return [] as RenderedNode[];
-
-    const nodes: RenderedNode[] = [];
-
-    const buildTree = (folderId: string, depth: number) => {
-      const folder = foldersData.find((f) => f.id === folderId);
-      if (!folder) return;
-
-      if (!isFolderVisibleForGroup(folder, groupId, foldersData, parcoursData)) return;
-
-      nodes.push({
-        ...folder,
-        type: "folder",
-        depth,
-        displayName: getDisplayName(folder),
-      });
-
-      if (!expandedFolders.has(folderId)) return;
+  const getAllVisibleParcoursInsideFolder = useCallback(
+    (folderId: string): ParcoursRow[] => {
+      if (!groupId) return [];
 
       const directParcours = getDirectParcours(folderId).filter((p) =>
         isParcoursVisibleForGroup(p, groupId)
       );
 
-      directParcours.forEach((p) => {
-        nodes.push({
-          ...p,
-          type: "parcours",
-          depth: depth + 1,
-          displayName: getDisplayName(p),
-        });
-      });
+      const childFolders = getDirectFolders(folderId).filter((folder) =>
+        isFolderVisibleForGroup(folder, groupId, foldersData, parcoursData)
+      );
 
-      const childFolders = getDirectFolders(folderId);
-      childFolders.forEach((child) => buildTree(child.id, depth + 1));
-    };
+      const childParcours = childFolders.flatMap((child) =>
+        getAllVisibleParcoursInsideFolder(child.id)
+      );
 
-    getDirectFolders(null).forEach((folder) => buildTree(folder.id, 0));
+      return [...directParcours, ...childParcours];
+    },
+    [groupId, getDirectFolders, getDirectParcours, foldersData, parcoursData]
+  );
 
-    getDirectParcours(null)
-      .filter((p) => isParcoursVisibleForGroup(p, groupId))
-      .forEach((p) => {
-        nodes.push({
-          ...p,
-          type: "parcours",
-          depth: 0,
-          displayName: getDisplayName(p),
-        });
-      });
+  const getParcoursProgress = useCallback(
+    (parcoursId: string) => {
+      const status = getStatusFromStat(parcoursStats[parcoursId]);
+      if (status === "completed") return 100;
+      if (status === "started") return 50;
+      return 0;
+    },
+    [parcoursStats]
+  );
 
-    if (searchTerm.trim()) {
-      const s = searchTerm.trim().toLowerCase();
-      return nodes.filter((n) => n.displayName.toLowerCase().includes(s));
+  const getFolderProgress = useCallback(
+    (folderId: string) => {
+      const parcours = getAllVisibleParcoursInsideFolder(folderId);
+      if (!parcours.length) return 0;
+
+      const total = parcours.reduce((sum, p) => sum + getParcoursProgress(p.id), 0);
+      return Math.round(total / parcours.length);
+    },
+    [getAllVisibleParcoursInsideFolder, getParcoursProgress]
+  );
+
+  const openFolder = useCallback(
+    (folderId: string) => {
+      setFolderHistory((prev) => [...prev, currentFolderId]);
+      setCurrentFolderId(folderId);
+      setSearchTerm("");
+      setSearchVisible(false);
+    },
+    [currentFolderId]
+  );
+
+  const goBackFolder = useCallback(() => {
+    if (folderHistory.length === 0) {
+      setCurrentFolderId(null);
+      return;
     }
 
-    return nodes;
+    const previous = folderHistory[folderHistory.length - 1];
+    setFolderHistory((prev) => prev.slice(0, -1));
+    setCurrentFolderId(previous);
+    setSearchTerm("");
+    setSearchVisible(false);
+  }, [folderHistory]);
+
+  const visibleNodes = useMemo(() => {
+    if (!groupId) return [] as RenderedNode[];
+
+    const s = searchTerm.trim().toLowerCase();
+
+    if (s) {
+      const visibleFolders = foldersData
+        .filter((folder) =>
+          isFolderVisibleForGroup(folder, groupId, foldersData, parcoursData)
+        )
+        .filter((folder) => getDisplayName(folder).toLowerCase().includes(s))
+        .map((folder) => ({
+          ...folder,
+          type: "folder" as const,
+          displayName: getDisplayName(folder),
+        }));
+
+      const visibleParcours = parcoursData
+        .filter((p) => isParcoursVisibleForGroup(p, groupId))
+        .filter((p) => getDisplayName(p).toLowerCase().includes(s))
+        .map((p) => ({
+          ...p,
+          type: "parcours" as const,
+          displayName: getDisplayName(p),
+        }));
+
+      return [...visibleFolders, ...visibleParcours].sort(sortByOrdreThenDate);
+    }
+
+    const directFolders = getDirectFolders(currentFolderId)
+      .filter((folder) =>
+        isFolderVisibleForGroup(folder, groupId, foldersData, parcoursData)
+      )
+      .map((folder) => ({
+        ...folder,
+        type: "folder" as const,
+        displayName: getDisplayName(folder),
+      }));
+
+    const directParcours = getDirectParcours(currentFolderId)
+      .filter((p) => isParcoursVisibleForGroup(p, groupId))
+      .map((p) => ({
+        ...p,
+        type: "parcours" as const,
+        displayName: getDisplayName(p),
+      }));
+
+    return [...directFolders, ...directParcours];
   }, [
     groupId,
+    searchTerm,
     foldersData,
     parcoursData,
-    expandedFolders,
+    currentFolderId,
     getDirectFolders,
     getDirectParcours,
-    searchTerm,
   ]);
 
   const sourceDescription = useMemo(() => {
     if (!resolvedEleve) return "Aucun élève détecté";
-    if (!groupId) return `Aucune classe détectée • ${eleveNom}`;
-    if (!classeNom) return `Classe détectée • ${eleveNom}`;
-    return `${classeNom} • ${eleveNom}`;
+    if (!groupId) return `${eleveNom} • Aucune classe trouvée`;
+    if (!classeNom) return `${eleveNom} • Classe inconnue`;
+    return `${eleveNom} • ${classeNom}`;
   }, [resolvedEleve, groupId, classeNom, eleveNom]);
 
   const handleOpenParcours = useCallback(
@@ -524,220 +538,184 @@ const EcrireResultat: React.FC<Props> = ({
 
   const renderNode = ({ item }: { item: RenderedNode }) => {
     const isFolder = item.type === "folder";
-    const depth = Math.min(item.depth, 6);
-    const offset = depth * 16;
-
     const stat = !isFolder ? parcoursStats[item.id] : null;
     const status = !isFolder ? getStatusFromStat(stat) : "not_started";
 
     const isCompleted = status === "completed";
     const isStarted = status === "started";
 
-    const parcoursCardStyle = isCompleted
-      ? styles.parcoursCardDone
-      : isStarted
-      ? styles.parcoursCardStarted
-      : styles.parcoursCard;
+    const progress = isFolder ? getFolderProgress(item.id) : getParcoursProgress(item.id);
 
-    const iconColors = isFolder
-      ? ["#1F5B86", "#1F75B8"]
+    const cardColors: [string, string] = isFolder
+      ? ["rgba(255,255,255,0.94)", "rgba(220,244,255,0.88)"]
       : isCompleted
-      ? ["#16A34A", "#22C55E"]
+      ? ["rgba(236,253,245,0.98)", "rgba(187,247,208,0.92)"]
       : isStarted
-      ? ["#F59E0B", "#FB923C"]
-      : ["#4F46E5", "#1F75B8"];
+      ? ["rgba(255,251,235,0.98)", "rgba(254,215,170,0.90)"]
+      : ["rgba(255,255,255,0.96)", "rgba(224,231,255,0.88)"];
 
-    const rightIcon = isFolder
-      ? expandedFolders.has(item.id)
-        ? "chevron-down"
-        : "chevron-right"
-      : isCompleted
-      ? "check-circle"
-      : isStarted
-      ? "clock"
-      : "arrow-right-circle";
-
-    const rightColor = isFolder
-      ? C_MUTED
-      : isCompleted
-      ? C_GREEN
-      : isStarted
-      ? C_ORANGE
-      : C_BLUE;
-
-    const subtitle = isFolder
-      ? "Dossier"
-      : isCompleted
-      ? "Parcours validé"
-      : isStarted
-      ? "Parcours commencé"
-      : "Parcours";
+    const progressColors: [string, string] =
+      progress >= 100
+        ? ["#15803D", "#22C55E"]
+        : progress > 0
+        ? ["#EA580C", "#FBBF24"]
+        : ["#4338CA", "#38BDF8"];
 
     return (
-      <View
-        style={[
-          styles.nodeCard,
-          isFolder ? styles.folderCard : parcoursCardStyle,
-          depth > 0 && {
-            marginLeft: offset,
-            borderLeftWidth: 4,
-            borderLeftColor: isCompleted
-              ? "rgba(22,163,74,0.50)"
-              : isStarted
-              ? "rgba(245,158,11,0.55)"
-              : depth === 1
-              ? "rgba(31,117,184,0.35)"
-              : depth === 2
-              ? "rgba(79,70,229,0.30)"
-              : "rgba(245,158,11,0.35)",
-          },
-        ]}
+      <TouchableOpacity
+        activeOpacity={0.88}
+        onPress={() => {
+          if (isFolder) openFolder(item.id);
+          else handleOpenParcours(item as ParcoursRow);
+        }}
+        style={styles.nodeOuter}
       >
-        <View style={styles.nodeRow}>
-          <TouchableOpacity
-            activeOpacity={0.9}
-            style={styles.nodeLeft}
-            onPress={() => {
-              if (isFolder) toggleFolder(item.id);
-              else handleOpenParcours(item as ParcoursRow);
-            }}
+        <LinearGradient
+          colors={cardColors}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.nodeCard}
+        >
+          <LinearGradient
+            colors={progressColors}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.progressBadge}
           >
-            <LinearGradient
-              colors={iconColors as [string, string]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={styles.nodeIcon}
-            >
-              <Feather
-                name={
-                  isFolder
-                    ? expandedFolders.has(item.id)
-                      ? "folder-minus"
-                      : "folder"
-                    : isCompleted
-                    ? "check"
-                    : isStarted
-                    ? "clock"
-                    : "play"
-                }
-                size={16}
-                color="#fff"
-              />
-            </LinearGradient>
+            <Text style={styles.progressText}>{progress}%</Text>
+          </LinearGradient>
 
-            <View style={styles.nodeTextWrap}>
-              <Text numberOfLines={1} style={styles.nodeTitle}>
-                {item.displayName}
-              </Text>
-              <Text style={styles.nodeSubtitle}>{subtitle}</Text>
-            </View>
-
-            <Feather name={rightIcon as any} size={19} color={rightColor} />
-          </TouchableOpacity>
-        </View>
-      </View>
+          <View style={styles.nodeTextWrap}>
+            <Text numberOfLines={1} style={styles.nodeTitle}>
+              {item.displayName}
+            </Text>
+          </View>
+        </LinearGradient>
+      </TouchableOpacity>
     );
   };
 
   return (
     <SafeAreaView style={styles.safe}>
-      <LinearGradient colors={[C_BG, C_BG_2]} style={styles.container}>
-        <View style={styles.topBar}>
-          <View style={styles.topBadge}>
-            <Feather name="shield" size={18} color="#FFFFFF" />
-          </View>
-
-          <View style={{ flex: 1 }}>
-            <Text style={styles.pageTitle}>Mes parcours</Text>
-            <Text style={styles.pageSubtitle}>{sourceDescription}</Text>
-          </View>
-        </View>
-
-        <ScrollView
-          contentContainerStyle={{ padding: 14, paddingBottom: 118 }}
-          keyboardShouldPersistTaps="handled"
-          showsVerticalScrollIndicator={false}
+      <ImageBackground source={{ uri: BG_GAME }} style={styles.bg} resizeMode="cover">
+        <LinearGradient
+          colors={[
+            "rgba(5,18,30,0.55)",
+            "rgba(9,34,54,0.38)",
+            "rgba(234,246,255,0.88)",
+            "rgba(234,246,255,0.96)",
+          ]}
+          locations={[0, 0.22, 0.58, 1]}
+          style={styles.container}
         >
-          <View style={styles.heroCard}>
-            <LinearGradient
-              colors={["#FFFFFF", "#EEF7FF"]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={styles.heroInner}
-            >
-              <Text style={styles.heroTitle}>Trouve le bon parcours</Text>
-              <Text style={styles.heroText}>
-                Choisis un parcours puis saisis les codes des balises.
-              </Text>
+          <View style={styles.topBar}>
+            {currentFolderId && (
+              <TouchableOpacity
+                activeOpacity={0.85}
+                style={styles.topIconButton}
+                onPress={goBackFolder}
+              >
+                <Feather name="arrow-left" size={20} color="#FFFFFF" />
+              </TouchableOpacity>
+            )}
 
+            <View style={styles.topTextWrap}>
+              <Text numberOfLines={1} style={styles.pageTitle}>
+                {pageTitle}
+              </Text>
+              <Text numberOfLines={1} style={styles.pageSubtitle}>
+                {sourceDescription}
+              </Text>
+            </View>
+
+            <TouchableOpacity
+              activeOpacity={0.85}
+              style={[styles.topIconButton, searchVisible && styles.topIconButtonActive]}
+              onPress={() => {
+                setSearchVisible((prev) => !prev);
+                if (searchVisible) setSearchTerm("");
+              }}
+            >
+              <Feather name={searchVisible ? "x" : "search"} size={20} color="#FFFFFF" />
+            </TouchableOpacity>
+          </View>
+
+          {searchVisible && (
+            <View style={styles.topSearchWrap}>
               <View style={styles.searchBox}>
                 <Feather name="search" size={18} color={C_MUTED} />
                 <TextInput
                   value={searchTerm}
                   onChangeText={setSearchTerm}
-                  placeholder="Rechercher un dossier ou un parcours..."
+                  placeholder="Rechercher..."
                   placeholderTextColor="#8AA0B7"
                   style={styles.searchInput}
+                  autoFocus
                 />
               </View>
-            </LinearGradient>
-          </View>
+            </View>
+          )}
 
-          {loading ? (
-            <View style={styles.stateCard}>
-              <ActivityIndicator size="large" color={C_BLUE} />
-              <Text style={styles.stateTitle}>Chargement...</Text>
-              <Text style={styles.stateText}>Préparation des parcours.</Text>
-            </View>
-          ) : screenError ? (
-            <View style={styles.stateCard}>
-              <Feather name="alert-circle" size={42} color={C_GOLD} />
-              <Text style={styles.stateTitle}>Erreur</Text>
-              <Text style={styles.stateText}>{screenError}</Text>
-            </View>
-          ) : !groupId ? (
-            <View style={styles.stateCard}>
-              <Feather name="users" size={42} color={C_GOLD} />
-              <Text style={styles.stateTitle}>Aucune classe trouvée</Text>
-              <Text style={styles.stateText}>
-                Impossible de retrouver la classe de l’élève.
-              </Text>
-            </View>
-          ) : visibleNodes.length === 0 ? (
-            <View style={styles.stateCard}>
-              <Feather name="map" size={42} color={C_GOLD} />
-              <Text style={styles.stateTitle}>Aucun parcours disponible</Text>
-              <Text style={styles.stateText}>
-                Aucun dossier ou parcours n’est associé à cette classe.
-              </Text>
-            </View>
-          ) : (
-            <View style={styles.listWrap}>
-              <Text style={styles.sectionTitle}>Parcours disponibles</Text>
+          <ScrollView
+            contentContainerStyle={styles.scrollContent}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+            {loading ? (
+              <View style={styles.stateCard}>
+                <ActivityIndicator size="large" color={C_GOLD} />
+                <Text style={styles.stateTitle}>Chargement...</Text>
+                <Text style={styles.stateText}>Préparation des parcours.</Text>
+              </View>
+            ) : screenError ? (
+              <View style={styles.stateCard}>
+                <Feather name="alert-circle" size={42} color={C_GOLD} />
+                <Text style={styles.stateTitle}>Erreur</Text>
+                <Text style={styles.stateText}>{screenError}</Text>
+              </View>
+            ) : !groupId ? (
+              <View style={styles.stateCard}>
+                <Feather name="users" size={42} color={C_GOLD} />
+                <Text style={styles.stateTitle}>Aucune classe trouvée</Text>
+                <Text style={styles.stateText}>
+                  Impossible de retrouver la classe de l’élève.
+                </Text>
+              </View>
+            ) : visibleNodes.length === 0 ? (
+              <View style={styles.stateCard}>
+                <Feather name="map" size={42} color={C_GOLD} />
+                <Text style={styles.stateTitle}>
+                  {searchTerm.trim() ? "Aucun résultat" : "Aucun parcours"}
+                </Text>
+                <Text style={styles.stateText}>
+                  {searchTerm.trim()
+                    ? "Aucun dossier ou parcours ne correspond à ta recherche."
+                    : "Aucun parcours n’est disponible pour cette classe."}
+                </Text>
+              </View>
+            ) : (
               <FlatList
                 data={visibleNodes}
                 keyExtractor={(item) => `${item.type}-${item.id}`}
                 renderItem={renderNode}
                 scrollEnabled={false}
-                ItemSeparatorComponent={() => <View style={{ height: 8 }} />}
+                ItemSeparatorComponent={() => <View style={{ height: 12 }} />}
               />
-            </View>
-          )}
-        </ScrollView>
+            )}
+          </ScrollView>
 
-        <BottomBarEleve currentPage="EcrireResultat" onNavigate={setPage} />
-      </LinearGradient>
+          <BottomBarEleve currentPage="EcrireResultat" onNavigate={setPage} />
+        </LinearGradient>
+      </ImageBackground>
     </SafeAreaView>
   );
 };
 
 export default EcrireResultat;
 
-/* =========================
-   Styles
-========================= */
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: C_BG },
+  safe: { flex: 1, backgroundColor: "#061827" },
+  bg: { flex: 1 },
   container: { flex: 1 },
 
   topBar: {
@@ -747,168 +725,141 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: Platform.OS === "android" ? 14 : 8,
     paddingBottom: 12,
-    backgroundColor: C_BLUE_DARK,
+    backgroundColor: "rgba(8, 30, 48, 0.72)",
     borderBottomWidth: 1,
     borderBottomColor: "rgba(255,255,255,0.18)",
   },
-  topBadge: {
+
+  topTextWrap: {
+    flex: 1,
+    minWidth: 0,
+  },
+
+  topIconButton: {
     width: 42,
     height: 42,
-    borderRadius: 14,
+    borderRadius: 15,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "rgba(255,255,255,0.16)",
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.22)",
-  },
-  pageTitle: {
-    color: "#FFFFFF",
-    fontSize: 20,
-    fontWeight: "900",
-  },
-  pageSubtitle: {
-    color: "#DBEAFE",
-    fontSize: 12,
-    marginTop: 2,
-    fontWeight: "700",
+    borderColor: "rgba(255,255,255,0.28)",
   },
 
-  heroCard: {
-    borderRadius: 22,
-    overflow: "hidden",
-    marginBottom: 14,
-    borderWidth: 1,
-    borderColor: C_BORDER,
-    backgroundColor: C_CARD,
-    shadowColor: "#1F5B86",
-    shadowOpacity: 0.12,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 3,
+  topIconButtonActive: {
+    backgroundColor: "rgba(56,189,248,0.32)",
   },
-  heroInner: { padding: 16 },
-  heroTitle: {
-    color: C_TEXT,
-    fontSize: 18,
+
+  pageTitle: {
+    color: "#FFFFFF",
+    fontSize: 21,
     fontWeight: "900",
+    letterSpacing: 0.2,
   },
-  heroText: {
-    color: C_MUTED,
-    fontSize: 13,
-    lineHeight: 19,
-    marginTop: 6,
-    marginBottom: 14,
-    fontWeight: "600",
+
+  pageSubtitle: {
+    color: "#DDF7FF",
+    fontSize: 12,
+    marginTop: 2,
+    fontWeight: "800",
+  },
+
+  topSearchWrap: {
+    backgroundColor: "rgba(8, 30, 48, 0.72)",
+    paddingHorizontal: 14,
+    paddingBottom: 12,
   },
 
   searchBox: {
-    height: 48,
-    borderRadius: 16,
-    backgroundColor: "#F8FBFF",
+    height: 50,
+    borderRadius: 18,
+    backgroundColor: "rgba(255,255,255,0.96)",
     borderWidth: 1,
-    borderColor: "rgba(31,91,134,0.18)",
+    borderColor: "rgba(255,255,255,0.42)",
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    paddingHorizontal: 12,
+    paddingHorizontal: 13,
   },
+
   searchInput: {
     flex: 1,
     color: C_TEXT,
     fontSize: 14,
-    fontWeight: "700",
+    fontWeight: "800",
   },
 
-  listWrap: {
-    backgroundColor: "#FFFFFF",
-    borderWidth: 1,
-    borderColor: C_BORDER,
-    borderRadius: 22,
-    padding: 10,
-    shadowColor: "#1F5B86",
-    shadowOpacity: 0.12,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 3,
+  scrollContent: {
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 118,
   },
-  sectionTitle: {
-    color: C_TEXT,
-    fontSize: 16,
-    fontWeight: "900",
-    marginBottom: 10,
-    paddingHorizontal: 2,
+
+  nodeOuter: {
+    borderRadius: 22,
+    shadowColor: "#000",
+    shadowOpacity: 0.18,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 4,
   },
 
   nodeCard: {
-    borderRadius: 16,
+    minHeight: 68,
+    borderRadius: 22,
     borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.58)",
     overflow: "hidden",
-  },
-  folderCard: {
-    backgroundColor: "#F8FBFF",
-    borderColor: "rgba(31,117,184,0.18)",
-  },
-  parcoursCard: {
-    backgroundColor: "#FFFFFF",
-    borderColor: "rgba(79,70,229,0.16)",
-  },
-  parcoursCardStarted: {
-    backgroundColor: "#FFFBEB",
-    borderColor: "rgba(245,158,11,0.45)",
-  },
-  parcoursCardDone: {
-    backgroundColor: "#F0FDF4",
-    borderColor: "rgba(22,163,74,0.45)",
-  },
-
-  nodeRow: {
-    minHeight: 58,
-    justifyContent: "center",
-  },
-  nodeLeft: {
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 10,
-    paddingVertical: 9,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
   },
-  nodeIcon: {
-    width: 36,
-    height: 36,
-    borderRadius: 13,
+
+  progressBadge: {
+    width: 54,
+    height: 44,
+    borderRadius: 17,
     alignItems: "center",
     justifyContent: "center",
-    marginRight: 10,
+    marginRight: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.58)",
   },
+
+  progressText: {
+    color: "#FFFFFF",
+    fontSize: 13,
+    fontWeight: "900",
+  },
+
   nodeTextWrap: {
     flex: 1,
     minWidth: 0,
   },
+
   nodeTitle: {
     color: C_TEXT,
-    fontSize: 14,
+    fontSize: 15,
     fontWeight: "900",
-  },
-  nodeSubtitle: {
-    color: C_MUTED,
-    fontSize: 11,
-    marginTop: 2,
-    fontWeight: "700",
+    letterSpacing: 0.15,
   },
 
   stateCard: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 22,
+    backgroundColor: "rgba(255,255,255,0.93)",
+    borderRadius: 24,
     borderWidth: 1,
-    borderColor: C_BORDER,
+    borderColor: "rgba(255,255,255,0.58)",
     padding: 24,
     alignItems: "center",
     justifyContent: "center",
-    shadowColor: "#1F5B86",
-    shadowOpacity: 0.12,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 3,
+    shadowColor: "#000",
+    shadowOpacity: 0.18,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 5,
   },
+
   stateTitle: {
     color: C_TEXT,
     fontSize: 18,
@@ -916,11 +867,13 @@ const styles = StyleSheet.create({
     marginTop: 10,
     textAlign: "center",
   },
+
   stateText: {
     color: C_MUTED,
     fontSize: 14,
     lineHeight: 20,
     textAlign: "center",
     marginTop: 8,
+    fontWeight: "700",
   },
 });

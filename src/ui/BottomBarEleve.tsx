@@ -25,8 +25,8 @@ type Props = {
 };
 
 const ITEMS: BottomBarItem[] = [
-  { id: "missions", label: "Mission", icon: "edit-3", pageKey: "EcrireResultat" },
-  { id: "score", label: "Score", icon: "bar-chart-2", pageKey: "ClassementEleve" },
+  { id: "missions", label: "Parcours", icon: "edit-3", pageKey: "EcrireResultat" },
+  { id: "score", label: "Succès", icon: "award", pageKey: "ClassementEleve" },
   { id: "accueil", label: "Accueil", icon: "home", pageKey: "AccueilEleve" },
   { id: "ecole", label: "École", icon: "book-open", pageKey: "AcademieEleve" },
   { id: "marche", label: "Marché", icon: "shopping-bag", pageKey: "BoutiqueEleve" },

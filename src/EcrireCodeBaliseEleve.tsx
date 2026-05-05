@@ -1,11 +1,15 @@
 // src/EcrireCodeBaliseEleve.tsx
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   ActivityIndicator,
   Alert,
   FlatList,
+  ImageBackground,
+  Keyboard,
   Modal,
   Platform,
+  Pressable,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -24,7 +28,6 @@ import {
   ParcoursBaremeTentativeRow,
   ParcoursPointsConfig,
   TentativeRow,
-  buildTentativesDebugState,
   computeCurrentDisplayedScore,
   computeTentativeGainBreakdown,
   formatPoints,
@@ -38,9 +41,6 @@ import {
   saveTentativeWithStats,
 } from "./CalculPointTentatives";
 
-/* =========================
-   Types
-========================= */
 type SetPageFn = (page: any) => void;
 
 type EleveConnecte = {
@@ -82,17 +82,21 @@ type BaliseRow = {
 
 type BaliseAffichee = BaliseRow & {
   ordre: number;
+  instanceKey: string;
+  originalBaliseId: string;
+  tokenSource: string;
 };
 
 type Props = {
   setPage: SetPageFn;
   eleveConnecte?: EleveConnecte | null;
   parcoursActif?: ParcoursActif | null;
+  handleDeconnexion?: () => Promise<void> | void;
 };
 
-/* =========================
-   Theme lumineux
-========================= */
+const BG_GAME =
+  "https://aswhubzprehjnunbpkwc.supabase.co/storage/v1/object/public/background/AccueilElevePaysage.png";
+
 const C_BG = "#EAF6FF";
 const C_BG_2 = "#F8FCFF";
 const C_CARD = "#FFFFFF";
@@ -104,13 +108,18 @@ const C_BLUE_DARK = "#1F5B86";
 const C_GOLD = "#F59E0B";
 const C_GREEN = "#16A34A";
 const C_RED = "#DC2626";
+const C_RED_FLASH = "#FF1F1F";
 
-/* =========================
-   Helpers
-========================= */
+const formatPointUnit = (value: number | string | null | undefined) => {
+  const n = Number(value ?? 0);
+  return Math.abs(n) <= 1 ? "pt" : "pts";
+};
+
+const formatPointsLabel = (value: number | string | null | undefined) => {
+  return `${formatPoints(value as any)} ${formatPointUnit(value)}`;
+};
+
 const getDisplayName = (row: any) => String(row?.nom ?? row?.name ?? "Parcours");
-
-const uniqueStrings = (arr: string[]) => Array.from(new Set(arr.filter(Boolean)));
 
 const isUuidLike = (value: string) =>
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
@@ -237,7 +246,7 @@ const orderBalisesFromTokens = (
   });
 
   const results: BaliseAffichee[] = [];
-  const seen = new Set<string>();
+  const occurrenceCounter = new Map<string, number>();
 
   tokens.forEach((token, index) => {
     const t = String(token).trim();
@@ -251,16 +260,54 @@ const orderBalisesFromTokens = (
 
     if (!balise) return;
     if (balise.frozen === true) return;
-    if (seen.has(balise.id)) return;
 
-    seen.add(balise.id);
+    const originalBaliseId = String(balise.id);
+    const occurrenceNumber = (occurrenceCounter.get(originalBaliseId) ?? 0) + 1;
+    occurrenceCounter.set(originalBaliseId, occurrenceNumber);
+
+    const instanceKey = `${originalBaliseId}__occ_${occurrenceNumber}__pos_${index}`;
+
     results.push({
       ...balise,
-      ordre: index + 1,
+      id: instanceKey,
+      originalBaliseId,
+      instanceKey,
+      tokenSource: t,
+      ordre: results.length + 1,
     });
   });
 
   return results;
+};
+
+const normalizeValidatedIdsForOccurrences = (
+  rawValidatedIds: string[],
+  orderedBalises: BaliseAffichee[]
+): string[] => {
+  if (!rawValidatedIds.length || !orderedBalises.length) return rawValidatedIds;
+
+  const orderedKeys = new Set(orderedBalises.map((b) => b.instanceKey));
+  const hasModernKeys = rawValidatedIds.some((id) => orderedKeys.has(id));
+
+  if (hasModernKeys) {
+    return rawValidatedIds.filter((id) => orderedKeys.has(id));
+  }
+
+  const usedKeys = new Set<string>();
+  const normalized: string[] = [];
+
+  rawValidatedIds.forEach((oldId) => {
+    const match = orderedBalises.find(
+      (b) => b.originalBaliseId === oldId && !usedKeys.has(b.instanceKey)
+    );
+
+    if (match) {
+      usedKeys.add(match.instanceKey);
+      normalized.push(match.instanceKey);
+    }
+  });
+
+  return normalized;
 };
 
 const formatConditionLabel = (
@@ -359,16 +406,19 @@ const mergeConfigWithBestSupabaseRow = async (
 
   const bestRow = [...data].sort((a, b) => scoreConfigRow(b) - scoreConfigRow(a))[0];
   const rowModes = getModesFromRow(bestRow);
+
   const pointsParParcours = getNumberFromRow(
     bestRow,
     ["points_par_parcours", "pointsParParcours"],
     baseConfig.pointsParParcours
   );
+
   const pointsParBalise = getNumberFromRow(
     bestRow,
     ["points_par_balise", "pointsParBalise"],
     baseConfig.pointsParBalise
   );
+
   const pointsPerCorrect = getNumberFromRow(
     bestRow,
     ["points_per_correct", "pointsPerCorrect"],
@@ -400,7 +450,7 @@ const mergeConfigWithBestSupabaseRow = async (
     modes.balises = true;
   }
 
-  const fixedConfig: ParcoursPointsConfig = {
+  return {
     ...baseConfig,
     modes,
     pointsParParcours,
@@ -412,21 +462,6 @@ const mergeConfigWithBestSupabaseRow = async (
       ? assignments
       : baseConfig.tentativePageAssignments,
   };
-
-  console.log("CONFIG FORCEE DEPUIS group_points_configs", {
-    groupId,
-    parcoursId,
-    row: {
-      id: bestRow?.id,
-      modes: bestRow?.modes,
-      points_par_parcours: bestRow?.points_par_parcours,
-      updated_at: bestRow?.updated_at,
-      score: scoreConfigRow(bestRow),
-    },
-    fixedConfig,
-  });
-
-  return fixedConfig;
 };
 
 const loadStatParcoursTermine = async (
@@ -446,19 +481,29 @@ const loadStatParcoursTermine = async (
   return data?.parcours_termine === true;
 };
 
-/* =========================
-   Component
-========================= */
 const EcrireCodeBaliseEleve: React.FC<Props> = ({
   setPage,
   eleveConnecte,
   parcoursActif,
+  handleDeconnexion,
 }) => {
-  const { width } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
+
+  const scrollRef = useRef<ScrollView | null>(null);
+  const inputRefs = useRef<Record<string, TextInput | null>>({});
+  const rowYRefs = useRef<Record<string, number>>({});
+  const rowHeightRefs = useRef<Record<string, number>>({});
+  const scrollYRef = useRef(0);
+  const scrollViewHeightRef = useRef(0);
+  const focusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoFocusLockRef = useRef<string | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [screenError, setScreenError] = useState<string | null>(null);
+
+  const [confirmLogoutVisible, setConfirmLogoutVisible] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
 
   const [studentId, setStudentId] = useState<string | null>(eleveConnecte?.id ?? null);
   const [studentGroupId, setStudentGroupId] = useState<string | null>(
@@ -466,12 +511,16 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   );
 
   const [balises, setBalises] = useState<BaliseAffichee[]>([]);
+  const [activeBaliseKey, setActiveBaliseKey] = useState<string | null>(null);
   const [attemptsHistory, setAttemptsHistory] = useState<TentativeRow[]>([]);
   const [validatedBaliseIds, setValidatedBaliseIds] = useState<string[]>([]);
   const [completionAttemptNumber, setCompletionAttemptNumber] = useState<number | null>(null);
 
   const [codesSaisis, setCodesSaisis] = useState<Record<string, string>>({});
   const [resultats, setResultats] = useState<Record<string, boolean | null>>({});
+  const [inputSelections, setInputSelections] = useState<
+    Record<string, { start: number; end: number }>
+  >({});
 
   const [savedScore, setSavedScore] = useState(0);
   const [tentativesCount, setTentativesCount] = useState(0);
@@ -492,15 +541,149 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
 
   const parcoursNom = useMemo(() => getDisplayName(parcoursActif), [parcoursActif]);
   const validatedSet = useMemo(() => new Set(validatedBaliseIds), [validatedBaliseIds]);
+
   const isCompleted = balises.length > 0 && validatedBaliseIds.length >= balises.length;
   const isCompletedEffective = isCompleted || parcoursTermineDb;
 
+  const isCompact = width < 430;
+  const boxSize = isCompact ? 36 : 42;
+  const boxGap = isCompact ? 5 : 7;
+
+  const bottomScrollSpace = Math.max(360, Math.floor(height * 0.42));
+
   const statCardWidth = useMemo(() => {
     const gap = 8;
-    const horizontalPadding = 28;
-    const total = width - horizontalPadding - gap * 2;
-    return Math.max(96, Math.floor(total / 3));
+    const scoreWidth = width < 430 ? 86 : 96;
+    const horizontalPadding = 24;
+    const total = width - horizontalPadding - scoreWidth - gap * 2;
+    return Math.max(92, Math.floor(total / 2));
   }, [width]);
+
+  const setInputRef = useCallback((baliseKey: string, ref: TextInput | null) => {
+    inputRefs.current[baliseKey] = ref;
+  }, []);
+
+  const getExpectedLength = useCallback((balise: BaliseAffichee) => {
+    return Math.max(1, sanitize(balise.code ?? "").length);
+  }, []);
+
+  const setSelectionForBalise = useCallback(
+    (baliseKey: string, value: string, expectedLength: number, forceAll = false) => {
+      const cleanLength = sanitize(value).length;
+      const shouldSelectAll = forceAll || cleanLength >= expectedLength;
+      const nextSelection = shouldSelectAll
+        ? { start: 0, end: Math.max(cleanLength, expectedLength) }
+        : { start: cleanLength, end: cleanLength };
+
+      setInputSelections((prev) => ({ ...prev, [baliseKey]: nextSelection }));
+    },
+    []
+  );
+
+  const scrollBaliseIntoComfortZone = useCallback(
+    (baliseKey: string, animated = true) => {
+      const rowY = rowYRefs.current[baliseKey];
+      if (typeof rowY !== "number") return;
+
+      const rowHeight = rowHeightRefs.current[baliseKey] ?? 86;
+      const viewportHeight = scrollViewHeightRef.current || height;
+      const currentY = scrollYRef.current || 0;
+
+      const topComfort = 12;
+      const bottomComfort = Platform.OS === "web" ? 128 : 190;
+
+      const visibleTop = currentY + topComfort;
+      const visibleBottom = currentY + viewportHeight - bottomComfort;
+      const rowBottom = rowY + rowHeight;
+
+      let targetY: number | null = null;
+
+      if (rowY < visibleTop) {
+        targetY = Math.max(0, rowY - topComfort);
+      } else if (rowBottom > visibleBottom) {
+        targetY = Math.max(0, rowBottom - viewportHeight + bottomComfort);
+      }
+
+      if (targetY == null) return;
+
+      requestAnimationFrame(() => {
+        scrollRef.current?.scrollTo({ y: targetY, animated });
+      });
+    },
+    [height]
+  );
+
+  const focusBalise = useCallback(
+    (balise: BaliseAffichee, forceSelectAll = false, shouldScroll = false) => {
+      const key = balise.instanceKey;
+      const expectedLength = getExpectedLength(balise);
+      const currentValue = codesSaisis[key] ?? "";
+
+      setActiveBaliseKey(key);
+      setSelectionForBalise(key, currentValue, expectedLength, forceSelectAll);
+
+      if (shouldScroll) {
+        scrollBaliseIntoComfortZone(key, true);
+      }
+
+      if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
+      focusTimerRef.current = setTimeout(() => {
+        inputRefs.current[key]?.focus?.();
+      }, Platform.OS === "web" ? 20 : 70);
+    },
+    [codesSaisis, getExpectedLength, scrollBaliseIntoComfortZone, setSelectionForBalise]
+  );
+
+  const focusNextBalise = useCallback(
+    (currentIndex: number) => {
+      for (let i = currentIndex + 1; i < balises.length; i += 1) {
+        const nextBalise = balises[i];
+        if (nextBalise && !validatedSet.has(nextBalise.instanceKey)) {
+          focusBalise(nextBalise, false, true);
+          return;
+        }
+      }
+
+      Keyboard.dismiss();
+    },
+    [balises, focusBalise, validatedSet]
+  );
+
+  useEffect(() => {
+    return () => {
+      if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
+    };
+  }, []);
+
+  const handleLogout = useCallback(async () => {
+    if (loggingOut) return;
+
+    try {
+      setLoggingOut(true);
+
+      if (handleDeconnexion) {
+        await handleDeconnexion();
+      } else {
+        await supabase.auth.signOut().catch(() => null);
+
+        await AsyncStorage.multiRemove([
+          "LS_LAST_PAGE_ELEVE",
+          "LS_ELEVE_CACHE",
+          "LS_LAST_MODE",
+          "lastPageEleve",
+          "eleveCache",
+          "lastMode",
+        ]).catch(() => null);
+
+        setPage("ParcoursPlus");
+      }
+
+      Keyboard.dismiss();
+      setConfirmLogoutVisible(false);
+    } finally {
+      setLoggingOut(false);
+    }
+  }, [handleDeconnexion, loggingOut, setPage]);
 
   const resolveStudent = useCallback(async () => {
     let nextStudentId = eleveConnecte?.id ?? null;
@@ -521,10 +704,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     setStudentId(nextStudentId);
     setStudentGroupId(nextGroupId);
 
-    return {
-      studentId: nextStudentId,
-      groupId: nextGroupId,
-    };
+    return { studentId: nextStudentId, groupId: nextGroupId };
   }, [eleveConnecte?.code, eleveConnecte?.group_id, eleveConnecte?.id]);
 
   const forceParcoursBonusIfNeeded = useCallback(
@@ -543,7 +723,6 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       if (!config.modes.parcours) return rawTotal;
       if (!config.pointsParParcours || config.pointsParParcours <= 0) return rawTotal;
       if (score.parcoursPoints > 0) return rawTotal;
-
       return rawTotal + Number(config.pointsParParcours || 0);
     },
     []
@@ -579,13 +758,26 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         fixedAttemptPage
       );
 
-      const progress = await recomputeAndSyncStats({
+      const progressRaw = await recomputeAndSyncStats({
         studentId: resolvedStudentId,
         parcoursId: resolvedParcoursId,
         balises: orderedBalises,
         pointsConfig: fixedPointsConfig,
         tentativeBaremeRows: baremes,
       });
+
+      const normalizedValidatedIds = normalizeValidatedIdsForOccurrences(
+        progressRaw.validatedIds,
+        orderedBalises
+      );
+
+      const progress = {
+        ...progressRaw,
+        validatedIds: normalizedValidatedIds,
+        validatedCount: normalizedValidatedIds.length,
+        parcoursTermine:
+          orderedBalises.length > 0 && normalizedValidatedIds.length >= orderedBalises.length,
+      };
 
       const [attempts, dbTermine] = await Promise.all([
         loadAttemptsHistory(resolvedStudentId, resolvedParcoursId),
@@ -616,7 +808,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         resolvedStudentId &&
         resolvedParcoursId &&
         effectiveTermine &&
-        correctedTotal !== progress.totalPoints
+        correctedTotal !== progressRaw.totalPoints
       ) {
         await supabase
           .from("eleve_parcours_stats")
@@ -630,27 +822,13 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
           .eq("parcours_id", resolvedParcoursId);
       }
 
-      console.log("DEBUG SCORE PARCOURS FINAL", {
-        modes: fixedPointsConfig.modes,
-        pointsParParcours: fixedPointsConfig.pointsParParcours,
-        totalBalises: orderedBalises.length,
-        validatedCount: progress.validatedIds.length,
-        completionAttemptNumber: progress.completionAttemptNumber,
-        parcoursTermineDb: dbTermine,
-        effectiveTermine,
-        scoreNow,
-        correctedTotal,
-        baremeRows: baremes.length,
-        fixedAttemptPage,
-      });
-
       setAttemptsHistory(attempts);
       setValidatedBaliseIds(progress.validatedIds);
       setCompletionAttemptNumber(progress.completionAttemptNumber);
       setSavedScore(progress.validatedCount);
-      setTentativesCount(progress.tentativesCount);
+      setTentativesCount(progressRaw.tentativesCount);
       setSavedPointsTotal(correctedTotal);
-      setLastPointsGain(progress.lastPointsGain);
+      setLastPointsGain(progressRaw.lastPointsGain);
       setParcoursTermineDb(effectiveTermine);
 
       setPointsConfig(fixedPointsConfig);
@@ -665,6 +843,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
 
   const resetProgress = useCallback(() => {
     setBalises([]);
+    setActiveBaliseKey(null);
     setAttemptsHistory([]);
     setValidatedBaliseIds([]);
     setCompletionAttemptNumber(null);
@@ -679,6 +858,13 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     setResolvedTentativeGroupId(null);
     setResolvedProfesseurId(null);
     setSupportParcoursId(null);
+    setCodesSaisis({});
+    setResultats({});
+    setInputSelections({});
+    inputRefs.current = {};
+    rowYRefs.current = {};
+    rowHeightRefs.current = {};
+    autoFocusLockRef.current = null;
   }, []);
 
   const loadAll = useCallback(async () => {
@@ -706,14 +892,18 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         parcoursActif;
 
       const rawBalisesOrdre = parcoursDb?.balises_ordre ?? parcoursActif?.balises_ordre ?? null;
-      const tokens = uniqueStrings(extractTokens(rawBalisesOrdre));
+      const tokens = extractTokens(rawBalisesOrdre);
 
       let orderedBalises: BaliseAffichee[] = [];
 
       if (tokens.length) {
-        const uuidTokens = tokens.filter(isUuidLike);
-        const numeroTokens = tokens.filter(isIntegerLike).map((t) => Number(t));
-        const codeTokensRaw = tokens.filter((t) => !isUuidLike(t) && !isIntegerLike(t));
+        const uuidTokens = Array.from(new Set(tokens.filter(isUuidLike)));
+        const numeroTokens = Array.from(
+          new Set(tokens.filter(isIntegerLike).map((t) => Number(t)))
+        );
+        const codeTokensRaw = Array.from(
+          new Set(tokens.filter((t) => !isUuidLike(t) && !isIntegerLike(t)))
+        );
 
         const fetchedBalises: BaliseRow[] = [];
 
@@ -755,6 +945,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       }
 
       setBalises(orderedBalises);
+      setActiveBaliseKey(orderedBalises[0]?.instanceKey ?? null);
 
       await loadAttemptsAndConfig(
         resolved.studentId,
@@ -807,31 +998,36 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     isCompletedEffective,
   ]);
 
-  const debugState = useMemo(() => {
-    return buildTentativesDebugState({
-      groupId: resolvedTentativeGroupId,
-      professeurId: resolvedProfesseurId,
-      supportParcoursId,
-      pageRetenue: resolvedTentativePage,
-      completionAttemptNumber,
-      baremeRows: tentativeBaremeRows,
-    });
-  }, [
-    resolvedTentativeGroupId,
-    resolvedProfesseurId,
-    supportParcoursId,
-    resolvedTentativePage,
-    completionAttemptNumber,
-    tentativeBaremeRows,
-  ]);
+  const handleCodeChange = useCallback(
+    (balise: BaliseAffichee, baliseIndex: number, text: string) => {
+      const key = balise.instanceKey;
+      if (validatedSet.has(key)) return;
 
-  const handleChangeCode = useCallback(
-    (baliseId: string, value: string) => {
-      if (validatedSet.has(baliseId)) return;
-      setCodesSaisis((prev) => ({ ...prev, [baliseId]: value }));
-      setResultats((prev) => ({ ...prev, [baliseId]: null }));
+      const expectedLength = getExpectedLength(balise);
+      const nextValue = sanitize(text).slice(0, expectedLength);
+      const nextCursor = nextValue.length;
+
+      setActiveBaliseKey(key);
+      setCodesSaisis((prev) => ({ ...prev, [key]: nextValue }));
+      setResultats((prev) => ({ ...prev, [key]: null }));
+      setInputSelections((prev) => ({
+        ...prev,
+        [key]: { start: nextCursor, end: nextCursor },
+      }));
+
+      if (nextValue.length < expectedLength) {
+        autoFocusLockRef.current = null;
+        return;
+      }
+
+      if (autoFocusLockRef.current === key) return;
+
+      autoFocusLockRef.current = key;
+      setTimeout(() => {
+        focusNextBalise(baliseIndex);
+      }, 90);
     },
-    [validatedSet]
+    [focusNextBalise, getExpectedLength, validatedSet]
   );
 
   const computeGainBreakdown = useCallback(
@@ -861,113 +1057,6 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       supportParcoursId,
     ]
   );
-
-  const scoreDetailsLines = useMemo(() => {
-    const lines: string[] = [];
-
-    lines.push(`Total enregistré : ${formatPoints(savedPointsTotal)} pts`);
-    lines.push(`Balises validées : ${validatedBaliseIds.length}/${balises.length}`);
-    lines.push(`Tentatives effectuées : ${tentativesCount}`);
-    lines.push(`Dernier gain : ${formatPoints(lastPointsGain)} pts`);
-    lines.push("");
-
-    lines.push(`Modes actifs :`);
-    lines.push(`• Balises : ${pointsConfig.modes.balises ? "oui" : "non"}`);
-    lines.push(`• Parcours terminé : ${pointsConfig.modes.parcours ? "oui" : "non"}`);
-    lines.push(`• Tentatives : ${pointsConfig.modes.tentatives ? "oui" : "non"}`);
-    lines.push(`Bonus parcours : ${formatPoints(pointsConfig.pointsParParcours)} pts`);
-    lines.push(`parcours_termine DB : ${parcoursTermineDb ? "true" : "false"}`);
-    lines.push("");
-
-    lines.push(`Mode tentatives : ${pointsConfig.tentativePageMode}`);
-    lines.push(
-      `Page utilisée : ${resolvedTentativePage ? `Page ${resolvedTentativePage}` : "aucune"}`
-    );
-    lines.push(`Classe élève : ${studentGroupId ?? "aucune"}`);
-    lines.push(`Classe source barème : ${resolvedTentativeGroupId ?? "aucune"}`);
-    lines.push(`Professeur source : ${resolvedProfesseurId ?? "aucun"}`);
-    lines.push(`Parcours support barème : ${supportParcoursId ?? "aucun"}`);
-    lines.push(`Parcours courant : ${parcoursActif?.id ?? "aucun"}`);
-    lines.push("");
-
-    lines.push(`Points balises : ${formatPoints(liveScore.balisesPoints)}`);
-    lines.push(`Points parcours : ${formatPoints(liveScore.parcoursPoints)}`);
-    lines.push(`Points tentatives : ${formatPoints(liveScore.tentativesPoints)}`);
-    lines.push(`Fallback tentatives : ${formatPoints(pointsConfig.pointsPerCorrect)}`);
-    lines.push(`Points balise fallback : ${formatPoints(pointsConfig.pointsParBalise)}`);
-    lines.push("");
-
-    lines.push("Barème tentatives chargé :");
-    if (!tentativeBaremeRows.length) {
-      lines.push("• Aucun barème trouvé");
-    } else {
-      tentativeBaremeRows.forEach((row) => {
-        lines.push(`• ${formatConditionLabel(row)} → ${formatPoints(row.points)} pts`);
-      });
-    }
-
-    lines.push("");
-    lines.push("Debug :");
-    lines.push(`• groupId = ${debugState.groupId ?? "null"}`);
-    lines.push(`• professeurId = ${debugState.professeurId ?? "null"}`);
-    lines.push(`• supportParcoursId = ${debugState.supportParcoursId ?? "null"}`);
-    lines.push(`• page retenue = ${debugState.pageRetenue ?? "null"}`);
-    lines.push(
-      `• completionAttemptNumber = ${debugState.completionAttemptNumber ?? "null"}`
-    );
-    lines.push(`• baremeCount = ${debugState.baremeCount}`);
-
-    if (debugState.matchedRow) {
-      lines.push(
-        `• règle matchée = ${formatConditionLabel(debugState.matchedRow)} → ${formatPoints(
-          debugState.matchedRow.points
-        )} pts`
-      );
-    } else {
-      lines.push("• règle matchée = aucune");
-    }
-
-    if (completionAttemptNumber != null) {
-      lines.push("");
-      lines.push(`Parcours terminé à la tentative n°${completionAttemptNumber}`);
-    }
-
-    if (attemptsHistory.length) {
-      lines.push("");
-      lines.push("Historique :");
-      attemptsHistory.forEach((a, i) => {
-        const n = Number(a.tentatives_numero ?? i + 1);
-        const pts = parseNumeric(a.points_earned, 0);
-        const score = Number(a.score ?? 0);
-        lines.push(
-          `• Tentative ${n} → +${formatPoints(pts)} pts | score ${score}/${balises.length}`
-        );
-      });
-    }
-
-    return lines;
-  }, [
-    savedPointsTotal,
-    validatedBaliseIds.length,
-    balises.length,
-    tentativesCount,
-    lastPointsGain,
-    pointsConfig,
-    parcoursTermineDb,
-    resolvedTentativePage,
-    studentGroupId,
-    resolvedTentativeGroupId,
-    resolvedProfesseurId,
-    supportParcoursId,
-    parcoursActif?.id,
-    liveScore.balisesPoints,
-    liveScore.parcoursPoints,
-    liveScore.tentativesPoints,
-    tentativeBaremeRows,
-    debugState,
-    completionAttemptNumber,
-    attemptsHistory,
-  ]);
 
   const saveTentativeAndStats = useCallback(
     async (nextResults: Record<string, boolean | null>) => {
@@ -1002,13 +1091,33 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
           ? breakdown.tentativeNumero
           : completionAttemptNumber;
 
-      const nextProgress = await recomputeAndSyncStats({
+      const nextProgressRaw = await recomputeAndSyncStats({
         studentId,
         parcoursId: parcoursActif.id,
         balises,
         pointsConfig,
         tentativeBaremeRows,
       });
+
+      const normalizedNextProgressIds = normalizeValidatedIdsForOccurrences(
+        nextProgressRaw.validatedIds.length ? nextProgressRaw.validatedIds : nextValidatedIds,
+        balises
+      );
+
+      const nextProgress = {
+        ...nextProgressRaw,
+        validatedIds: normalizedNextProgressIds.length
+          ? normalizedNextProgressIds
+          : nextValidatedIds,
+        validatedCount: normalizedNextProgressIds.length
+          ? normalizedNextProgressIds.length
+          : nextValidatedIds.length,
+        parcoursTermine:
+          balises.length > 0 &&
+          (normalizedNextProgressIds.length
+            ? normalizedNextProgressIds.length
+            : nextValidatedIds.length) >= balises.length,
+      };
 
       const dbTermine = await loadStatParcoursTermine(studentId, parcoursActif.id);
       const effectiveTermine =
@@ -1018,8 +1127,9 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
 
       const recomputedScore = computeCurrentDisplayedScore({
         balises,
-        validatedIds: nextProgress.validatedIds.length ? nextProgress.validatedIds : nextValidatedIds,
-        completionAttemptNumber: nextProgress.completionAttemptNumber ?? nextCompletionAttemptNumber,
+        validatedIds: nextProgress.validatedIds,
+        completionAttemptNumber:
+          nextProgress.completionAttemptNumber ?? nextCompletionAttemptNumber,
         pointsConfig,
         tentativeBaremeRows,
       });
@@ -1044,23 +1154,27 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
           .eq("parcours_id", parcoursActif.id);
       }
 
-      const newAttemptRow: TentativeRow = {
-        student_id: studentId,
-        parcours_id: parcoursActif.id,
-        tentatives_numero: breakdown.tentativeNumero,
-        score: result.nextValidatedCount,
-        total_balises: balises.length,
-        points_earned: breakdown.totalGain,
-        details: result.details as AttemptDetail[],
-      };
+      setAttemptsHistory((prev) => [
+        ...prev,
+        {
+          student_id: studentId,
+          parcours_id: parcoursActif.id,
+          tentatives_numero: breakdown.tentativeNumero,
+          score: nextProgress.validatedCount,
+          total_balises: balises.length,
+          points_earned: breakdown.totalGain,
+          details: result.details as AttemptDetail[],
+        },
+      ]);
 
-      setAttemptsHistory((prev) => [...prev, newAttemptRow]);
-      setValidatedBaliseIds(nextProgress.validatedIds.length ? nextProgress.validatedIds : nextValidatedIds);
-      setSavedScore(nextProgress.validatedCount || result.nextValidatedCount);
+      setValidatedBaliseIds(nextProgress.validatedIds);
+      setSavedScore(nextProgress.validatedCount);
       setTentativesCount(nextProgress.tentativesCount || result.nextTentativesCount);
       setSavedPointsTotal(correctedTotal);
       setLastPointsGain(breakdown.totalGain);
-      setCompletionAttemptNumber(nextProgress.completionAttemptNumber ?? nextCompletionAttemptNumber);
+      setCompletionAttemptNumber(
+        nextProgress.completionAttemptNumber ?? nextCompletionAttemptNumber
+      );
       setParcoursTermineDb(effectiveTermine);
 
       setCodesSaisis((prev) => {
@@ -1073,10 +1187,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
 
       setResultats((prev) => {
         const next = { ...prev };
-        balises.forEach((b) => {
-          if (validatedSet.has(b.id)) next[b.id] = true;
-        });
-        result.newlyValidatedIds.forEach((id) => {
+        nextProgress.validatedIds.forEach((id) => {
           next[id] = true;
         });
         return next;
@@ -1085,7 +1196,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       return {
         breakdown,
         nextSavedPointsTotal: correctedTotal,
-        nextValidatedCount: nextProgress.validatedCount || result.nextValidatedCount,
+        nextValidatedCount: nextProgress.validatedCount,
         nextTentativesCount: nextProgress.tentativesCount || result.nextTentativesCount,
       };
     },
@@ -1102,7 +1213,6 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       completionAttemptNumber,
       tentativeBaremeRows,
       forceParcoursBonusIfNeeded,
-      validatedSet,
     ]
   );
 
@@ -1115,27 +1225,33 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         return;
       }
 
-      const hasAnyInput = balises.some(
-        (balise) => !validatedSet.has(balise.id) && !!sanitize(codesSaisis[balise.id])
-      );
+      const hasAnyInput = balises.some((balise) => {
+        const key = balise.instanceKey;
+        return !validatedSet.has(key) && !!sanitize(codesSaisis[key]);
+      });
 
       if (!hasAnyInput) {
         Alert.alert("Aucune saisie", "Entre au moins un code avant de vérifier.");
         return;
       }
 
+      Keyboard.dismiss();
       setSaving(true);
 
       const nextResults: Record<string, boolean | null> = {};
+
       balises.forEach((balise) => {
-        if (validatedSet.has(balise.id)) {
-          nextResults[balise.id] = true;
+        const key = balise.instanceKey;
+
+        if (validatedSet.has(key)) {
+          nextResults[key] = true;
           return;
         }
 
-        const saisi = sanitize(codesSaisis[balise.id]);
-        const attendu = sanitize(balise.code);
-        nextResults[balise.id] = !!saisi && saisi === attendu;
+        const saisi = sanitize(codesSaisis[key]);
+        const attendu = sanitize(balise.code ?? "");
+
+        nextResults[key] = !!saisi && saisi === attendu;
       });
 
       setResultats(nextResults);
@@ -1145,48 +1261,13 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
 
       const lines = [
         `Balises nouvellement validées : ${breakdown.newlyValidatedCount}`,
-        `Points balises : ${formatPoints(breakdown.balisesPoints)}`,
-        `Points parcours : ${formatPoints(breakdown.parcoursPoints)}`,
-        `Points tentatives : ${formatPoints(breakdown.tentativesPoints)}`,
-        `Gain total : ${formatPoints(breakdown.totalGain)}`,
+        `Gain total : ${formatPointsLabel(breakdown.totalGain)}`,
         `Score enregistré : ${nextValidatedCount}/${balises.length}`,
-        `Total recalculé : ${formatPoints(nextSavedPointsTotal)} pts`,
+        `Total : ${formatPointsLabel(nextSavedPointsTotal)}`,
         `Tentatives : ${nextTentativesCount}`,
       ];
 
-      if (breakdown.resolvedTentativePage) {
-        lines.splice(1, 0, `Page de tentative utilisée : ${breakdown.resolvedTentativePage}`);
-      }
-
-      if (breakdown.resolvedGroupId) {
-        lines.splice(2, 0, `Classe source : ${breakdown.resolvedGroupId}`);
-      }
-
-      if (breakdown.resolvedProfesseurId) {
-        lines.splice(3, 0, `Professeur source : ${breakdown.resolvedProfesseurId}`);
-      }
-
-      if (breakdown.supportParcoursId) {
-        lines.splice(4, 0, `Parcours support : ${breakdown.supportParcoursId}`);
-      }
-
-      if (breakdown.tentativeBaremeMatched) {
-        lines.push(
-          `Barème tentatives appliqué : ${formatConditionLabel(
-            breakdown.tentativeBaremeMatched
-          )}`
-        );
-      } else if (breakdown.willComplete && pointsConfig.modes.tentatives) {
-        lines.push(
-          `Barème tentatives appliqué : aucun match → fallback ${formatPoints(
-            pointsConfig.pointsPerCorrect
-          )} pts`
-        );
-      }
-
-      if (breakdown.willComplete) {
-        lines.unshift("Parcours terminé ✅");
-      }
+      if (breakdown.willComplete) lines.unshift("Parcours terminé ✅");
 
       Alert.alert("Tentative enregistrée", lines.join("\n"));
     } catch (err: any) {
@@ -1195,238 +1276,443 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     } finally {
       setSaving(false);
     }
-  }, [balises, validatedSet, codesSaisis, isCompleted, saveTentativeAndStats, pointsConfig]);
+  }, [balises, validatedSet, codesSaisis, isCompleted, saveTentativeAndStats]);
 
-  const renderBalise = ({ item }: { item: BaliseAffichee }) => {
-    const alreadyValidated = validatedSet.has(item.id);
-    const result = alreadyValidated ? true : resultats[item.id];
-    const saisie = codesSaisis[item.id] ?? "";
-    const displayBalisePoints = pointsConfig.modes.balises
-      ? Number.isFinite(Number(item.points))
-        ? Number(item.points)
-        : pointsConfig.pointsParBalise
-      : 0;
+  const renderCodeBoxes = useCallback(
+    (item: BaliseAffichee, baliseIndex: number) => {
+      const key = item.instanceKey;
+      const expectedLength = getExpectedLength(item);
+      const typedValue = codesSaisis[key] ?? "";
+      const paddedValue = typedValue.padEnd(expectedLength, " ");
+      const result = resultats[key];
+      const alreadyValidated = validatedSet.has(key);
+      const isActive = activeBaliseKey === key;
+      const selection = inputSelections[key];
 
-    return (
-      <View
-        style={[
-          styles.baliseCard,
-          result === true && styles.baliseCardOk,
-          result === false && styles.baliseCardKo,
-        ]}
-      >
-        <View style={styles.baliseHeader}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.baliseTitle}>Balise {item.ordre}</Text>
-            <Text style={styles.baliseSubtitle}>Entre le code trouvé sur cette balise</Text>
-          </View>
+      return (
+        <Pressable
+          onPress={() => {
+            if (!alreadyValidated) focusBalise(item, true, false);
+          }}
+          style={[styles.codeBoxesWrap, { gap: boxGap }]}
+        >
+          <TextInput
+            ref={(ref) => setInputRef(key, ref)}
+            value={alreadyValidated ? "" : typedValue}
+            editable={!alreadyValidated}
+            maxLength={expectedLength}
+            selection={selection}
+            selectTextOnFocus={typedValue.length >= expectedLength}
+            onFocus={() => {
+              setActiveBaliseKey(key);
+              setSelectionForBalise(
+                key,
+                typedValue,
+                expectedLength,
+                typedValue.length >= expectedLength
+              );
+            }}
+            onChangeText={(text) => handleCodeChange(item, baliseIndex, text)}
+            onSubmitEditing={() => focusNextBalise(baliseIndex)}
+            blurOnSubmit={false}
+            autoCapitalize="characters"
+            autoCorrect={false}
+            keyboardType="default"
+            returnKeyType="next"
+            style={styles.hiddenInput}
+          />
 
-          <View style={styles.pointsBadgeMini}>
-            <Text style={styles.pointsBadgeMiniText}>
-              {formatPoints(displayBalisePoints)} pts
-            </Text>
-          </View>
+          {Array.from({ length: expectedLength }).map((_, charIndex) => {
+            const char = paddedValue[charIndex]?.trim() || "";
+
+            return (
+              <View
+                key={`${key}__box_${charIndex}`}
+                style={[
+                  styles.codeBoxFake,
+                  {
+                    width: boxSize,
+                    height: boxSize,
+                    borderRadius: Math.max(9, Math.floor(boxSize / 4)),
+                  },
+                  isActive && styles.codeBoxActive,
+                  result === true && styles.codeBoxOk,
+                  result === false && styles.codeBoxKo,
+                  alreadyValidated && styles.codeBoxValidated,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.codeBoxFakeText,
+                    { fontSize: isCompact ? 16 : 18 },
+                    result === true && styles.codeBoxTextOk,
+                    result === false && styles.codeBoxTextKo,
+                    alreadyValidated && styles.codeBoxTextOk,
+                  ]}
+                >
+                  {alreadyValidated ? "✓" : char}
+                </Text>
+              </View>
+            );
+          })}
+        </Pressable>
+      );
+    },
+    [
+      activeBaliseKey,
+      boxGap,
+      boxSize,
+      codesSaisis,
+      focusBalise,
+      focusNextBalise,
+      getExpectedLength,
+      handleCodeChange,
+      inputSelections,
+      isCompact,
+      resultats,
+      setInputRef,
+      setSelectionForBalise,
+      validatedSet,
+    ]
+  );
+
+  const renderBalise = useCallback(
+    ({ item, index }: { item: BaliseAffichee; index: number }) => {
+      const key = item.instanceKey;
+      const alreadyValidated = validatedSet.has(key);
+      const result = alreadyValidated ? true : resultats[key];
+      const isActive = activeBaliseKey === key;
+
+      const displayBalisePoints = pointsConfig.modes.balises
+        ? Number.isFinite(Number(item.points))
+          ? Number(item.points)
+          : pointsConfig.pointsParBalise
+        : 0;
+
+      return (
+        <View
+          onLayout={(event) => {
+            rowYRefs.current[key] = event.nativeEvent.layout.y;
+            rowHeightRefs.current[key] = event.nativeEvent.layout.height;
+          }}
+          style={[
+            styles.baliseLine,
+            isActive && styles.baliseLineActive,
+            result === true && styles.baliseLineOk,
+            result === false && styles.baliseLineKo,
+          ]}
+        >
+          <TouchableOpacity
+            activeOpacity={0.95}
+            onPress={() => {
+              if (!alreadyValidated) focusBalise(item, true, false);
+            }}
+            style={styles.baliseLineTouchable}
+          >
+            <LinearGradient
+              colors={isActive ? ["#0F5E8C", "#38BDF8"] : ["#E0F2FE", "#FFFFFF"]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={[styles.baliseNumberBlock, isActive && styles.baliseNumberBlockActive]}
+            >
+              <Text style={[styles.baliseNumberLabel, isActive && styles.baliseNumberLabelActive]}>
+                BALISE
+              </Text>
+              <Text style={[styles.baliseNumber, isActive && styles.baliseNumberActive]}>
+                {item.ordre}
+              </Text>
+              {pointsConfig.modes.balises && (
+                <Text style={[styles.pointsLeftText, isActive && styles.pointsLeftTextActive]}>
+                  {formatPointsLabel(displayBalisePoints)}
+                </Text>
+              )}
+            </LinearGradient>
+
+            <View style={styles.baliseInputZone}>
+              {renderCodeBoxes(item, index)}
+
+              {(alreadyValidated || result === false) && (
+                <View style={styles.baliseMetaRow}>
+                  {alreadyValidated ? (
+                    <Text style={styles.okText}>Validée ✅</Text>
+                  ) : result === false ? (
+                    <Text style={styles.koText}>Incorrect ❌</Text>
+                  ) : (
+                    <View style={{ flex: 1 }} />
+                  )}
+                </View>
+              )}
+            </View>
+          </TouchableOpacity>
         </View>
-
-        {alreadyValidated ? (
-          <View style={styles.validatedRow}>
-            <Feather name="check-circle" size={18} color={C_GREEN} />
-            <Text style={styles.validatedText}>Balise déjà validée — code masqué</Text>
-          </View>
-        ) : (
-          <View style={styles.inputWrap}>
-            <Feather name="lock" size={16} color={C_BLUE_DARK} />
-            <TextInput
-              value={saisie}
-              onChangeText={(txt) => handleChangeCode(item.id, txt)}
-              placeholder="Entrer le code"
-              placeholderTextColor="#8AA0B7"
-              autoCapitalize="characters"
-              autoCorrect={false}
-              style={styles.input}
-            />
-          </View>
-        )}
-
-        {alreadyValidated ? (
-          <Text style={styles.okText}>Déjà validée ✅</Text>
-        ) : result === true ? (
-          <Text style={styles.okText}>Code correct ✅</Text>
-        ) : result === false ? (
-          <Text style={styles.koText}>Code incorrect ❌</Text>
-        ) : null}
-      </View>
-    );
-  };
+      );
+    },
+    [activeBaliseKey, focusBalise, pointsConfig, renderCodeBoxes, resultats, validatedSet]
+  );
 
   return (
     <SafeAreaView style={styles.safe}>
-      <LinearGradient colors={[C_BG, C_BG_2]} style={styles.container}>
-        <View style={styles.topBar}>
-          <TouchableOpacity
-            activeOpacity={0.9}
-            onPress={() => setPage("EcrireResultat")}
-            style={styles.iconBtn}
-          >
-            <Feather name="arrow-left" size={18} color="#fff" />
-          </TouchableOpacity>
-
-          <Text style={styles.pageTitle} numberOfLines={1}>
-            {parcoursNom}
-          </Text>
-
-          <TouchableOpacity
-            activeOpacity={0.9}
-            onPress={() => setScoreModalVisible(true)}
-            style={styles.bigScorePill}
-          >
-            <Text style={styles.bigScoreValue}>{formatPoints(savedPointsTotal)}</Text>
-            <Text style={styles.bigScoreLabel}>pts</Text>
-          </TouchableOpacity>
-        </View>
-
-        <ScrollView
-          contentContainerStyle={{ padding: 14, paddingBottom: 120 }}
-          keyboardShouldPersistTaps="handled"
-          showsVerticalScrollIndicator={false}
+      <ImageBackground source={{ uri: BG_GAME }} style={styles.bg} resizeMode="cover">
+        <LinearGradient
+          colors={[
+            "rgba(5,18,30,0.58)",
+            "rgba(9,34,54,0.42)",
+            "rgba(234,246,255,0.86)",
+            "rgba(234,246,255,0.96)",
+          ]}
+          locations={[0, 0.25, 0.6, 1]}
+          style={styles.container}
         >
-          <View style={styles.statsRow}>
-            <View style={[styles.statBox, { width: statCardWidth }]}>
-              <Text style={styles.statValue}>{balises.length}</Text>
-              <Text style={styles.statLabel}>Balises</Text>
-            </View>
+          <View>
+            <View style={styles.topBar}>
+              <TouchableOpacity
+                activeOpacity={0.9}
+                onPress={() => setPage("EcrireResultat")}
+                style={styles.iconBtn}
+              >
+                <Feather name="arrow-left" size={18} color="#fff" />
+              </TouchableOpacity>
 
-            <View style={[styles.statBox, { width: statCardWidth }]}>
-              <Text style={styles.statValue}>
-                {savedScore}/{balises.length}
+              <Text
+                style={styles.pageTitle}
+                numberOfLines={2}
+                adjustsFontSizeToFit
+                minimumFontScale={0.72}
+              >
+                {parcoursNom}
               </Text>
-              <Text style={styles.statLabel}>Score</Text>
+
+              <TouchableOpacity
+                activeOpacity={0.9}
+                onPress={() => setConfirmLogoutVisible(true)}
+                style={styles.logoutBtn}
+              >
+                <Feather name="log-out" size={19} color="#fff" />
+              </TouchableOpacity>
             </View>
 
-            <View style={[styles.statBox, { width: statCardWidth }]}>
-              <Text style={styles.statValue}>{tentativesCount}</Text>
-              <Text style={styles.statLabel}>Tentatives</Text>
-            </View>
-          </View>
-
-          {loading ? (
-            <View style={styles.stateCard}>
-              <ActivityIndicator size="large" color={C_BLUE} />
-              <Text style={styles.stateTitle}>Chargement...</Text>
-            </View>
-          ) : screenError ? (
-            <View style={styles.stateCard}>
-              <Feather name="alert-circle" size={42} color={C_GOLD} />
-              <Text style={styles.stateTitle}>Erreur</Text>
-              <Text style={styles.stateText}>{screenError}</Text>
-            </View>
-          ) : !parcoursActif?.id ? (
-            <View style={styles.stateCard}>
-              <Feather name="map" size={42} color={C_GOLD} />
-              <Text style={styles.stateTitle}>Aucun parcours sélectionné</Text>
-              <Text style={styles.stateText}>
-                Reviens à la liste des parcours puis choisis-en un.
-              </Text>
-            </View>
-          ) : balises.length === 0 ? (
-            <View style={styles.stateCard}>
-              <Feather name="map-pin" size={42} color={C_GOLD} />
-              <Text style={styles.stateTitle}>Aucune balise trouvée</Text>
-              <Text style={styles.stateText}>
-                Ce parcours ne contient aucune balise active à afficher.
-              </Text>
-            </View>
-          ) : (
-            <FlatList
-              data={balises}
-              keyExtractor={(item) => item.id}
-              renderItem={renderBalise}
-              scrollEnabled={false}
-              ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
-            />
-          )}
-        </ScrollView>
-
-        {!loading && !screenError && !!balises.length && (
-          <View style={styles.bottomBar}>
-            <TouchableOpacity
-              activeOpacity={0.9}
-              style={[
-                styles.verifyAllBtn,
-                (saving || isCompleted) && { opacity: 0.7 },
-                isCompleted && styles.verifyAllBtnDone,
-              ]}
-              onPress={handleVerifierTout}
-              disabled={saving || isCompleted}
-            >
-              {saving ? (
-                <ActivityIndicator color="#fff" />
-              ) : isCompleted ? (
-                <>
-                  <Feather name="award" size={18} color="#fff" />
-                  <Text style={styles.verifyAllBtnText}>Parcours terminé</Text>
-                </>
-              ) : (
-                <>
-                  <Feather name="check-square" size={18} color="#fff" />
-                  <Text style={styles.verifyAllBtnText}>Tout vérifier</Text>
-                </>
-              )}
-            </TouchableOpacity>
-          </View>
-        )}
-
-        <Modal
-          visible={scoreModalVisible}
-          transparent
-          animationType="fade"
-          onRequestClose={() => setScoreModalVisible(false)}
-        >
-          <View style={styles.modalBackdrop}>
-            <View style={styles.modalCard}>
-              <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>Détail des points</Text>
-                <TouchableOpacity
-                  activeOpacity={0.9}
-                  onPress={() => setScoreModalVisible(false)}
-                  style={styles.modalCloseBtn}
-                >
-                  <Feather name="x" size={18} color="#fff" />
-                </TouchableOpacity>
+            <View style={styles.stickyStatsBar}>
+              <View style={[styles.statBox, { width: statCardWidth }]}>
+                <Text style={styles.statValue}>
+                  {savedScore}/{balises.length}
+                </Text>
+                <Text style={styles.statLabel}>Balises trouvées</Text>
               </View>
 
-              <ScrollView showsVerticalScrollIndicator={false}>
-                {scoreDetailsLines.map((line, idx) => (
-                  <Text key={idx} style={styles.modalLine}>
-                    {line || " "}
-                  </Text>
-                ))}
-              </ScrollView>
+              <View style={[styles.statBox, { width: statCardWidth }]}>
+                <Text style={styles.statValue}>{tentativesCount}</Text>
+                <Text style={styles.statLabel}>Tentatives</Text>
+              </View>
+
+              <TouchableOpacity
+                activeOpacity={0.9}
+                onPress={() => setScoreModalVisible(true)}
+                style={styles.bigScorePillTop2}
+              >
+                <Text style={styles.bigScoreValue}>{formatPoints(savedPointsTotal)}</Text>
+                <Text style={styles.bigScoreLabel}>{formatPointUnit(savedPointsTotal)}</Text>
+              </TouchableOpacity>
             </View>
           </View>
-        </Modal>
-      </LinearGradient>
+
+          <ScrollView
+            ref={scrollRef}
+            contentContainerStyle={{ padding: 12, paddingBottom: bottomScrollSpace }}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "none"}
+            nestedScrollEnabled
+            scrollEventThrottle={16}
+            showsVerticalScrollIndicator={false}
+            directionalLockEnabled={false}
+            canCancelContentTouches={true}
+            onLayout={(event) => {
+              scrollViewHeightRef.current = event.nativeEvent.layout.height;
+            }}
+            onScroll={(event) => {
+              scrollYRef.current = event.nativeEvent.contentOffset.y;
+            }}
+          >
+            {loading ? (
+              <View style={styles.stateCard}>
+                <ActivityIndicator size="large" color={C_GOLD} />
+                <Text style={styles.stateTitle}>Chargement...</Text>
+              </View>
+            ) : screenError ? (
+              <View style={styles.stateCard}>
+                <Feather name="alert-circle" size={42} color={C_GOLD} />
+                <Text style={styles.stateTitle}>Erreur</Text>
+                <Text style={styles.stateText}>{screenError}</Text>
+              </View>
+            ) : !parcoursActif?.id ? (
+              <View style={styles.stateCard}>
+                <Feather name="map" size={42} color={C_GOLD} />
+                <Text style={styles.stateTitle}>Aucun parcours sélectionné</Text>
+                <Text style={styles.stateText}>
+                  Reviens à la liste des parcours puis choisis-en un.
+                </Text>
+              </View>
+            ) : balises.length === 0 ? (
+              <View style={styles.stateCard}>
+                <Feather name="map-pin" size={42} color={C_GOLD} />
+                <Text style={styles.stateTitle}>Aucune balise trouvée</Text>
+                <Text style={styles.stateText}>
+                  Ce parcours ne contient aucune balise active à afficher.
+                </Text>
+              </View>
+            ) : (
+              <FlatList
+                data={balises}
+                keyExtractor={(item) => item.instanceKey}
+                renderItem={renderBalise}
+                scrollEnabled={false}
+                keyboardShouldPersistTaps="always"
+                ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
+              />
+            )}
+          </ScrollView>
+
+          {!loading && !screenError && !!balises.length && (
+            <View style={styles.bottomBar}>
+              <TouchableOpacity
+                activeOpacity={0.9}
+                style={[
+                  styles.verifyAllBtn,
+                  (saving || isCompleted) && { opacity: 0.7 },
+                  isCompleted && styles.verifyAllBtnDone,
+                ]}
+                onPress={handleVerifierTout}
+                disabled={saving || isCompleted}
+              >
+                {saving ? (
+                  <ActivityIndicator color="#fff" />
+                ) : isCompleted ? (
+                  <>
+                    <Feather name="award" size={18} color="#fff" />
+                    <Text style={styles.verifyAllBtnText}>Parcours terminé</Text>
+                  </>
+                ) : (
+                  <>
+                    <Feather name="check-square" size={18} color="#fff" />
+                    <Text style={styles.verifyAllBtnText}>Tout vérifier</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </View>
+          )}
+
+          <Modal transparent visible={confirmLogoutVisible} animationType="fade">
+            <View style={styles.modalBg}>
+              <View style={styles.logoutModalBox}>
+                <Text style={styles.logoutModalTitle}>Déconnexion</Text>
+                <Text style={styles.logoutModalText}>
+                  Souhaites-tu vraiment te déconnecter ?
+                </Text>
+
+                <View style={styles.modalActions}>
+                  <Pressable
+                    style={styles.cancelBtn}
+                    onPress={() => setConfirmLogoutVisible(false)}
+                  >
+                    <Text style={styles.cancelText}>Annuler</Text>
+                  </Pressable>
+
+                  <Pressable style={styles.confirmLogoutBtn} onPress={handleLogout}>
+                    {loggingOut ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <Text style={styles.confirmText}>Déconnexion</Text>
+                    )}
+                  </Pressable>
+                </View>
+              </View>
+            </View>
+          </Modal>
+
+          <Modal
+            visible={scoreModalVisible}
+            transparent
+            animationType="fade"
+            onRequestClose={() => setScoreModalVisible(false)}
+          >
+            <View style={styles.modalBackdrop}>
+              <View style={styles.modalCard}>
+                <View style={styles.modalHeader}>
+                  <Text style={styles.modalTitle}>Détail des points</Text>
+                  <TouchableOpacity
+                    activeOpacity={0.9}
+                    onPress={() => setScoreModalVisible(false)}
+                    style={styles.modalCloseBtn}
+                  >
+                    <Feather name="x" size={18} color="#fff" />
+                  </TouchableOpacity>
+                </View>
+
+                <ScrollView showsVerticalScrollIndicator={false}>
+                  <View style={styles.scoreHeroCard}>
+                    <Text style={styles.scoreHeroLabel}>Total actuel</Text>
+                    <Text style={styles.scoreHeroValue}>{formatPointsLabel(savedPointsTotal)}</Text>
+                  </View>
+
+                  <View style={styles.scoreTable}>
+                    <View style={styles.scoreTableHeader}>
+                      <Text style={[styles.scoreTh, { flex: 1.5 }]}>Source</Text>
+                      <Text style={[styles.scoreTh, { flex: 1 }]}>Points</Text>
+                      <Text style={[styles.scoreTh, { flex: 1 }]}>État</Text>
+                    </View>
+
+                    <View style={styles.scoreTrBlue}>
+                      <Text style={[styles.scoreTdName, { flex: 1.5 }]}>Balises</Text>
+                      <Text style={[styles.scoreTdValue, { flex: 1 }]}>
+                        {formatPointsLabel(liveScore.balisesPoints)}
+                      </Text>
+                      <Text style={[styles.scoreTdStatus, { flex: 1 }]}>
+                        {validatedBaliseIds.length}/{balises.length}
+                      </Text>
+                    </View>
+
+                    <View style={styles.scoreTrGreen}>
+                      <Text style={[styles.scoreTdName, { flex: 1.5 }]}>Parcours terminé</Text>
+                      <Text style={[styles.scoreTdValue, { flex: 1 }]}>
+                        {formatPointsLabel(liveScore.parcoursPoints)}
+                      </Text>
+                      <Text style={[styles.scoreTdStatus, { flex: 1 }]}>
+                        {isCompletedEffective ? "Terminé" : "En cours"}
+                      </Text>
+                    </View>
+
+                    <View style={styles.scoreTrGold}>
+                      <Text style={[styles.scoreTdName, { flex: 1.5 }]}>Tentatives</Text>
+                      <Text style={[styles.scoreTdValue, { flex: 1 }]}>
+                        {formatPointsLabel(liveScore.tentativesPoints)}
+                      </Text>
+                      <Text style={[styles.scoreTdStatus, { flex: 1 }]}>{tentativesCount}</Text>
+                    </View>
+                  </View>
+                </ScrollView>
+              </View>
+            </View>
+          </Modal>
+        </LinearGradient>
+      </ImageBackground>
     </SafeAreaView>
   );
 };
 
 export default EcrireCodeBaliseEleve;
 
-/* =========================
-   Styles
-========================= */
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: C_BG },
+  safe: { flex: 1, backgroundColor: "#061827" },
+  bg: { flex: 1 },
   container: { flex: 1 },
 
   topBar: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
+    gap: 10,
     paddingHorizontal: 16,
     paddingTop: Platform.OS === "android" ? 14 : 8,
     paddingBottom: 12,
-    backgroundColor: C_BLUE_DARK,
+    backgroundColor: "rgba(8,30,48,0.76)",
     borderBottomWidth: 1,
     borderBottomColor: "rgba(255,255,255,0.18)",
   },
@@ -1438,58 +1724,56 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     backgroundColor: "rgba(255,255,255,0.16)",
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.22)",
+    borderColor: "rgba(255,255,255,0.28)",
+  },
+  logoutBtn: {
+    width: 42,
+    height: 42,
+    borderRadius: 15,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: C_RED_FLASH,
+    borderWidth: 2,
+    borderColor: "rgba(255,255,255,0.45)",
+    shadowColor: C_RED_FLASH,
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 5,
   },
   pageTitle: {
     flex: 1,
     color: "#FFFFFF",
-    fontSize: 20,
+    fontSize: 18,
+    lineHeight: 21,
     fontWeight: "900",
     textAlign: "center",
+    letterSpacing: 0.2,
   },
 
-  bigScorePill: {
-    minWidth: 82,
-    height: 42,
-    borderRadius: 16,
-    paddingHorizontal: 10,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#FBBF24",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.30)",
-  },
-  bigScoreValue: {
-    color: "#78350F",
-    fontSize: 15,
-    fontWeight: "900",
-    lineHeight: 17,
-  },
-  bigScoreLabel: {
-    color: "#92400E",
-    fontSize: 10,
-    fontWeight: "900",
-    lineHeight: 12,
-  },
-
-  statsRow: {
+  stickyStatsBar: {
     flexDirection: "row",
-    flexWrap: "nowrap",
+    alignItems: "center",
     justifyContent: "space-between",
     gap: 8,
-    marginBottom: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: "rgba(8,30,48,0.58)",
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,255,255,0.14)",
+    zIndex: 20,
   },
   statBox: {
-    backgroundColor: "#FFFFFF",
+    backgroundColor: "rgba(255,255,255,0.92)",
     borderWidth: 1,
-    borderColor: C_BORDER,
-    borderRadius: 16,
-    paddingVertical: 12,
+    borderColor: "rgba(255,255,255,0.48)",
+    borderRadius: 18,
+    paddingVertical: 10,
     paddingHorizontal: 6,
     alignItems: "center",
     justifyContent: "center",
-    shadowColor: "#1F5B86",
-    shadowOpacity: 0.12,
+    shadowColor: "#000",
+    shadowOpacity: 0.16,
     shadowRadius: 10,
     shadowOffset: { width: 0, height: 5 },
     elevation: 3,
@@ -1507,125 +1791,221 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     textAlign: "center",
   },
-
-  baliseCard: {
-    backgroundColor: C_CARD,
-    borderWidth: 1,
-    borderColor: C_BORDER,
-    borderRadius: 22,
-    padding: 16,
-    shadowColor: "#1F5B86",
-    shadowOpacity: 0.13,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 3,
-  },
-  baliseCardOk: {
-    borderColor: "rgba(22,163,74,0.38)",
-    backgroundColor: "#F0FDF4",
-  },
-  baliseCardKo: {
-    borderColor: "rgba(220,38,38,0.34)",
-    backgroundColor: "#FEF2F2",
-  },
-
-  baliseHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    marginBottom: 12,
-  },
-  baliseTitle: {
-    color: C_TEXT,
-    fontSize: 20,
-    fontWeight: "900",
-  },
-  baliseSubtitle: {
-    color: C_MUTED,
-    fontSize: 12,
-    fontWeight: "700",
-    marginTop: 2,
-  },
-
-  pointsBadgeMini: {
-    minWidth: 58,
-    height: 32,
-    borderRadius: 12,
-    paddingHorizontal: 8,
+  bigScorePillTop2: {
+    width: 86,
+    height: 50,
+    borderRadius: 18,
+    paddingHorizontal: 10,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#FEF3C7",
-    borderWidth: 1,
-    borderColor: "#FCD34D",
+    backgroundColor: "#FBBF24",
+    borderWidth: 2,
+    borderColor: "rgba(255,255,255,0.55)",
+    shadowColor: "#F59E0B",
+    shadowOpacity: 0.32,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 5 },
+    elevation: 4,
   },
-  pointsBadgeMiniText: {
-    color: "#92400E",
-    fontSize: 11,
+  bigScoreValue: {
+    color: "#78350F",
+    fontSize: 14,
     fontWeight: "900",
+    lineHeight: 17,
+  },
+  bigScoreLabel: {
+    color: "#92400E",
+    fontSize: 10,
+    fontWeight: "900",
+    lineHeight: 12,
   },
 
-  inputWrap: {
-    height: 50,
-    borderRadius: 16,
-    backgroundColor: "#F8FBFF",
+  baliseLine: {
+    backgroundColor: "rgba(255,255,255,0.94)",
     borderWidth: 1,
-    borderColor: "rgba(31,91,134,0.18)",
+    borderColor: "rgba(255,255,255,0.58)",
+    borderRadius: 22,
+    shadowColor: "#000",
+    shadowOpacity: 0.16,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 4,
+    overflow: "hidden",
+  },
+  baliseLineActive: {
+    borderColor: "rgba(56,189,248,0.95)",
+    shadowColor: "#38BDF8",
+    shadowOpacity: 0.35,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 6,
+  },
+  baliseLineOk: {
+    borderColor: "rgba(34,197,94,0.72)",
+    backgroundColor: "rgba(236,253,245,0.96)",
+  },
+  baliseLineKo: {
+    borderColor: "rgba(239,68,68,0.72)",
+    backgroundColor: "rgba(254,242,242,0.96)",
+  },
+  baliseLineTouchable: {
+    minHeight: 76,
+    paddingVertical: 9,
+    paddingLeft: 10,
+    paddingRight: 12,
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
-    paddingHorizontal: 12,
+    gap: 12,
   },
-  input: {
+
+  baliseNumberBlock: {
+    width: 76,
+    minHeight: 68,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: "rgba(31,117,184,0.18)",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 6,
+    overflow: "hidden",
+  },
+  baliseNumberBlockActive: {
+    borderColor: "#38BDF8",
+  },
+  baliseNumberLabel: {
+    color: C_MUTED,
+    fontSize: 10,
+    fontWeight: "900",
+    lineHeight: 12,
+    letterSpacing: 0.5,
+  },
+  baliseNumberLabelActive: {
+    color: "rgba(255,255,255,0.88)",
+  },
+  baliseNumber: {
+    color: C_BLUE_DARK,
+    fontSize: 22,
+    fontWeight: "900",
+    lineHeight: 26,
+  },
+  baliseNumberActive: {
+    color: "#FFFFFF",
+  },
+  pointsLeftText: {
+    marginTop: 2,
+    color: "#92400E",
+    fontSize: 10,
+    fontWeight: "900",
+    lineHeight: 12,
+  },
+  pointsLeftTextActive: {
+    color: "#FFE8B0",
+  },
+
+  baliseInputZone: {
     flex: 1,
+    minWidth: 0,
+    minHeight: 68,
+    justifyContent: "center",
+    alignItems: "flex-start",
+  },
+  codeBoxesWrap: {
+    position: "relative",
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+    justifyContent: "flex-start",
+  },
+  hiddenInput: {
+    position: "absolute",
+    left: 0,
+    top: 0,
+    width: 1,
+    height: 1,
+    opacity: 0.01,
+    color: "transparent",
+    backgroundColor: "transparent",
+    padding: 0,
+    margin: 0,
+    borderWidth: 0,
+    zIndex: -1,
+  },
+  codeBoxFake: {
+    backgroundColor: "rgba(255,255,255,0.96)",
+    borderWidth: 2,
+    borderColor: "rgba(31,91,134,0.28)",
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: "#000",
+    shadowOpacity: 0.08,
+    shadowRadius: 5,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 1,
+  },
+  codeBoxFakeText: {
     color: C_TEXT,
-    fontSize: 15,
-    fontWeight: "800",
+    textAlign: "center",
+    fontWeight: "900",
+    includeFontPadding: false,
+    textAlignVertical: "center",
+  },
+  codeBoxActive: {
+    borderColor: "#38BDF8",
+    backgroundColor: "#E0F2FE",
+  },
+  codeBoxOk: {
+    borderColor: "rgba(22,163,74,0.70)",
+    backgroundColor: "#DCFCE7",
+  },
+  codeBoxKo: {
+    borderColor: "rgba(220,38,38,0.70)",
+    backgroundColor: "#FEE2E2",
+  },
+  codeBoxValidated: {
+    borderColor: "rgba(22,163,74,0.70)",
+    backgroundColor: "#DCFCE7",
+  },
+  codeBoxTextOk: {
+    color: "#14532D",
+  },
+  codeBoxTextKo: {
+    color: "#7F1D1D",
   },
 
-  validatedRow: {
-    minHeight: 50,
-    borderRadius: 16,
-    backgroundColor: "#DCFCE7",
-    borderWidth: 1,
-    borderColor: "rgba(22,163,74,0.25)",
+  baliseMetaRow: {
+    marginTop: 5,
+    minHeight: 14,
     flexDirection: "row",
     alignItems: "center",
+    justifyContent: "space-between",
     gap: 10,
-    paddingHorizontal: 12,
   },
-  validatedText: {
-    flex: 1,
-    color: "#14532D",
-    fontSize: 13,
-    fontWeight: "800",
-  },
-
   okText: {
-    marginTop: 10,
+    flex: 1,
     color: C_GREEN,
     fontWeight: "900",
-    fontSize: 13,
+    fontSize: 12,
   },
   koText: {
-    marginTop: 10,
+    flex: 1,
     color: C_RED,
     fontWeight: "900",
-    fontSize: 13,
+    fontSize: 12,
   },
 
   stateCard: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 22,
+    backgroundColor: "rgba(255,255,255,0.94)",
+    borderRadius: 24,
     borderWidth: 1,
-    borderColor: C_BORDER,
+    borderColor: "rgba(255,255,255,0.58)",
     padding: 24,
     alignItems: "center",
     justifyContent: "center",
-    shadowColor: "#1F5B86",
-    shadowOpacity: 0.12,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 3,
+    shadowColor: "#000",
+    shadowOpacity: 0.18,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 5,
   },
   stateTitle: {
     color: C_TEXT,
@@ -1640,6 +2020,7 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     textAlign: "center",
     marginTop: 8,
+    fontWeight: "700",
   },
 
   bottomBar: {
@@ -1647,21 +2028,24 @@ const styles = StyleSheet.create({
     left: 14,
     right: 14,
     bottom: 14,
+    zIndex: 30,
   },
   verifyAllBtn: {
-    minHeight: 54,
-    borderRadius: 18,
-    backgroundColor: C_BLUE,
+    minHeight: 56,
+    borderRadius: 20,
+    backgroundColor: "#1F75B8",
     alignItems: "center",
     justifyContent: "center",
     flexDirection: "row",
     gap: 10,
     paddingHorizontal: 16,
-    shadowColor: "#1F5B86",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.42)",
+    shadowColor: "#000",
     shadowOpacity: 0.28,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 4,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 7 },
+    elevation: 6,
   },
   verifyAllBtnDone: {
     backgroundColor: C_GREEN,
@@ -1672,9 +2056,67 @@ const styles = StyleSheet.create({
     fontSize: 15,
   },
 
+  modalBg: {
+    flex: 1,
+    backgroundColor: "rgba(15,37,58,0.62)",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 20,
+  },
+  logoutModalBox: {
+    width: "88%",
+    maxWidth: 420,
+    padding: 20,
+    borderRadius: 24,
+    backgroundColor: "#111827",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.18)",
+  },
+  logoutModalTitle: {
+    color: "#fff",
+    fontSize: 22,
+    fontWeight: "900",
+    textAlign: "center",
+    marginBottom: 8,
+  },
+  logoutModalText: {
+    color: "#E5E7EB",
+    fontSize: 16,
+    textAlign: "center",
+    marginBottom: 20,
+    fontWeight: "700",
+  },
+  modalActions: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  cancelBtn: {
+    flex: 1,
+    padding: 13,
+    alignItems: "center",
+    borderRadius: 12,
+    backgroundColor: "rgba(255,255,255,0.10)",
+  },
+  confirmLogoutBtn: {
+    flex: 1,
+    padding: 13,
+    alignItems: "center",
+    backgroundColor: C_RED_FLASH,
+    borderRadius: 12,
+  },
+  cancelText: {
+    color: "#D1D5DB",
+    fontWeight: "900",
+  },
+  confirmText: {
+    color: "#fff",
+    fontWeight: "900",
+  },
+
   modalBackdrop: {
     flex: 1,
-    backgroundColor: "rgba(15,37,58,0.45)",
+    backgroundColor: "rgba(15,37,58,0.55)",
     alignItems: "center",
     justifyContent: "center",
     padding: 20,
@@ -1683,10 +2125,10 @@ const styles = StyleSheet.create({
     width: "100%",
     maxWidth: 560,
     maxHeight: "85%",
-    backgroundColor: "#FFFFFF",
-    borderRadius: 22,
+    backgroundColor: "rgba(255,255,255,0.96)",
+    borderRadius: 24,
     borderWidth: 1,
-    borderColor: C_BORDER,
+    borderColor: "rgba(255,255,255,0.58)",
     padding: 16,
   },
   modalHeader: {
@@ -1709,10 +2151,93 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     backgroundColor: C_BLUE_DARK,
   },
-  modalLine: {
-    color: "#334155",
+
+  scoreHeroCard: {
+    borderRadius: 20,
+    paddingVertical: 18,
+    paddingHorizontal: 16,
+    backgroundColor: "#FFF7ED",
+    borderWidth: 1,
+    borderColor: "rgba(245,158,11,0.28)",
+    alignItems: "center",
+    marginBottom: 12,
+  },
+  scoreHeroLabel: {
+    color: "#92400E",
+    fontSize: 12,
+    fontWeight: "900",
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+  },
+  scoreHeroValue: {
+    color: "#78350F",
+    fontSize: 30,
+    fontWeight: "900",
+    marginTop: 4,
+  },
+  scoreTable: {
+    borderRadius: 18,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: C_BORDER,
+    marginBottom: 12,
+  },
+  scoreTableHeader: {
+    flexDirection: "row",
+    backgroundColor: C_BLUE_DARK,
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    gap: 8,
+  },
+  scoreTh: {
+    color: "#FFFFFF",
+    fontSize: 12,
+    fontWeight: "900",
+  },
+  scoreTrBlue: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 12,
+    paddingHorizontal: 10,
+    gap: 8,
+    backgroundColor: "#EFF6FF",
+    borderTopWidth: 1,
+    borderTopColor: "rgba(31,91,134,0.10)",
+  },
+  scoreTrGreen: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 12,
+    paddingHorizontal: 10,
+    gap: 8,
+    backgroundColor: "#F0FDF4",
+    borderTopWidth: 1,
+    borderTopColor: "rgba(31,91,134,0.10)",
+  },
+  scoreTrGold: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 12,
+    paddingHorizontal: 10,
+    gap: 8,
+    backgroundColor: "#FFFBEB",
+    borderTopWidth: 1,
+    borderTopColor: "rgba(31,91,134,0.10)",
+  },
+  scoreTdName: {
+    color: C_TEXT,
     fontSize: 13,
-    lineHeight: 19,
-    marginBottom: 2,
+    fontWeight: "900",
+  },
+  scoreTdValue: {
+    color: C_BLUE_DARK,
+    fontSize: 13,
+    fontWeight: "900",
+  },
+  scoreTdStatus: {
+    color: C_MUTED,
+    fontSize: 11,
+    fontWeight: "800",
+    textAlign: "right",
   },
 });
