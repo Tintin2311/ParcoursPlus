@@ -34,8 +34,6 @@ export type MainTabsProps = {
   setProfesseur: (p: any) => void;
   setModeConnexion: (m: any) => void;
   setSelectedGroupUuid: (group: any) => void;
-  balises: any[];
-  setBalises: (b: any[]) => void;
 };
 
 const TABS: { id: TabId; label: string }[] = [
@@ -59,8 +57,6 @@ const MainTabs: React.FC<MainTabsProps> = ({
   setProfesseur,
   setModeConnexion,
   setSelectedGroupUuid,
-  balises,
-  setBalises,
 }) => {
   const { width } = useWindowDimensions();
   const isWeb = Platform.OS === "web";
@@ -147,8 +143,6 @@ const MainTabs: React.FC<MainTabsProps> = ({
         key="gestionBalises"
         setPage={setPage}
         professeur={professeur}
-        balises={balises}
-        setBalises={setBalises}
       />,
       <AccueilProf
         key="accueil"
@@ -166,8 +160,6 @@ const MainTabs: React.FC<MainTabsProps> = ({
       setProfesseur,
       setModeConnexion,
       setSelectedGroupUuid,
-      balises,
-      setBalises,
     ]
   );
 

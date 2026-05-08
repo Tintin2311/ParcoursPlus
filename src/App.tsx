@@ -43,7 +43,11 @@ const ClassementEleve = React.lazy(() => import("./SessionEleve/ClassementEleve"
 const EcrireResultat = React.lazy(() => import("./EcrireResultat")) as React.LazyExoticComponent<React.ComponentType<any>>;
 const EcrireCodeBaliseEleve = React.lazy(() => import("./EcrireCodeBaliseEleve")) as React.LazyExoticComponent<React.ComponentType<any>>;
 
-const Jeudeserreurs = React.lazy(() => import("./Jeux/Jeudeserreurs"));
+const Jeudeserreurs = React.lazy(() =>
+  import("./Jeux/Jeudeserreurs").then((m) => ({
+    default: (m as any).default ?? (m as any).Jeudeserreurs,
+  }))
+) as React.LazyExoticComponent<React.ComponentType<any>>;
 const CreerJeuDesErreurs = React.lazy(() => import("./Jeux/CreerJeuDesErreurs"));
 
 const StatistiquesEleve = React.lazy(() => import("./StatistiquesEleve"));

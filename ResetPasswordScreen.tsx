@@ -8,7 +8,7 @@ import {
   ActivityIndicator,
   StyleSheet,
 } from "react-native";
-import { supabase } from "./SupabaseClient";
+import { supabase } from "./src/supabaseClient";
 
 export default function ResetPasswordScreen({ onDone }: { onDone: () => void }) {
   const [pwd1, setPwd1] = useState("");

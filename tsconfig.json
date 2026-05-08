@@ -10,11 +10,15 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "allowJs": false,
-    "baseUrl": ".",
     "paths": { "@/*": ["./*"] },
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true
   },
   "include": ["**/*.ts", "**/*.tsx"],
-  "exclude": ["node_modules", "dist", "babel.config.js"]
+  "exclude": [
+  "node_modules",
+  "dist",
+  "babel.config.js",
+  "mon-app"
+]
 }

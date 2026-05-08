@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { StyleSheet, View, Text, TextInput, TouchableOpacity, Alert } from 'react-native';
 import { Session } from '@supabase/supabase-js'; // Importez le type Session
-import { supabase } from './SupabaseClient'; // Assurez-vous que le chemin est correct
+import { supabase } from "./src/supabaseClient";
 
 // Composant pour le formulaire de profil
 export default function ProfileFormScreen() {
@@ -13,9 +13,9 @@ export default function ProfileFormScreen() {
 
   useEffect(() => {
     // Récupère la session de l'utilisateur une fois le composant monté
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-    });
+    supabase.auth.getSession().then(({ data }) => {
+  setSession(data.session);
+});
   }, []);
 
   // Fonction pour mettre à jour le profil de l'utilisateur
