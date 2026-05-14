@@ -1,6 +1,7 @@
 // src/ModifierUnParcours.tsx
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
   Modal,
   Platform,
@@ -13,13 +14,12 @@ import {
   TouchableOpacity,
   View,
   useWindowDimensions,
-  ActivityIndicator,
 } from "react-native";
 import {
   ArrowLeft,
   Check,
   FolderOpen,
-  Grid2X2,
+  Grid2x2,
   QrCode,
   Save,
   Search,
@@ -30,6 +30,9 @@ import {
 import { supabase } from "./supabaseClient";
 import BottomBar from "./ui/BottomBar";
 
+/* =======================
+   Types
+======================= */
 type Professeur = { user_id?: string | null } | null;
 
 type Props = {
@@ -69,6 +72,16 @@ type SelectedBaliseOccurrence = Balise & {
   occurrenceKey: string;
 };
 
+type BaliseFormatPayloadMap = Map<string, Partial<Record<ParcoursFormatType, Record<string, any>>>>;
+
+type BaliseFormatsFetchResult = {
+  typeMap: Map<string, Set<ParcoursFormatType>>;
+  payloadMap: BaliseFormatPayloadMap;
+};
+
+/* =======================
+   Couleurs / charte
+======================= */
 const C_BG = "#EDF2F6";
 const C_HEADER = "#1F5B86";
 const C_BORDER = "rgba(0,0,0,0.08)";
@@ -100,6 +113,16 @@ const FORMAT_OPTIONS: { id: ParcoursFormatType; label: string }[] = [
   { id: "qrcode", label: "QR code" },
 ];
 
+const FORMAT_LABELS: Record<ParcoursFormatType, string> = {
+  code: "Code simple",
+  tableau: "Tableau",
+  poincon: "Poinçon",
+  qrcode: "QR code",
+};
+
+/* =======================
+   Helpers
+======================= */
 const getGridColumns = (width: number) => {
   if (width >= 1200) return 8;
   if (width >= 980) return 7;
@@ -134,12 +157,56 @@ const getFolderPathLabel = (folderId: string | null, folders: FolderItem[]) => {
 
   while (current) {
     path.unshift(current.name);
-    current = current.parent_folder_id
-      ? map.get(current.parent_folder_id)
-      : undefined;
+    current = current.parent_folder_id ? map.get(current.parent_folder_id) : undefined;
   }
 
   return path.length ? path.join(" / ") : "Dossier";
+};
+
+const makeCellKey = (row: number, col: number) => `${row}-${col}`;
+
+const clampGridSize = (value: any, fallback = 4) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(2, Math.min(6, Math.round(n)));
+};
+
+const cellsToDots = (cells: any, rows: number, cols: number) => {
+  const dots: Record<string, boolean> = {};
+
+  if (Array.isArray(cells)) {
+    for (let r = 0; r < rows; r += 1) {
+      for (let c = 0; c < cols; c += 1) {
+        if (!!cells?.[r]?.[c]) dots[makeCellKey(r, c)] = true;
+      }
+    }
+  }
+
+  return dots;
+};
+
+const normalizePoinconPayload = (payload: any) => {
+  const source = payload && typeof payload === "object" ? payload : {};
+  const rows = clampGridSize(source.rows, 4);
+  const cols = clampGridSize(source.cols, 4);
+
+  const rawDots =
+    source.dots && typeof source.dots === "object" && !Array.isArray(source.dots)
+      ? source.dots
+      : cellsToDots(source.cells, rows, cols);
+
+  const dots: Record<string, boolean> = {};
+  Object.entries(rawDots || {}).forEach(([key, value]) => {
+    if (!value) return;
+    const [rRaw, cRaw] = key.split("-");
+    const r = Number(rRaw);
+    const c = Number(cRaw);
+    if (Number.isInteger(r) && Number.isInteger(c) && r >= 0 && r < rows && c >= 0 && c < cols) {
+      dots[key] = true;
+    }
+  });
+
+  return { rows, cols, dots };
 };
 
 const hasFormatForBalise = (
@@ -165,6 +232,18 @@ const filterBalisesByFormat = (
   return list.filter((b) => hasFormatForBalise(b, formatType, baliseFormatsMap));
 };
 
+const getPayloadForBalise = (
+  baliseId: string,
+  formatType: ParcoursFormatType | null,
+  payloadMap: BaliseFormatPayloadMap
+): Record<string, any> | null => {
+  if (!formatType) return null;
+  return payloadMap.get(baliseId)?.[formatType] ?? null;
+};
+
+/* =======================
+   Aperçus visuels
+======================= */
 function PunchSymbol({ size = 16, color = C_TEXT }: { size?: number; color?: string }) {
   const cell = Math.max(4, Math.round(size / 4));
   const dot = Math.max(2, Math.round(cell * 0.46));
@@ -182,11 +261,7 @@ function PunchSymbol({ size = 16, color = C_TEXT }: { size?: number; color?: str
       {Array.from({ length: 3 }).map((_, r) => (
         <View key={`p-row-${r}`} style={{ flexDirection: "row" }}>
           {Array.from({ length: 3 }).map((__, c) => {
-            const showDot =
-              (r === 0 && c === 1) ||
-              (r === 1 && c === 2) ||
-              (r === 2 && c === 0);
-
+            const showDot = (r === 0 && c === 1) || (r === 1 && c === 2) || (r === 2 && c === 0);
             return (
               <View
                 key={`p-cell-${r}-${c}`}
@@ -219,6 +294,106 @@ function PunchSymbol({ size = 16, color = C_TEXT }: { size?: number; color?: str
   );
 }
 
+const PoinconPreview = ({ payload, size }: { payload: any; size: number }) => {
+  const normalized = normalizePoinconPayload(payload);
+  const rows = normalized.rows;
+  const cols = normalized.cols;
+  const dots = normalized.dots;
+  const gap = Math.max(1, Math.floor(size * 0.035));
+  const cell = Math.max(8, Math.floor((size - gap * (Math.max(rows, cols) - 1)) / Math.max(rows, cols)));
+  const dot = Math.max(4, Math.floor(cell * 0.32));
+
+  return (
+    <View style={styles.previewCenter}>
+      <View style={styles.poinconPreviewWrap}>
+        {Array.from({ length: rows }).map((_, r) => (
+          <View
+            key={`preview-r-${r}`}
+            style={[styles.poinconPreviewRow, { gap, marginBottom: r === rows - 1 ? 0 : gap }]}
+          >
+            {Array.from({ length: cols }).map((__, c) => {
+              const active = !!dots[makeCellKey(r, c)];
+              return (
+                <View
+                  key={`preview-c-${r}-${c}`}
+                  style={[
+                    styles.poinconPreviewCell,
+                    { width: cell, height: cell, borderRadius: Math.max(4, Math.floor(cell * 0.18)) },
+                  ]}
+                >
+                  {active ? <View style={[styles.poinconPreviewDot, { width: dot, height: dot }]} /> : null}
+                </View>
+              );
+            })}
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+};
+
+const TableauPreview = ({ payload, size }: { payload: any; size: number }) => {
+  const rows = clampGridSize(payload?.rows, 4);
+  const cols = clampGridSize(payload?.cols, 4);
+  const gap = Math.max(1, Math.floor(size * 0.035));
+  const cell = Math.max(8, Math.floor((size - gap * (Math.max(rows, cols) - 1)) / Math.max(rows, cols)));
+
+  return (
+    <View style={styles.previewCenter}>
+      <View style={styles.poinconPreviewWrap}>
+        {Array.from({ length: rows }).map((_, r) => (
+          <View key={`table-r-${r}`} style={[styles.poinconPreviewRow, { gap, marginBottom: r === rows - 1 ? 0 : gap }]}> 
+            {Array.from({ length: cols }).map((__, c) => (
+              <View
+                key={`table-c-${r}-${c}`}
+                style={[
+                  styles.poinconPreviewCell,
+                  { width: cell, height: cell, borderRadius: Math.max(4, Math.floor(cell * 0.18)) },
+                ]}
+              />
+            ))}
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+};
+
+const QrPreview = ({ size }: { size: number }) => {
+  const pixel = Math.max(2, Math.floor(size / 14));
+  const matrix = [
+    [1, 1, 1, 0, 1, 0, 1, 1, 1],
+    [1, 0, 1, 0, 1, 1, 1, 0, 1],
+    [1, 1, 1, 0, 0, 1, 1, 1, 1],
+    [0, 0, 1, 1, 1, 0, 0, 1, 0],
+    [1, 1, 0, 1, 0, 1, 1, 0, 1],
+    [0, 1, 1, 0, 1, 1, 0, 1, 0],
+    [1, 1, 1, 0, 1, 0, 1, 1, 1],
+    [1, 0, 1, 1, 0, 1, 1, 0, 1],
+    [1, 1, 1, 0, 1, 1, 1, 1, 1],
+  ];
+
+  return (
+    <View style={styles.previewCenter}>
+      <View style={styles.qrPreviewWrap}>
+        {matrix.map((row, r) => (
+          <View key={`qrp-r-${r}`} style={{ flexDirection: "row" }}>
+            {row.map((filled, c) => (
+              <View
+                key={`qrp-${r}-${c}`}
+                style={{ width: pixel, height: pixel, backgroundColor: filled ? C_TEXT : "#fff" }}
+              />
+            ))}
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+};
+
+/* =======================
+   Supabase helpers
+======================= */
 const fetchAllBalises = async (): Promise<Balise[]> => {
   const { data, error } = await supabase
     .from("balises")
@@ -242,38 +417,45 @@ const fetchAllBalises = async (): Promise<Balise[]> => {
           : String(b.numero_balise ?? ""),
       user_id: b.user_id ?? null,
     }))
-    .sort(
-      (a, b) =>
-        parseInt(a.numero_balise || "0", 10) -
-        parseInt(b.numero_balise || "0", 10)
-    );
+    .sort((a, b) => parseInt(a.numero_balise || "0", 10) - parseInt(b.numero_balise || "0", 10));
 };
 
-const fetchAllBaliseFormats = async (): Promise<Map<string, Set<ParcoursFormatType>>> => {
-  const map = new Map<string, Set<ParcoursFormatType>>();
+const fetchAllBaliseFormats = async (): Promise<BaliseFormatsFetchResult> => {
+  const typeMap = new Map<string, Set<ParcoursFormatType>>();
+  const payloadMap: BaliseFormatPayloadMap = new Map();
 
   const { data, error } = await supabase
     .from("balise_formats")
-    .select("balise_id, format_type");
+    .select("balise_id, format_type, payload");
 
   if (error) {
     const msg = String(error.message || "").toLowerCase();
-    if (msg.includes("does not exist") || msg.includes("relation")) return map;
+    if (msg.includes("does not exist") || msg.includes("relation")) {
+      return { typeMap, payloadMap };
+    }
     console.error("❌ fetchAllBaliseFormats:", error);
-    return map;
+    return { typeMap, payloadMap };
   }
 
   (data || []).forEach((row: any) => {
     const baliseId = String(row?.balise_id ?? "");
     const formatType = row?.format_type as ParcoursFormatType | undefined;
-
     if (!baliseId || !formatType) return;
 
-    if (!map.has(baliseId)) map.set(baliseId, new Set<ParcoursFormatType>());
-    map.get(baliseId)!.add(formatType);
+    if (!typeMap.has(baliseId)) typeMap.set(baliseId, new Set<ParcoursFormatType>());
+    typeMap.get(baliseId)!.add(formatType);
+
+    const current = payloadMap.get(baliseId) ?? {};
+    current[formatType] =
+      formatType === "poincon"
+        ? normalizePoinconPayload(row?.payload ?? {})
+        : row?.payload && typeof row.payload === "object"
+          ? row.payload
+          : {};
+    payloadMap.set(baliseId, current);
   });
 
-  return map;
+  return { typeMap, payloadMap };
 };
 
 const fetchAllFolders = async (): Promise<FolderItem[]> => {
@@ -295,27 +477,45 @@ const fetchAllFolders = async (): Promise<FolderItem[]> => {
 };
 
 const fetchParcoursById = async (parcoursId: string): Promise<ParcoursRecord | null> => {
-  const { data, error } = await supabase
+  const primary = await supabase
     .from("parcours")
-    .select(
-      "id, nom, description, balises_ordre, folder_id, format_type, allow_duplicate_balises"
-    )
+    .select("id, nom, description, balises_ordre, folder_id, format_type, allow_duplicate_balises")
     .eq("id", parcoursId)
     .single();
 
-  if (error || !data) {
-    console.error("❌ fetchParcoursById:", error);
+  if (!primary.error && primary.data) {
+    const d = primary.data;
+    return {
+      id: String(d.id),
+      nom: d.nom ?? "",
+      description: d.description ?? "",
+      balises_ordre: Array.isArray(d.balises_ordre) ? d.balises_ordre : [],
+      folder_id: d.folder_id ?? null,
+      format_type: ((d as any).format_type ?? null) as ParcoursFormatType | null,
+      allow_duplicate_balises: !!(d as any).allow_duplicate_balises,
+    };
+  }
+
+  const fallback = await supabase
+    .from("parcours")
+    .select("id, nom, description, balises_ordre, folder_id")
+    .eq("id", parcoursId)
+    .single();
+
+  if (fallback.error || !fallback.data) {
+    console.error("❌ fetchParcoursById:", primary.error || fallback.error);
     return null;
   }
 
+  const d = fallback.data;
   return {
-    id: String(data.id),
-    nom: data.nom ?? "",
-    description: data.description ?? "",
-    balises_ordre: Array.isArray(data.balises_ordre) ? data.balises_ordre : [],
-    folder_id: data.folder_id ?? null,
-    format_type: ((data as any).format_type ?? null) as ParcoursFormatType | null,
-    allow_duplicate_balises: !!(data as any).allow_duplicate_balises,
+    id: String(d.id),
+    nom: d.nom ?? "",
+    description: d.description ?? "",
+    balises_ordre: Array.isArray(d.balises_ordre) ? d.balises_ordre : [],
+    folder_id: d.folder_id ?? null,
+    format_type: null,
+    allow_duplicate_balises: false,
   };
 };
 
@@ -331,26 +531,56 @@ const updateParcoursInSupabase = async (
     allow_duplicate_balises: boolean;
   }
 ) => {
-  const { data, error } = await supabase
+  const primary = await supabase
     .from("parcours")
     .update(payload)
     .eq("id", parcoursId)
     .select()
     .single();
 
-  if (error) throw error;
-  return data;
+  if (!primary.error) return primary.data;
+
+  const msg = String(primary.error.message || "").toLowerCase();
+  const missingFormat = msg.includes("format_type");
+  const missingDup = msg.includes("allow_duplicate_balises");
+
+  if (!missingFormat && !missingDup) throw primary.error;
+
+  const fallbackPayload: any = {
+    nom: payload.nom,
+    description: payload.description,
+    balises_ordre: payload.balises_ordre,
+    folder_id: payload.folder_id,
+    professeur_id: payload.professeur_id ?? null,
+  };
+
+  const fallback = await supabase
+    .from("parcours")
+    .update(fallbackPayload)
+    .eq("id", parcoursId)
+    .select()
+    .single();
+
+  if (fallback.error) throw fallback.error;
+
+  Alert.alert(
+    "Colonnes manquantes",
+    "Le parcours a été mis à jour, mais format_type et/ou allow_duplicate_balises n'existent pas encore dans la table parcours."
+  );
+
+  return fallback.data;
 };
 
+/* =======================
+   Composant principal
+======================= */
 const ModifierUnParcours: React.FC<Props> = ({
   setPage = () => {},
   professeur = null,
   parcoursId = null,
 }) => {
   const cleanParcoursId =
-    typeof parcoursId === "string" && parcoursId.trim().length > 0
-      ? parcoursId.trim()
-      : null;
+    typeof parcoursId === "string" && parcoursId.trim().length > 0 ? parcoursId.trim() : null;
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -362,9 +592,8 @@ const ModifierUnParcours: React.FC<Props> = ({
 
   const [balises, setBalises] = useState<Balise[]>([]);
   const [selectedBalises, setSelectedBalises] = useState<Balise[]>([]);
-  const [baliseFormatsMap, setBaliseFormatsMap] = useState<Map<string, Set<ParcoursFormatType>>>(
-    new Map()
-  );
+  const [baliseFormatsMap, setBaliseFormatsMap] = useState<Map<string, Set<ParcoursFormatType>>>(new Map());
+  const [baliseFormatPayloadMap, setBaliseFormatPayloadMap] = useState<BaliseFormatPayloadMap>(new Map());
 
   const [folders, setFolders] = useState<FolderItem[]>([]);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
@@ -413,7 +642,8 @@ const ModifierUnParcours: React.FC<Props> = ({
 
         setBalises(allBalises);
         setFolders(allFolders);
-        setBaliseFormatsMap(allFormats);
+        setBaliseFormatsMap(allFormats.typeMap);
+        setBaliseFormatPayloadMap(allFormats.payloadMap);
 
         setNom(parcours.nom || "");
         setDescription(parcours.description || "");
@@ -423,10 +653,7 @@ const ModifierUnParcours: React.FC<Props> = ({
         setSearchBalise("");
         setShowOnlyFrozen(false);
 
-        const orderedIds = Array.isArray(parcours.balises_ordre)
-          ? parcours.balises_ordre
-          : [];
-
+        const orderedIds = Array.isArray(parcours.balises_ordre) ? parcours.balises_ordre : [];
         const orderedBalises = orderedIds
           .map((id) => allBalises.find((b) => b.id === id))
           .filter(Boolean) as Balise[];
@@ -447,15 +674,8 @@ const ModifierUnParcours: React.FC<Props> = ({
     };
   }, [cleanParcoursId, setPage]);
 
-  const selectedOccurrences = useMemo(
-    () => buildSelectedOccurrences(selectedBalises),
-    [selectedBalises]
-  );
-
-  const selectedIds = useMemo(
-    () => new Set(selectedBalises.map((b) => b.id)),
-    [selectedBalises]
-  );
+  const selectedOccurrences = useMemo(() => buildSelectedOccurrences(selectedBalises), [selectedBalises]);
+  const selectedIds = useMemo(() => new Set(selectedBalises.map((b) => b.id)), [selectedBalises]);
 
   const selectedCountMap = useMemo(() => {
     const map = new Map<string, number>();
@@ -469,17 +689,12 @@ const ModifierUnParcours: React.FC<Props> = ({
     const q = searchBalise.trim().toLowerCase();
 
     return balises.filter((b) => {
-      if (formatType && !hasFormatForBalise(b, formatType, baliseFormatsMap)) {
-        return false;
-      }
+      if (formatType && !hasFormatForBalise(b, formatType, baliseFormatsMap)) return false;
 
       const matchesSearch =
-        !q ||
-        String(b.code || "").toLowerCase().includes(q) ||
-        String(b.numero_balise).includes(q);
+        !q || String(b.code || "").toLowerCase().includes(q) || String(b.numero_balise).includes(q);
 
       const matchesFrozen = !showOnlyFrozen || b.frozen;
-
       return matchesSearch && matchesFrozen;
     });
   }, [balises, searchBalise, showOnlyFrozen, formatType, baliseFormatsMap]);
@@ -489,9 +704,7 @@ const ModifierUnParcours: React.FC<Props> = ({
       setSelectedBalises((prev) => {
         const exists = prev.some((b) => b.id === balise.id);
 
-        if (allowDuplicateBalises) {
-          return [...prev, balise];
-        }
+        if (allowDuplicateBalises) return [...prev, balise];
 
         if (exists) {
           const firstIndex = prev.findIndex((b) => b.id === balise.id);
@@ -594,9 +807,7 @@ const ModifierUnParcours: React.FC<Props> = ({
       return;
     }
 
-    const allCompatible = selectedBalises.every((b) =>
-      hasFormatForBalise(b, formatType, baliseFormatsMap)
-    );
+    const allCompatible = selectedBalises.every((b) => hasFormatForBalise(b, formatType, baliseFormatsMap));
 
     if (!allCompatible) {
       Alert.alert("Erreur", "Certaines balises ne correspondent pas au format choisi.");
@@ -637,6 +848,42 @@ const ModifierUnParcours: React.FC<Props> = ({
     setPage,
   ]);
 
+  const renderBalisePreview = useCallback(
+    (balise: Balise, size: number) => {
+      if (formatType === "poincon") {
+        const payload = getPayloadForBalise(balise.id, "poincon", baliseFormatPayloadMap);
+        return <PoinconPreview payload={payload} size={Math.max(42, Math.floor(size * 0.66))} />;
+      }
+
+      if (formatType === "tableau") {
+        const payload = getPayloadForBalise(balise.id, "tableau", baliseFormatPayloadMap);
+        return <TableauPreview payload={payload} size={Math.max(42, Math.floor(size * 0.66))} />;
+      }
+
+      if (formatType === "qrcode") return <QrPreview size={Math.max(42, Math.floor(size * 0.66))} />;
+
+      return (
+        <Text
+          numberOfLines={1}
+          adjustsFontSizeToFit
+          minimumFontScale={0.7}
+          style={[styles.tileCode, { fontSize: size >= 78 ? 18 : size >= 66 ? 15 : 13 }]}
+        >
+          {balise.code || "—"}
+        </Text>
+      );
+    },
+    [formatType, baliseFormatPayloadMap]
+  );
+
+  const getSelectedSubtitle = useCallback(
+    (balise: Balise) => {
+      if (!formatType || formatType === "code") return balise.code || "Sans code";
+      return FORMAT_LABELS[formatType];
+    },
+    [formatType]
+  );
+
   if (loading) {
     return (
       <SafeAreaView style={styles.root}>
@@ -662,7 +909,7 @@ const ModifierUnParcours: React.FC<Props> = ({
           {option.id === "code" ? (
             <Text style={[styles.formatIconText, active && styles.formatIconTextActive]}>A1</Text>
           ) : option.id === "tableau" ? (
-            <Grid2X2 size={18} color={active ? C_BLUE : C_TEXT} />
+            <Grid2x2 size={18} color={active ? C_BLUE : C_TEXT} />
           ) : option.id === "poincon" ? (
             <PunchSymbol size={18} color={active ? C_BLUE : C_TEXT} />
           ) : (
@@ -670,9 +917,7 @@ const ModifierUnParcours: React.FC<Props> = ({
           )}
         </View>
 
-        <Text style={[styles.formatCardText, active && styles.formatCardTextActive]}>
-          {option.label}
-        </Text>
+        <Text style={[styles.formatCardText, active && styles.formatCardTextActive]}>{option.label}</Text>
       </TouchableOpacity>
     );
   };
@@ -698,9 +943,15 @@ const ModifierUnParcours: React.FC<Props> = ({
                 <Text style={styles.selectedOrderBadgeText}>{index + 1}</Text>
               </View>
 
+              {formatType === "poincon" ? (
+                <View style={styles.selectedMiniPreview}>
+                  <PoinconPreview payload={getPayloadForBalise(b.id, "poincon", baliseFormatPayloadMap)} size={38} />
+                </View>
+              ) : null}
+
               <View style={styles.selectedMain}>
                 <Text style={styles.selectedTitle} numberOfLines={1}>
-                  B{b.numero_balise} • {b.code || "Sans code"}
+                  B{b.numero_balise} • {getSelectedSubtitle(b)}
                 </Text>
               </View>
 
@@ -711,19 +962,11 @@ const ModifierUnParcours: React.FC<Props> = ({
               ) : null}
 
               <View style={styles.selectedActions}>
-                <TouchableOpacity
-                  onPress={() => moveSelectedUp(index)}
-                  style={styles.orderBtn}
-                  activeOpacity={0.85}
-                >
+                <TouchableOpacity onPress={() => moveSelectedUp(index)} style={styles.orderBtn} activeOpacity={0.85}>
                   <Text style={styles.orderBtnText}>↑</Text>
                 </TouchableOpacity>
 
-                <TouchableOpacity
-                  onPress={() => moveSelectedDown(index)}
-                  style={styles.orderBtn}
-                  activeOpacity={0.85}
-                >
+                <TouchableOpacity onPress={() => moveSelectedDown(index)} style={styles.orderBtn} activeOpacity={0.85}>
                   <Text style={styles.orderBtnText}>↓</Text>
                 </TouchableOpacity>
 
@@ -765,14 +1008,7 @@ const ModifierUnParcours: React.FC<Props> = ({
             activeOpacity={0.9}
           >
             <Snowflake size={15} color={showOnlyFrozen ? "#fff" : "#1e3a8a"} />
-            <Text
-              style={[
-                styles.filterChipText,
-                showOnlyFrozen && styles.filterChipTextActive,
-              ]}
-            >
-              Gelées
-            </Text>
+            <Text style={[styles.filterChipText, showOnlyFrozen && styles.filterChipTextActive]}>Gelées</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -827,17 +1063,7 @@ const ModifierUnParcours: React.FC<Props> = ({
                   </View>
                 )}
 
-                <Text
-                  numberOfLines={1}
-                  adjustsFontSizeToFit
-                  minimumFontScale={0.7}
-                  style={[
-                    styles.tileCode,
-                    { fontSize: tileSize >= 78 ? 18 : tileSize >= 66 ? 15 : 13 },
-                  ]}
-                >
-                  {b.code || "—"}
-                </Text>
+                {renderBalisePreview(b, tileSize)}
               </TouchableOpacity>
             );
           })}
@@ -845,7 +1071,7 @@ const ModifierUnParcours: React.FC<Props> = ({
 
         {filteredBalises.length === 0 && (
           <View style={styles.emptyBox}>
-            <Text style={styles.emptyText}>Aucune balise</Text>
+            <Text style={styles.emptyText}>Aucune balise compatible avec ce format</Text>
           </View>
         )}
       </ScrollView>
@@ -856,11 +1082,7 @@ const ModifierUnParcours: React.FC<Props> = ({
     <SafeAreaView style={styles.root}>
       <View style={styles.header}>
         <View style={styles.headerRow}>
-          <TouchableOpacity
-            onPress={() => setPage("gestionParcours")}
-            style={styles.headerBtn}
-            activeOpacity={0.9}
-          >
+          <TouchableOpacity onPress={() => setPage("gestionParcours")} style={styles.headerBtn} activeOpacity={0.9}>
             <ArrowLeft size={18} color="#fff" />
           </TouchableOpacity>
 
@@ -873,9 +1095,7 @@ const ModifierUnParcours: React.FC<Props> = ({
       <View style={styles.contentZone}>
         <ScrollView
           style={styles.scroll}
-          contentContainerStyle={{
-            paddingBottom: BOTTOM_BAR_HEIGHT + STICKY_SAVE_HEIGHT + 36,
-          }}
+          contentContainerStyle={{ paddingBottom: BOTTOM_BAR_HEIGHT + STICKY_SAVE_HEIGHT + 36 }}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
@@ -903,11 +1123,7 @@ const ModifierUnParcours: React.FC<Props> = ({
 
           <View style={styles.card}>
             <Text style={styles.sectionTitle}>Dossier</Text>
-            <TouchableOpacity
-              style={styles.folderChooser}
-              onPress={() => setFolderModalVisible(true)}
-              activeOpacity={0.92}
-            >
+            <TouchableOpacity style={styles.folderChooser} onPress={() => setFolderModalVisible(true)} activeOpacity={0.92}>
               <View style={styles.folderChooserLeft}>
                 <FolderOpen size={18} color={C_BLUE} />
                 <View style={{ flex: 1 }}>
@@ -921,16 +1137,12 @@ const ModifierUnParcours: React.FC<Props> = ({
 
           <View style={styles.card}>
             <Text style={styles.sectionTitle}>Format de balise</Text>
-            <View style={styles.formatSimpleGrid}>
-              {FORMAT_OPTIONS.map(renderFormatButton)}
-            </View>
+            <View style={styles.formatSimpleGrid}>{FORMAT_OPTIONS.map(renderFormatButton)}</View>
           </View>
 
           <View style={styles.card}>
             <View style={styles.duplicateTopRow}>
-              <Text style={styles.duplicateTopTitle}>
-                Accepter qu'une balise apparaisse 2 fois dans un parcours
-              </Text>
+              <Text style={styles.duplicateTopTitle}>Accepter qu'une balise apparaisse 2 fois dans un parcours</Text>
               <Switch
                 value={allowDuplicateBalises}
                 onValueChange={setAllowDuplicateBalises}
@@ -953,51 +1165,30 @@ const ModifierUnParcours: React.FC<Props> = ({
           activeOpacity={0.92}
         >
           <Save size={18} color="#fff" />
-          <Text style={styles.bottomPrimaryBtnText}>
-            {saving ? "Mise à jour..." : "Mettre à jour"}
-          </Text>
+          <Text style={styles.bottomPrimaryBtnText}>{saving ? "Mise à jour..." : "Mettre à jour"}</Text>
         </TouchableOpacity>
       </View>
 
-      <Modal
-        visible={folderModalVisible}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setFolderModalVisible(false)}
-      >
-        <TouchableOpacity
-          activeOpacity={1}
-          onPress={() => setFolderModalVisible(false)}
-          style={styles.modalBackdrop}
-        />
+      <Modal visible={folderModalVisible} transparent animationType="slide" onRequestClose={() => setFolderModalVisible(false)}>
+        <TouchableOpacity activeOpacity={1} onPress={() => setFolderModalVisible(false)} style={styles.modalBackdrop} />
 
         <View style={styles.folderModalSheet}>
           <View style={styles.sheetHandle} />
 
           <View style={styles.folderModalHeader}>
             <Text style={styles.folderModalTitle}>Choisir un dossier</Text>
-            <TouchableOpacity
-              onPress={() => setFolderModalVisible(false)}
-              style={styles.closeIconBtn}
-              activeOpacity={0.9}
-            >
+            <TouchableOpacity onPress={() => setFolderModalVisible(false)} style={styles.closeIconBtn} activeOpacity={0.9}>
               <X size={18} color={C_TEXT} />
             </TouchableOpacity>
           </View>
 
-          <ScrollView
-            style={{ maxHeight: 420 }}
-            contentContainerStyle={{ paddingBottom: 16 }}
-          >
+          <ScrollView style={{ maxHeight: 420 }} contentContainerStyle={{ paddingBottom: 16 }}>
             <TouchableOpacity
               onPress={() => {
                 setSelectedFolderId(null);
                 setFolderModalVisible(false);
               }}
-              style={[
-                styles.folderRow,
-                selectedFolderId === null && styles.folderRowSelected,
-              ]}
+              style={[styles.folderRow, selectedFolderId === null && styles.folderRowSelected]}
               activeOpacity={0.9}
             >
               <Text style={styles.folderRowText}>Accueil</Text>
@@ -1011,15 +1202,10 @@ const ModifierUnParcours: React.FC<Props> = ({
                   setSelectedFolderId(folder.id);
                   setFolderModalVisible(false);
                 }}
-                style={[
-                  styles.folderRow,
-                  selectedFolderId === folder.id && styles.folderRowSelected,
-                ]}
+                style={[styles.folderRow, selectedFolderId === folder.id && styles.folderRowSelected]}
                 activeOpacity={0.9}
               >
-                <Text style={styles.folderRowText}>
-                  {getFolderPathLabel(folder.id, folders)}
-                </Text>
+                <Text style={styles.folderRowText}>{getFolderPathLabel(folder.id, folders)}</Text>
                 {selectedFolderId === folder.id && <Check size={16} color={C_BLUE} />}
               </TouchableOpacity>
             ))}
@@ -1034,6 +1220,9 @@ const ModifierUnParcours: React.FC<Props> = ({
 
 export default ModifierUnParcours;
 
+/* =======================
+   Styles
+======================= */
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: C_BG },
   loadingWrap: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24 },
@@ -1084,13 +1273,7 @@ const styles = StyleSheet.create({
   },
 
   sectionTitle: { color: C_TEXT, fontWeight: "900", fontSize: 18 },
-  smallMuted: {
-    color: C_MUTED,
-    marginTop: 4,
-    marginBottom: 8,
-    fontSize: 12,
-    fontWeight: "700",
-  },
+  smallMuted: { color: C_MUTED, marginTop: 4, marginBottom: 8, fontSize: 12, fontWeight: "700" },
 
   input: {
     backgroundColor: "rgba(0,0,0,0.03)",
@@ -1131,10 +1314,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
   },
-  formatCardActive: {
-    borderColor: C_BLUE,
-    backgroundColor: "rgba(37,99,235,0.10)",
-  },
+  formatCardActive: { borderColor: C_BLUE, backgroundColor: "rgba(37,99,235,0.10)" },
   formatCardIconWrap: { minWidth: 22, alignItems: "center", justifyContent: "center" },
   formatIconText: { color: C_TEXT, fontWeight: "900", fontSize: 18 },
   formatIconTextActive: { color: C_BLUE },
@@ -1144,11 +1324,7 @@ const styles = StyleSheet.create({
   duplicateTopRow: { flexDirection: "row", alignItems: "center", gap: 12 },
   duplicateTopTitle: { flex: 1, color: C_TEXT, fontWeight: "800", lineHeight: 18 },
 
-  sectionHeaderInline: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
+  sectionHeaderInline: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   countBadge: {
     minWidth: 32,
     height: 28,
@@ -1201,6 +1377,17 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   selectedOrderBadgeText: { color: "#fff", fontWeight: "900", fontSize: 13 },
+  selectedMiniPreview: {
+    width: 42,
+    height: 42,
+    borderRadius: 10,
+    backgroundColor: "#fff",
+    borderWidth: 1,
+    borderColor: C_BORDER,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+  },
   selectedMain: { flex: 1, minWidth: 0 },
   selectedTitle: { color: C_TEXT, fontWeight: "800", fontSize: 14 },
   frozenMiniChip: {
@@ -1278,16 +1465,8 @@ const styles = StyleSheet.create({
     alignItems: "center",
     overflow: "hidden",
   },
-  tileSelected: {
-    backgroundColor: "rgba(14,165,233,0.12)",
-    borderColor: "rgba(14,165,233,0.45)",
-    borderWidth: 2,
-  },
-  tileDuplicateMode: {
-    backgroundColor: "rgba(37,99,235,0.08)",
-    borderColor: "rgba(37,99,235,0.30)",
-    borderWidth: 2,
-  },
+  tileSelected: { backgroundColor: "rgba(14,165,233,0.12)", borderColor: "rgba(14,165,233,0.45)", borderWidth: 2 },
+  tileDuplicateMode: { backgroundColor: "rgba(37,99,235,0.08)", borderColor: "rgba(37,99,235,0.30)", borderWidth: 2 },
   tileFrozen: { borderColor: "rgba(249,115,22,0.45)" },
   numBadge: {
     position: "absolute",
@@ -1297,9 +1476,36 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     paddingHorizontal: 5,
     paddingVertical: 2,
+    zIndex: 5,
   },
   numBadgeTxt: { color: C_TEXT, fontWeight: "900", fontSize: 10 },
   tileCode: { color: C_TEXT, fontWeight: "900", paddingHorizontal: 4 },
+
+  previewCenter: { alignItems: "center", justifyContent: "center" },
+  poinconPreviewWrap: {
+    backgroundColor: "#fff",
+    borderWidth: 1,
+    borderColor: "rgba(15,23,42,0.16)",
+    borderRadius: 9,
+    padding: 3,
+  },
+  poinconPreviewRow: { flexDirection: "row" },
+  poinconPreviewCell: {
+    backgroundColor: "#fff",
+    borderWidth: 1,
+    borderColor: "rgba(15,23,42,0.22)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  poinconPreviewDot: { borderRadius: 999, backgroundColor: C_TEXT },
+  qrPreviewWrap: {
+    backgroundColor: "#fff",
+    borderWidth: 1,
+    borderColor: "rgba(15,23,42,0.16)",
+    borderRadius: 9,
+    padding: 5,
+  },
+
   frozenDot: {
     position: "absolute",
     top: 5,
@@ -1307,6 +1513,7 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(191,219,254,0.7)",
     borderRadius: 999,
     padding: 3,
+    zIndex: 5,
   },
   selectedCheck: {
     position: "absolute",
@@ -1315,6 +1522,7 @@ const styles = StyleSheet.create({
     backgroundColor: C_GREEN,
     borderRadius: 999,
     padding: 3,
+    zIndex: 5,
   },
   countBubble: {
     position: "absolute",
@@ -1327,6 +1535,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: 6,
+    zIndex: 5,
   },
   countBubbleText: { color: "#fff", fontWeight: "900", fontSize: 10 },
 
@@ -1354,10 +1563,7 @@ const styles = StyleSheet.create({
   bottomPrimaryBtnDisabled: { opacity: 0.72 },
   bottomPrimaryBtnText: { color: "#fff", fontWeight: "900", fontSize: 15 },
 
-  modalBackdrop: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(0,0,0,0.35)",
-  },
+  modalBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.35)" },
   folderModalSheet: {
     position: "absolute",
     left: 0,
@@ -1409,9 +1615,6 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     gap: 8,
   },
-  folderRowSelected: {
-    backgroundColor: "rgba(14,165,233,0.12)",
-    borderColor: "rgba(14,165,233,0.45)",
-  },
+  folderRowSelected: { backgroundColor: "rgba(14,165,233,0.12)", borderColor: "rgba(14,165,233,0.45)" },
   folderRowText: { color: C_TEXT, fontWeight: "700", flex: 1 },
 });

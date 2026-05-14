@@ -1,4 +1,8 @@
 // src/CreationBalise.tsx
+// Version corrigée : sauvegarde fiable de la balise + formats dans Supabase
+// Correction principale : si un auto-save est déjà en cours, on relance une sauvegarde juste après.
+// Correction secondaire : les formats sont toujours réinsérés proprement dans balise_formats.
+
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -178,14 +182,11 @@ const extractTokensFromAny = (value: any): string[] => {
   const raw = String(value).trim();
   if (!raw) return [];
 
-  if (
-    (raw.startsWith("[") && raw.endsWith("]")) ||
-    (raw.startsWith("{") && raw.endsWith("}"))
-  ) {
+  if ((raw.startsWith("[") && raw.endsWith("]")) || (raw.startsWith("{") && raw.endsWith("}"))) {
     try {
       return extractTokensFromAny(JSON.parse(raw));
     } catch {
-      //
+      // noop
     }
   }
 
@@ -246,17 +247,11 @@ const removeBaliseFromValue = (value: any, balise: Balise): any => {
       const cleaned = removeBaliseFromValue(parsed, balise);
       return JSON.stringify(cleaned ?? []);
     } catch {
-      //
+      // noop
     }
   }
 
-  const sep = raw.includes(";")
-    ? ";"
-    : raw.includes("|")
-      ? "|"
-      : raw.includes(",")
-        ? ","
-        : null;
+  const sep = raw.includes(";") ? ";" : raw.includes("|") ? "|" : raw.includes(",") ? "," : null;
 
   if (sep) {
     const kept = raw
@@ -313,10 +308,8 @@ const buildFakeQrMatrix = (value: string, size = 19) => {
       if (inTopLeft || inTopRight || inBottomLeft) {
         const localR = inBottomLeft ? r - (size - 7) : r;
         const localC = inTopRight ? c - (size - 7) : c;
-        const border =
-          localR === 0 || localR === 6 || localC === 0 || localC === 6;
-        const center =
-          localR >= 2 && localR <= 4 && localC >= 2 && localC <= 4;
+        const border = localR === 0 || localR === 6 || localC === 0 || localC === 6;
+        const center = localR >= 2 && localR <= 4 && localC >= 2 && localC <= 4;
         row.push(border || center);
         continue;
       }
@@ -335,6 +328,55 @@ const clampGridSize = (value: any, fallback = 4) => {
   return Math.max(2, Math.min(6, Math.round(n)));
 };
 
+const dotsToCells = (dots: Record<string, any>, rows: number, cols: number) => {
+  return Array.from({ length: rows }, (_, r) =>
+    Array.from({ length: cols }, (_, c) => !!dots?.[makeCellKey(r, c)])
+  );
+};
+
+const cellsToDots = (cells: any, rows: number, cols: number) => {
+  const dots: Record<string, boolean> = {};
+
+  if (Array.isArray(cells)) {
+    for (let r = 0; r < rows; r += 1) {
+      for (let c = 0; c < cols; c += 1) {
+        if (!!cells?.[r]?.[c]) dots[makeCellKey(r, c)] = true;
+      }
+    }
+  }
+
+  return dots;
+};
+
+const normalizePoinconPayloadForSave = (payload: Record<string, any> = {}) => {
+  const rows = clampGridSize(payload.rows, 4);
+  const cols = clampGridSize(payload.cols, 4);
+
+  const rawDots =
+    payload.dots && typeof payload.dots === "object" && !Array.isArray(payload.dots)
+      ? payload.dots
+      : cellsToDots(payload.cells, rows, cols);
+
+  const dots: Record<string, boolean> = {};
+  Object.entries(rawDots || {}).forEach(([key, value]) => {
+    if (!value) return;
+    const [rRaw, cRaw] = key.split("-");
+    const r = Number(rRaw);
+    const c = Number(cRaw);
+    if (Number.isInteger(r) && Number.isInteger(c) && r >= 0 && r < rows && c >= 0 && c < cols) {
+      dots[key] = true;
+    }
+  });
+
+  return {
+    ...payload,
+    rows,
+    cols,
+    dots,
+    cells: dotsToCells(dots, rows, cols),
+  };
+};
+
 const createDefaultFormat = (
   type: BaliseFormatType,
   baliseId?: string | null,
@@ -349,37 +391,25 @@ const createDefaultFormat = (
     is_default: false,
   };
 
-  if (type === "code") {
-    return { ...base, payload: {} };
-  }
+  if (type === "code") return { ...base, payload: {} };
 
   if (type === "poincon") {
     return {
       ...base,
-      payload: {
-        rows: 4,
-        cols: 4,
-        dots: {},
-      },
+      payload: normalizePoinconPayloadForSave({ rows: 4, cols: 4, dots: {} }),
     };
   }
 
   if (type === "qrcode") {
     return {
       ...base,
-      payload: {
-        value: generateQrSeedValue(),
-      },
+      payload: { value: generateQrSeedValue() },
     };
   }
 
   return {
     ...base,
-    payload: {
-      rows: 4,
-      cols: 4,
-      cells: {},
-    },
+    payload: { rows: 4, cols: 4, cells: {} },
   };
 };
 
@@ -392,15 +422,14 @@ const ensureCodeFormat = (
   return [createDefaultFormat("code", baliseId, userId), ...formats];
 };
 
-const areFormatsEqual = (a: BaliseFormat[], b: BaliseFormat[]) => {
-  return JSON.stringify(a) === JSON.stringify(b);
-};
+const areFormatsEqual = (a: BaliseFormat[], b: BaliseFormat[]) => JSON.stringify(a) === JSON.stringify(b);
 
 const normalizeFormatsForCompare = (formats: BaliseFormat[]) =>
   formats.map((f) => ({
     ...f,
     is_default: false,
     label: FIXED_FORMAT_LABELS[f.format_type],
+    payload: f.format_type === "poincon" ? normalizePoinconPayloadForSave(f.payload ?? {}) : f.payload ?? {},
   }));
 
 const hasUnsavedChanges = (
@@ -450,14 +479,16 @@ const mapBaliseRow = (b: any): Balise => ({
 
 const mapFormatRow = (row: any): BaliseFormat => {
   const formatType = row.format_type as BaliseFormatType;
+  const rawPayload = row.payload && typeof row.payload === "object" ? row.payload : {};
+
   return {
     id: String(row.id),
     balise_id: row.balise_id ? String(row.balise_id) : null,
     user_id: row.user_id ?? null,
     format_type: formatType,
-    label: FIXED_FORMAT_LABELS[formatType],
+    label: FIXED_FORMAT_LABELS[formatType] ?? String(row.label ?? formatType),
     is_default: false,
-    payload: row.payload && typeof row.payload === "object" ? row.payload : {},
+    payload: formatType === "poincon" ? normalizePoinconPayloadForSave(rawPayload) : rawPayload,
     created_at: row.created_at ?? null,
   };
 };
@@ -475,10 +506,7 @@ const fetchBaliseById = async (baliseId: string, userId: string): Promise<Balise
   return mapBaliseRow(data);
 };
 
-const fetchFormatsByBaliseId = async (
-  baliseId: string,
-  userId: string
-): Promise<BaliseFormat[]> => {
+const fetchFormatsByBaliseId = async (baliseId: string, userId: string): Promise<BaliseFormat[]> => {
   const { data, error } = await supabase
     .from("balise_formats")
     .select("id, balise_id, user_id, format_type, label, is_default, payload, created_at")
@@ -486,20 +514,12 @@ const fetchFormatsByBaliseId = async (
     .eq("user_id", userId)
     .order("created_at", { ascending: true });
 
-  if (error) {
-    const msg = String(error.message || "").toLowerCase();
-    if (msg.includes("does not exist") || msg.includes("relation")) return [];
-    throw error;
-  }
-
+  if (error) throw error;
   return (data || []).map(mapFormatRow);
 };
 
 const getNextNumeroFromSupabase = async (userId: string): Promise<string> => {
-  const { data, error } = await supabase
-    .from("balises")
-    .select("numero_balise")
-    .eq("user_id", userId);
+  const { data, error } = await supabase.from("balises").select("numero_balise").eq("user_id", userId);
 
   if (error) throw error;
 
@@ -547,53 +567,43 @@ const updateBaliseInSupabase = async (b: Balise, userId: string) => {
 };
 
 const deleteBaliseInSupabase = async (baliseId: string, userId: string) => {
-  try {
-    await supabase.from("balise_formats").delete().eq("balise_id", baliseId).eq("user_id", userId);
-  } catch {
-    //
-  }
+  await supabase.from("balise_formats").delete().eq("balise_id", baliseId).eq("user_id", userId);
 
-  const { error } = await supabase
-    .from("balises")
-    .delete()
-    .eq("id", baliseId)
-    .eq("user_id", userId);
+  const { error } = await supabase.from("balises").delete().eq("id", baliseId).eq("user_id", userId);
 
   if (error) throw error;
 };
 
-const upsertFormatsInSupabase = async (
-  baliseId: string,
-  userId: string,
-  formats: BaliseFormat[]
-) => {
-  try {
-    await supabase.from("balise_formats").delete().eq("balise_id", baliseId).eq("user_id", userId);
-
-    if (!formats.length) return;
-
-    const payload = formats.map((format) => ({
+const upsertFormatsInSupabase = async (baliseId: string, userId: string, formats: BaliseFormat[]) => {
+  const cleanFormats = ensureCodeFormat(formats, baliseId, userId)
+    .filter((f) => !!f.format_type)
+    .map((format) => ({
       balise_id: baliseId,
       user_id: userId,
       format_type: format.format_type,
       label: FIXED_FORMAT_LABELS[format.format_type],
       is_default: false,
-      payload: format.payload ?? {},
+      payload:
+        format.format_type === "poincon"
+          ? normalizePoinconPayloadForSave(format.payload ?? {})
+          : format.payload ?? {},
     }));
 
-    const { error } = await supabase.from("balise_formats").insert(payload);
-    if (error) throw error;
-  } catch (e: any) {
-    const msg = String(e?.message || "").toLowerCase();
-    if (msg.includes("does not exist") || msg.includes("relation")) return;
-    throw e;
-  }
+  const { error: deleteError } = await supabase
+    .from("balise_formats")
+    .delete()
+    .eq("balise_id", baliseId)
+    .eq("user_id", userId);
+
+  if (deleteError) throw deleteError;
+
+  if (!cleanFormats.length) return;
+
+  const { error: insertError } = await supabase.from("balise_formats").insert(cleanFormats);
+  if (insertError) throw insertError;
 };
 
-const fetchParcoursUsageForBalise = async (
-  balise: Balise,
-  userId: string
-): Promise<ParcoursRef[]> => {
+const fetchParcoursUsageForBalise = async (balise: Balise, userId: string): Promise<ParcoursRef[]> => {
   const { data, error } = await supabase
     .from("parcours")
     .select("id, nom, balises_ordre, user_id")
@@ -617,11 +627,7 @@ const fetchParcoursUsageForBalise = async (
   return list;
 };
 
-const removeBaliseFromSelectedParcours = async (
-  balise: Balise,
-  parcoursIds: string[],
-  userId: string
-) => {
+const removeBaliseFromSelectedParcours = async (balise: Balise, parcoursIds: string[], userId: string) => {
   if (!parcoursIds.length) return;
 
   const { data, error } = await supabase
@@ -652,7 +658,8 @@ const buildBalisePdfHtml = (balise: Balise, formats: BaliseFormat[], usageList: 
   const formatBlocks = formats
     .map((format) => {
       const title = FIXED_FORMAT_LABELS[format.format_type];
-      const payload = format.payload || {};
+      const payload =
+        format.format_type === "poincon" ? normalizePoinconPayloadForSave(format.payload || {}) : format.payload || {};
 
       if (format.format_type === "code") {
         return `
@@ -664,7 +671,7 @@ const buildBalisePdfHtml = (balise: Balise, formats: BaliseFormat[], usageList: 
       }
 
       if (format.format_type === "qrcode") {
-        const matrix = buildFakeQrMatrix(String(payload.value ?? "QR"), 17);
+        const matrix = buildFakeQrMatrix(String((payload as any).value ?? "QR"), 17);
         const qrHtml = matrix
           .map(
             (row) =>
@@ -735,10 +742,7 @@ const buildBalisePdfHtml = (balise: Balise, formats: BaliseFormat[], usageList: 
     })
     .join("");
 
-  const usageHtml =
-    usageList.length > 0
-      ? `<ul>${usageList.map((p) => `<li>${escapeHtml(p.nom)}</li>`).join("")}</ul>`
-      : `<p>Aucun parcours</p>`;
+  const usageHtml = usageList.length > 0 ? `<ul>${usageList.map((p) => `<li>${escapeHtml(p.nom)}</li>`).join("")}</ul>` : `<p>Aucun parcours</p>`;
 
   return `
     <html>
@@ -813,11 +817,7 @@ const MiniPoinconIcon = () => {
           {Array.from({ length: 4 }).map((__, c) => {
             const key = `${r}-${c}`;
             const active = dots.has(key);
-            return (
-              <View key={key} style={styles.miniGridCell}>
-                {active ? <View style={styles.miniGridDot} /> : null}
-              </View>
-            );
+            return <View key={key} style={styles.miniGridCell}>{active ? <View style={styles.miniGridDot} /> : null}</View>;
           })}
         </View>
       ))}
@@ -832,10 +832,7 @@ const MiniQrIcon = () => {
       {matrix.map((row, r) => (
         <View key={`mqr-r-${r}`} style={styles.miniQrRow}>
           {row.map((filled, c) => (
-            <View
-              key={`mqr-${r}-${c}`}
-              style={[styles.miniQrPixel, filled && styles.miniQrPixelDark]}
-            />
+            <View key={`mqr-${r}-${c}`} style={[styles.miniQrPixel, filled && styles.miniQrPixelDark]} />
           ))}
         </View>
       ))}
@@ -846,20 +843,12 @@ const MiniQrIcon = () => {
 const MiniTableauIcon = () => (
   <View style={styles.miniTableBox}>
     <View style={styles.miniTableRow}>
-      <View style={styles.miniTableCell}>
-        <Text style={styles.miniTableText}>A1</Text>
-      </View>
-      <View style={styles.miniTableCell}>
-        <Text style={styles.miniTableText}>A2</Text>
-      </View>
+      <View style={styles.miniTableCell}><Text style={styles.miniTableText}>A1</Text></View>
+      <View style={styles.miniTableCell}><Text style={styles.miniTableText}>A2</Text></View>
     </View>
     <View style={styles.miniTableRow}>
-      <View style={styles.miniTableCell}>
-        <Text style={styles.miniTableText}>B1</Text>
-      </View>
-      <View style={styles.miniTableCell}>
-        <Text style={styles.miniTableText}>B2</Text>
-      </View>
+      <View style={styles.miniTableCell}><Text style={styles.miniTableText}>B1</Text></View>
+      <View style={styles.miniTableCell}><Text style={styles.miniTableText}>B2</Text></View>
     </View>
   </View>
 );
@@ -903,10 +892,7 @@ const GridSizePicker = ({
 
   return (
     <View style={styles.gridPickerWrap}>
-      <Pressable
-        onPress={() => setOpen((prev) => !prev)}
-        style={({ pressed }) => [styles.gridPickerButton, pressed && styles.pressedStyle]}
-      >
+      <Pressable onPress={() => setOpen((prev) => !prev)} style={({ pressed }) => [styles.gridPickerButton, pressed && styles.pressedStyle]}>
         {iconType === "rows" ? <Rows3Icon /> : <Cols3Icon />}
         <Text style={styles.gridPickerButtonText}>{value}</Text>
         <ChevronDown size={14} color="#334155" />
@@ -921,20 +907,9 @@ const GridSizePicker = ({
                 onSelect(option);
                 setOpen(false);
               }}
-              style={({ pressed }) => [
-                styles.gridPickerItem,
-                option === value && styles.gridPickerItemActive,
-                pressed && styles.pressedStyle,
-              ]}
+              style={({ pressed }) => [styles.gridPickerItem, option === value && styles.gridPickerItemActive, pressed && styles.pressedStyle]}
             >
-              <Text
-                style={[
-                  styles.gridPickerItemText,
-                  option === value && styles.gridPickerItemTextActive,
-                ]}
-              >
-                {option}
-              </Text>
+              <Text style={[styles.gridPickerItemText, option === value && styles.gridPickerItemTextActive]}>{option}</Text>
             </Pressable>
           ))}
         </View>
@@ -1001,14 +976,9 @@ const FormatCard = ({
     if (!compactTopRow) {
       return (
         <View style={styles.formatCardTopCompact}>
-          <Text style={styles.formatTitleTextCompact}>
-            {FIXED_FORMAT_LABELS[format.format_type]}
-          </Text>
+          <Text style={styles.formatTitleTextCompact}>{FIXED_FORMAT_LABELS[format.format_type]}</Text>
 
-          <Pressable
-            onPress={onRemove}
-            style={({ pressed }) => [styles.closeMiniBtnCompact, pressed && styles.pressedStyle]}
-          >
+          <Pressable onPress={onRemove} style={({ pressed }) => [styles.closeMiniBtnCompact, pressed && styles.pressedStyle]}>
             <X size={14} color="#991b1b" />
           </Pressable>
         </View>
@@ -1025,19 +995,10 @@ const FormatCard = ({
             value={rows || 4}
             onSelect={(nextRows) => {
               if (format.format_type === "poincon") {
-                onChangePayload({
-                  ...payload,
-                  rows: nextRows,
-                  cols,
-                  dots: payload.dots || {},
-                });
+                const normalized = normalizePoinconPayloadForSave({ ...payload, rows: nextRows, cols: cols || 4 });
+                onChangePayload(normalized);
               } else {
-                onChangePayload({
-                  ...payload,
-                  rows: nextRows,
-                  cols,
-                  cells: payload.cells || {},
-                });
+                onChangePayload({ ...payload, rows: nextRows, cols, cells: payload.cells || {} });
               }
             }}
           />
@@ -1047,27 +1008,15 @@ const FormatCard = ({
             value={cols || 4}
             onSelect={(nextCols) => {
               if (format.format_type === "poincon") {
-                onChangePayload({
-                  ...payload,
-                  rows,
-                  cols: nextCols,
-                  dots: payload.dots || {},
-                });
+                const normalized = normalizePoinconPayloadForSave({ ...payload, rows: rows || 4, cols: nextCols });
+                onChangePayload(normalized);
               } else {
-                onChangePayload({
-                  ...payload,
-                  rows,
-                  cols: nextCols,
-                  cells: payload.cells || {},
-                });
+                onChangePayload({ ...payload, rows, cols: nextCols, cells: payload.cells || {} });
               }
             }}
           />
 
-          <Pressable
-            onPress={onRemove}
-            style={({ pressed }) => [styles.closeMiniBtnCompact, pressed && styles.pressedStyle]}
-          >
+          <Pressable onPress={onRemove} style={({ pressed }) => [styles.closeMiniBtnCompact, pressed && styles.pressedStyle]}>
             <X size={14} color="#991b1b" />
           </Pressable>
         </View>
@@ -1075,55 +1024,39 @@ const FormatCard = ({
     );
   };
 
-  const renderCode = () => {
-    return (
-      <>
-        {renderTopRow()}
-        <View style={styles.editorBlockCompact}>
-          <TextInput
-            value={baliseCode}
-            onChangeText={onChangeCode}
-            placeholder="Entrer le code"
-            placeholderTextColor="rgba(15,23,42,0.35)"
-            style={styles.cardInputCompact}
-            autoCapitalize="none"
-            autoCorrect={false}
-            returnKeyType="done"
-          />
-        </View>
-      </>
-    );
-  };
+  const renderCode = () => (
+    <>
+      {renderTopRow()}
+      <View style={styles.editorBlockCompact}>
+        <TextInput
+          value={baliseCode}
+          onChangeText={onChangeCode}
+          placeholder="Entrer le code"
+          placeholderTextColor="rgba(15,23,42,0.35)"
+          style={styles.cardInputCompact}
+          autoCapitalize="none"
+          autoCorrect={false}
+          returnKeyType="done"
+        />
+      </View>
+    </>
+  );
 
   const renderPoincon = () => {
-    const rows = clampGridSize(payload.rows, 4);
-    const cols = clampGridSize(payload.cols, 4);
-    const dots = payload.dots || {};
+    const normalizedPayload = normalizePoinconPayloadForSave(payload);
+    const rows = clampGridSize(normalizedPayload.rows, 4);
+    const cols = clampGridSize(normalizedPayload.cols, 4);
+    const dots = normalizedPayload.dots || {};
     const metrics = getGridMetrics(rows, cols);
 
     return (
       <>
         {renderTopRow(rows, cols)}
         <View style={styles.editorBlockCompactTight}>
-          <View style={[styles.fixedContentZone, { height: gridZoneHeight }]}>
-            <View
-              style={[
-                styles.whiteGridWrapCompact,
-                {
-                  width: metrics.wrapWidth,
-                  height: metrics.wrapHeight,
-                  padding: metrics.padding,
-                },
-              ]}
-            >
+          <View style={[styles.fixedContentZone, { height: gridZoneHeight }]}> 
+            <View style={[styles.whiteGridWrapCompact, { width: metrics.wrapWidth, height: metrics.wrapHeight, padding: metrics.padding }]}> 
               {Array.from({ length: rows }).map((_, r) => (
-                <View
-                  key={`prow-${r}`}
-                  style={[
-                    styles.whiteGridRowCompact,
-                    { gap: metrics.gap, marginBottom: r === rows - 1 ? 0 : metrics.gap },
-                  ]}
-                >
+                <View key={`prow-${r}`} style={[styles.whiteGridRowCompact, { gap: metrics.gap, marginBottom: r === rows - 1 ? 0 : metrics.gap }]}> 
                   {Array.from({ length: cols }).map((__, c) => {
                     const key = makeCellKey(r, c);
                     const active = !!dots[key];
@@ -1131,24 +1064,14 @@ const FormatCard = ({
                     return (
                       <Pressable
                         key={key}
-                        onPress={() =>
-                          onChangePayload({
-                            ...payload,
-                            rows,
-                            cols,
-                            dots: {
-                              ...dots,
-                              [key]: !active,
-                            },
-                          })
-                        }
-                        style={[
-                          styles.whiteGridCellCompact,
-                          {
-                            width: metrics.cell,
-                            height: metrics.cell,
-                          },
-                        ]}
+                        onPress={() => {
+                          const nextDots: Record<string, boolean> = { ...dots };
+                          if (active) delete nextDots[key];
+                          else nextDots[key] = true;
+
+                          onChangePayload(normalizePoinconPayloadForSave({ ...payload, rows, cols, dots: nextDots }));
+                        }}
+                        style={[styles.whiteGridCellCompact, { width: metrics.cell, height: metrics.cell }]}
                       >
                         {active && <View style={styles.blackDotCompact} />}
                       </Pressable>
@@ -1172,26 +1095,17 @@ const FormatCard = ({
         {renderTopRow()}
         <View style={styles.editorBlockCompact}>
           <View style={styles.qrActionRowCompact}>
-            <Pressable
-              onPress={() => onChangePayload({ ...payload, value: generateQrSeedValue() })}
-              style={({ pressed }) => [styles.generateBtnCompact, pressed && styles.pressedStyle]}
-            >
+            <Pressable onPress={() => onChangePayload({ ...payload, value: generateQrSeedValue() })} style={({ pressed }) => [styles.generateBtnCompact, pressed && styles.pressedStyle]}>
               <Text style={styles.generateBtnTextCompact}>Générer</Text>
             </Pressable>
           </View>
 
-          <View style={[styles.fixedContentZone, { height: gridZoneHeight }]}>
+          <View style={[styles.fixedContentZone, { height: gridZoneHeight }]}> 
             <View style={styles.fakeQrWrapCompact}>
               {matrix.map((row, r) => (
                 <View key={`qr-r-${r}`} style={styles.fakeQrRow}>
                   {row.map((filled, c) => (
-                    <View
-                      key={`qr-${r}-${c}`}
-                      style={[
-                        styles.fakeQrPixelCompact,
-                        filled && styles.fakeQrPixelDark,
-                      ]}
-                    />
+                    <View key={`qr-${r}-${c}`} style={[styles.fakeQrPixelCompact, filled && styles.fakeQrPixelDark]} />
                   ))}
                 </View>
               ))}
@@ -1212,25 +1126,10 @@ const FormatCard = ({
       <>
         {renderTopRow(rows, cols)}
         <View style={styles.editorBlockCompactTight}>
-          <View style={[styles.fixedContentZone, { height: gridZoneHeight }]}>
-            <View
-              style={[
-                styles.tableFixedWrap,
-                {
-                  width: metrics.wrapWidth,
-                  height: metrics.wrapHeight,
-                  padding: metrics.padding,
-                },
-              ]}
-            >
+          <View style={[styles.fixedContentZone, { height: gridZoneHeight }]}> 
+            <View style={[styles.tableFixedWrap, { width: metrics.wrapWidth, height: metrics.wrapHeight, padding: metrics.padding }]}> 
               {Array.from({ length: rows }).map((_, r) => (
-                <View
-                  key={`trow-${r}`}
-                  style={[
-                    styles.tableEditorRowCompact,
-                    { gap: metrics.gap, marginBottom: r === rows - 1 ? 0 : metrics.gap },
-                  ]}
-                >
+                <View key={`trow-${r}`} style={[styles.tableEditorRowCompact, { gap: metrics.gap, marginBottom: r === rows - 1 ? 0 : metrics.gap }]}> 
                   {Array.from({ length: cols }).map((__, c) => {
                     const key = makeCellKey(r, c);
                     const currentValue = String(cells[key] ?? "");
@@ -1241,26 +1140,10 @@ const FormatCard = ({
                         <TextInput
                           key={key}
                           value={currentValue}
-                          onChangeText={(v) =>
-                            onChangePayload({
-                              ...payload,
-                              rows,
-                              cols,
-                              cells: {
-                                ...cells,
-                                [key]: v,
-                              },
-                            })
-                          }
+                          onChangeText={(v) => onChangePayload({ ...payload, rows, cols, cells: { ...cells, [key]: v } })}
                           placeholder={placeholder}
                           placeholderTextColor="rgba(15,23,42,0.35)"
-                          style={[
-                            styles.tableCellInputWeb,
-                            {
-                              width: metrics.cell,
-                              height: metrics.cell,
-                            },
-                          ]}
+                          style={[styles.tableCellInputWeb, { width: metrics.cell, height: metrics.cell }]}
                           autoCapitalize="none"
                           autoCorrect={false}
                         />
@@ -1270,29 +1153,10 @@ const FormatCard = ({
                     return (
                       <Pressable
                         key={key}
-                        onPress={() =>
-                          onStartEditTableCell({
-                            formatId: format.id,
-                            cellKey: key,
-                            value: currentValue,
-                            placeholder,
-                          })
-                        }
-                        style={[
-                          styles.tableCellPressable,
-                          {
-                            width: metrics.cell,
-                            height: metrics.cell,
-                          },
-                        ]}
+                        onPress={() => onStartEditTableCell({ formatId: format.id, cellKey: key, value: currentValue, placeholder })}
+                        style={[styles.tableCellPressable, { width: metrics.cell, height: metrics.cell }]}
                       >
-                        <Text
-                          numberOfLines={1}
-                          style={[
-                            styles.tableCellPressableText,
-                            !currentValue && styles.tableCellPressablePlaceholder,
-                          ]}
-                        >
+                        <Text numberOfLines={1} style={[styles.tableCellPressableText, !currentValue && styles.tableCellPressablePlaceholder]}>
                           {currentValue || placeholder}
                         </Text>
                       </Pressable>
@@ -1308,16 +1172,7 @@ const FormatCard = ({
   };
 
   return (
-    <View
-      style={[
-        styles.formatCard,
-        {
-          width: cardWidth,
-          minHeight: cardMinHeight,
-          height: cardMinHeight,
-        },
-      ]}
-    >
+    <View style={[styles.formatCard, { width: cardWidth, minHeight: cardMinHeight, height: cardMinHeight }]}> 
       {format.format_type === "code" && renderCode()}
       {format.format_type === "poincon" && renderPoincon()}
       {format.format_type === "qrcode" && renderQrCode()}
@@ -1355,6 +1210,9 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
   const isMobile = width < 760;
   const scrollRef = useRef<ScrollView | null>(null);
   const initialLoadDoneRef = useRef(false);
+  const savingRef = useRef(false);
+  const saveAgainRef = useRef(false);
+
   const latestStateRef = useRef<{
     balise: Balise | null;
     formats: BaliseFormat[];
@@ -1374,10 +1232,12 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
 
   const orderedFormats = useMemo(() => {
     return [...formats]
-      .map((f) => ({ ...f, label: FIXED_FORMAT_LABELS[f.format_type] }))
-      .sort(
-        (a, b) => FORMAT_ORDER.indexOf(a.format_type) - FORMAT_ORDER.indexOf(b.format_type)
-      );
+      .map((f) => ({
+        ...f,
+        label: FIXED_FORMAT_LABELS[f.format_type],
+        payload: f.format_type === "poincon" ? normalizePoinconPayloadForSave(f.payload ?? {}) : f.payload ?? {},
+      }))
+      .sort((a, b) => FORMAT_ORDER.indexOf(a.format_type) - FORMAT_ORDER.indexOf(b.format_type));
   }, [formats]);
 
   const availableTypes = useMemo(() => {
@@ -1391,26 +1251,16 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
   );
 
   useEffect(() => {
-    latestStateRef.current = {
-      balise,
-      formats,
-      hasChanges,
-      isNew,
-      currentUserId,
-    };
+    latestStateRef.current = { balise, formats, hasChanges, isNew, currentUserId };
   }, [balise, formats, hasChanges, isNew, currentUserId]);
 
   const cardGap = 16;
   const cardWidth = isMobile ? width - 28 : Math.min(430, width - 180);
 
   const availableVerticalSpace = height - (isMobile ? 265 : 250);
-  const cardMinHeight = isMobile
-    ? Math.max(350, Math.min(510, availableVerticalSpace))
-    : Math.max(510, Math.min(690, availableVerticalSpace));
+  const cardMinHeight = isMobile ? Math.max(350, Math.min(510, availableVerticalSpace)) : Math.max(510, Math.min(690, availableVerticalSpace));
 
-  const gridZoneHeight = isMobile
-    ? Math.max(172, Math.min(280, cardMinHeight - 138))
-    : Math.max(245, Math.min(365, cardMinHeight - 145));
+  const gridZoneHeight = isMobile ? Math.max(172, Math.min(280, cardMinHeight - 138)) : Math.max(245, Math.min(365, cardMinHeight - 145));
 
   const sidePadding = Math.max(14, (width - cardWidth) / 2);
 
@@ -1426,25 +1276,19 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
     [cardWidth]
   );
 
-  const refreshUsage = useCallback(
-    async (targetBalise: Balise, userId: string) => {
-      try {
-        const nextUsage = await fetchParcoursUsageForBalise(targetBalise, userId);
-        setUsageList(nextUsage);
+  const refreshUsage = useCallback(async (targetBalise: Balise, userId: string) => {
+    try {
+      const nextUsage = await fetchParcoursUsageForBalise(targetBalise, userId);
+      setUsageList(nextUsage);
 
-        await AsyncStorage.setItem(
-          BALISE_EDIT_DRAFT_KEY,
-          JSON.stringify({
-            balise_id: targetBalise.id,
-            balise_numero: targetBalise.numero_balise,
-          })
-        );
-      } catch {
-        setUsageList([]);
-      }
-    },
-    []
-  );
+      await AsyncStorage.setItem(
+        BALISE_EDIT_DRAFT_KEY,
+        JSON.stringify({ balise_id: targetBalise.id, balise_numero: targetBalise.numero_balise })
+      );
+    } catch {
+      setUsageList([]);
+    }
+  }, []);
 
   const createBlankBalise = useCallback(async (userId: string) => {
     const nextNumero = await getNextNumeroFromSupabase(userId);
@@ -1476,32 +1320,45 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
       isNew: boolean;
       currentUserId: string;
     }) => {
-      const data = snapshot ?? latestStateRef.current;
-      const currentBalise = data.balise;
-      const currentFormats = data.formats;
-      const currentHasChanges = data.hasChanges;
-      const currentIsNew = data.isNew;
-      const userId = data.currentUserId;
+      if (savingRef.current) {
+        saveAgainRef.current = true;
+        return;
+      }
 
-      if (!currentBalise || !userId) return;
-      if (!currentHasChanges) return;
-
-      const cleanNumeroText = String(currentBalise.numero_balise ?? "").trim();
-      const numero = parseInt(cleanNumeroText, 10);
-
-      if (!cleanNumeroText || Number.isNaN(numero) || numero <= 0) return;
-      if (!currentFormats.length) return;
-
-      const codeValue = String(currentBalise.code ?? "").trim();
+      savingRef.current = true;
 
       try {
+        const data = snapshot ?? latestStateRef.current;
+        const currentBalise = data.balise;
+        const currentFormats = data.formats;
+        const currentIsNew = data.isNew;
+        const userId = data.currentUserId;
+
+        if (!currentBalise || !userId) return;
+
+        const cleanNumeroText = String(currentBalise.numero_balise ?? "").trim();
+        const numero = parseInt(cleanNumeroText, 10);
+
+        if (!cleanNumeroText || Number.isNaN(numero) || numero <= 0) {
+          Alert.alert("Numéro invalide", "Le numéro de balise doit être un nombre supérieur à 0.");
+          return;
+        }
+
+        const codeValue = String(currentBalise.code ?? "").trim();
+
         const safeFormats = ensureCodeFormat(
-          currentFormats,
+          currentFormats.map((f) => ({
+            ...f,
+            payload:
+              f.format_type === "poincon"
+                ? normalizePoinconPayloadForSave(f.payload ?? {})
+                : f.payload ?? {},
+          })),
           currentBalise.id.startsWith("new-") ? null : currentBalise.id,
           userId
         );
 
-        if (currentIsNew) {
+        if (currentIsNew || currentBalise.id.startsWith("new-")) {
           const inserted = await insertBaliseInSupabase(
             {
               ...currentBalise,
@@ -1511,18 +1368,25 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
             userId
           );
 
-          await upsertFormatsInSupabase(inserted.id, userId, safeFormats);
+          const formatsForInserted = safeFormats.map((f) => ({
+            ...f,
+            balise_id: inserted.id,
+            user_id: userId,
+          }));
+
+          await upsertFormatsInSupabase(inserted.id, userId, formatsForInserted);
+
+          const finalBalise: Balise = {
+            ...inserted,
+            code: codeValue,
+            points: String(inserted.points ?? ""),
+          };
 
           const refreshedFormats = ensureCodeFormat(
             await fetchFormatsByBaliseId(inserted.id, userId),
             inserted.id,
             userId
           );
-
-          const finalBalise = {
-            ...inserted,
-            points: String(inserted.points ?? ""),
-          };
 
           setBalise(finalBalise);
           setInitialBalise({ ...finalBalise });
@@ -1538,40 +1402,61 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
             currentUserId: userId,
           };
 
-          await refreshUsage(inserted, userId);
-        } else {
-          const updatedBalise = {
-            ...currentBalise,
-            code: codeValue,
-            numero_balise: String(numero),
-          };
-
-          await updateBaliseInSupabase(updatedBalise, userId);
-          await upsertFormatsInSupabase(updatedBalise.id, userId, safeFormats);
-
-          const refreshedFormats = ensureCodeFormat(
-            await fetchFormatsByBaliseId(updatedBalise.id, userId),
-            updatedBalise.id,
-            userId
+          await AsyncStorage.setItem(
+            BALISE_EDIT_DRAFT_KEY,
+            JSON.stringify({ balise_id: inserted.id, balise_numero: inserted.numero_balise })
           );
 
-          setBalise(updatedBalise);
-          setInitialBalise({ ...updatedBalise });
-          setFormats(refreshedFormats);
-          setInitialFormats(JSON.parse(JSON.stringify(refreshedFormats)));
-
-          latestStateRef.current = {
-            balise: updatedBalise,
-            formats: refreshedFormats,
-            hasChanges: false,
-            isNew: false,
-            currentUserId: userId,
-          };
-
-          await refreshUsage(updatedBalise, userId);
+          await refreshUsage(finalBalise, userId);
+          return;
         }
-      } catch (e) {
-        console.error("❌ save on leave CreationBalise:", e);
+
+        const updatedBalise: Balise = {
+          ...currentBalise,
+          code: codeValue,
+          numero_balise: String(numero),
+        };
+
+        await updateBaliseInSupabase(updatedBalise, userId);
+
+        const formatsForUpdate = safeFormats.map((f) => ({
+          ...f,
+          balise_id: updatedBalise.id,
+          user_id: userId,
+        }));
+
+        await upsertFormatsInSupabase(updatedBalise.id, userId, formatsForUpdate);
+
+        const refreshedFormats = ensureCodeFormat(
+          await fetchFormatsByBaliseId(updatedBalise.id, userId),
+          updatedBalise.id,
+          userId
+        );
+
+        setBalise(updatedBalise);
+        setInitialBalise({ ...updatedBalise });
+        setFormats(refreshedFormats);
+        setInitialFormats(JSON.parse(JSON.stringify(refreshedFormats)));
+
+        latestStateRef.current = {
+          balise: updatedBalise,
+          formats: refreshedFormats,
+          hasChanges: false,
+          isNew: false,
+          currentUserId: userId,
+        };
+
+        await refreshUsage(updatedBalise, userId);
+      } catch (e: any) {
+        console.error("❌ save CreationBalise:", e);
+        Alert.alert("Erreur d'enregistrement", e?.message || "La balise n'a pas pu être enregistrée.");
+      } finally {
+        savingRef.current = false;
+
+        if (saveAgainRef.current) {
+          saveAgainRef.current = false;
+          setTimeout(() => saveFromSnapshot(latestStateRef.current), 150);
+        }
       }
     },
     [refreshUsage]
@@ -1608,18 +1493,11 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
               return;
             }
 
-            const existingFormats = ensureCodeFormat(
-              await fetchFormatsByBaliseId(parsedDraft.balise_id, userId),
-              existing.id,
-              userId
-            );
+            const existingFormats = ensureCodeFormat(await fetchFormatsByBaliseId(parsedDraft.balise_id, userId), existing.id, userId);
 
             if (!mounted) return;
 
-            const nextBalise = {
-              ...existing,
-              points: String(existing.points ?? ""),
-            };
+            const nextBalise = { ...existing, points: String(existing.points ?? "") };
 
             setBalise(nextBalise);
             setInitialBalise({ ...nextBalise });
@@ -1651,9 +1529,7 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
         initialLoadDoneRef.current = true;
       } catch (e: any) {
         if (!mounted) return;
-        Alert.alert("Erreur", e?.message || "Impossible d'ouvrir la balise.", [
-          { text: "OK", onPress: () => setPage("gestionBalises") },
-        ]);
+        Alert.alert("Erreur", e?.message || "Impossible d'ouvrir la balise.", [{ text: "OK", onPress: () => setPage("gestionBalises") }]);
       } finally {
         if (mounted) setLoading(false);
       }
@@ -1667,87 +1543,11 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
   }, [createBlankBalise, refreshUsage, setPage]);
 
   useEffect(() => {
-    const handleBeforeUnload = () => {
-      const snapshot = latestStateRef.current;
-      if (!snapshot.balise || !snapshot.currentUserId || !snapshot.hasChanges) return;
-
-      const currentBalise = snapshot.balise;
-      const currentFormats = ensureCodeFormat(
-        snapshot.formats,
-        currentBalise.id.startsWith("new-") ? null : currentBalise.id,
-        snapshot.currentUserId
-      );
-
-      const cleanNumeroText = String(currentBalise.numero_balise ?? "").trim();
-      const numero = parseInt(cleanNumeroText, 10);
-      if (!cleanNumeroText || Number.isNaN(numero) || numero <= 0) return;
-
-      const payloadBalise = {
-        user_id: snapshot.currentUserId,
-        code: String(currentBalise.code ?? "").trim(),
-        points: toPointsNumber(currentBalise.points),
-        frozen: !!currentBalise.frozen,
-        numero_balise: parseInt(String(numero), 10),
-      };
-
-      try {
-        const xhr = new XMLHttpRequest();
-        if (snapshot.isNew) {
-          xhr.open(
-            "POST",
-            `${(supabase as any).supabaseUrl}/rest/v1/balises`,
-            false
-          );
-          xhr.setRequestHeader("apikey", (supabase as any).supabaseKey);
-          xhr.setRequestHeader(
-            "Authorization",
-            `Bearer ${(supabase as any).supabaseKey}`
-          );
-          xhr.setRequestHeader("Content-Type", "application/json");
-          xhr.setRequestHeader("Prefer", "return=minimal");
-          xhr.send(JSON.stringify(payloadBalise));
-        } else {
-          xhr.open(
-            "PATCH",
-            `${(supabase as any).supabaseUrl}/rest/v1/balises?id=eq.${currentBalise.id}&user_id=eq.${snapshot.currentUserId}`,
-            false
-          );
-          xhr.setRequestHeader("apikey", (supabase as any).supabaseKey);
-          xhr.setRequestHeader(
-            "Authorization",
-            `Bearer ${(supabase as any).supabaseKey}`
-          );
-          xhr.setRequestHeader("Content-Type", "application/json");
-          xhr.send(
-            JSON.stringify({
-              code: payloadBalise.code,
-              points: payloadBalise.points,
-              frozen: payloadBalise.frozen,
-              numero_balise: payloadBalise.numero_balise,
-            })
-          );
-        }
-      } catch {
-        //
-      }
-    };
-
-    if (Platform.OS === "web" && typeof window !== "undefined") {
-      window.addEventListener("beforeunload", handleBeforeUnload);
-      return () => {
-        window.removeEventListener("beforeunload", handleBeforeUnload);
-      };
-    }
-
     const sub = AppState.addEventListener("change", (state) => {
-      if (state !== "active") {
-        saveFromSnapshot();
-      }
+      if (state !== "active") saveFromSnapshot(latestStateRef.current);
     });
 
-    return () => {
-      sub.remove();
-    };
+    return () => sub.remove();
   }, [saveFromSnapshot]);
 
   useEffect(() => {
@@ -1762,26 +1562,43 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
   }, [orderedFormats.length, activeFormatIndex, scrollToFormatIndex]);
 
   const goBack = useCallback(async () => {
-    await saveFromSnapshot();
+    await saveFromSnapshot(latestStateRef.current);
     setPage("gestionBalises");
   }, [saveFromSnapshot, setPage]);
+
+  const updateBaliseDraft = useCallback((patch: Partial<Balise>) => {
+    setBalise((prev) => {
+      if (!prev) return prev;
+      const next = { ...prev, ...patch };
+
+      latestStateRef.current = { ...latestStateRef.current, balise: next, hasChanges: true };
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!initialLoadDoneRef.current) return;
+    if (loading) return;
+    if (!hasChanges) return;
+    if (!balise || !currentUserId) return;
+
+    const timer = setTimeout(() => {
+      saveFromSnapshot({ balise, formats, hasChanges, isNew, currentUserId });
+    }, 900);
+
+    return () => clearTimeout(timer);
+  }, [balise, formats, hasChanges, isNew, currentUserId, loading, saveFromSnapshot]);
 
   const addFormat = useCallback(
     (type: BaliseFormatType) => {
       if (!balise) return;
 
-      const created = createDefaultFormat(
-        type,
-        balise.id.startsWith("new-") ? null : balise.id,
-        currentUserId || balise.user_id || null
-      );
+      const created = createDefaultFormat(type, balise.id.startsWith("new-") ? null : balise.id, currentUserId || balise.user_id || null);
 
       setFormats((prev) => {
         const next = ensureCodeFormat([...prev, created], balise.id, currentUserId);
         setTimeout(() => {
-          const nextOrdered = [...next].sort(
-            (a, b) => FORMAT_ORDER.indexOf(a.format_type) - FORMAT_ORDER.indexOf(b.format_type)
-          );
+          const nextOrdered = [...next].sort((a, b) => FORMAT_ORDER.indexOf(a.format_type) - FORMAT_ORDER.indexOf(b.format_type));
           const nextIndex = nextOrdered.findIndex((f) => f.id === created.id);
           scrollToFormatIndex(nextIndex, true);
         }, 60);
@@ -1799,11 +1616,7 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
         const target = prev.find((f) => f.id === formatId);
         if (target?.format_type === "code") return prev;
 
-        const next = ensureCodeFormat(
-          prev.filter((f) => f.id !== formatId),
-          balise?.id || null,
-          currentUserId
-        );
+        const next = ensureCodeFormat(prev.filter((f) => f.id !== formatId), balise?.id || null, currentUserId);
 
         setTimeout(() => {
           const newIndex = Math.max(0, Math.min(activeFormatIndex, next.length - 1));
@@ -1819,30 +1632,32 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
   );
 
   const updateFormatPayload = useCallback((formatId: string, payload: Record<string, any>) => {
-    setFormats((prev) =>
-      prev.map((f) =>
+    setFormats((prev) => {
+      const next = prev.map((f) =>
         f.id === formatId
           ? {
               ...f,
               label: FIXED_FORMAT_LABELS[f.format_type],
-              payload,
+              payload: f.format_type === "poincon" ? normalizePoinconPayloadForSave(payload ?? {}) : payload,
             }
           : f
-      )
-    );
+      );
+
+      latestStateRef.current = {
+        ...latestStateRef.current,
+        formats: next,
+        hasChanges: true,
+      };
+
+      return next;
+    });
   }, []);
 
-  const handleStartEditTableCell = useCallback((cell: ActiveCellEditor) => {
-    setActiveCellEditor(cell);
-  }, []);
-
-  const handleEditorChange = useCallback((text: string) => {
-    setActiveCellEditor((prev) => (prev ? { ...prev, value: text } : prev));
-  }, []);
+  const handleStartEditTableCell = useCallback((cell: ActiveCellEditor) => setActiveCellEditor(cell), []);
+  const handleEditorChange = useCallback((text: string) => setActiveCellEditor((prev) => (prev ? { ...prev, value: text } : prev)), []);
 
   const handleEditorApply = useCallback(() => {
     if (!activeCellEditor) return;
-
     const { formatId, cellKey, value } = activeCellEditor;
 
     setFormats((prev) =>
@@ -1850,16 +1665,7 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
         if (f.id !== formatId) return f;
         const payload = f.payload || {};
         const cells = payload.cells || {};
-        return {
-          ...f,
-          payload: {
-            ...payload,
-            cells: {
-              ...cells,
-              [cellKey]: value,
-            },
-          },
-        };
+        return { ...f, payload: { ...payload, cells: { ...cells, [cellKey]: value } } };
       })
     );
 
@@ -1868,7 +1674,6 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
 
   const handleEditorClear = useCallback(() => {
     if (!activeCellEditor) return;
-
     const { formatId, cellKey } = activeCellEditor;
 
     setFormats((prev) =>
@@ -1877,13 +1682,7 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
         const payload = f.payload || {};
         const cells = { ...(payload.cells || {}) };
         delete cells[cellKey];
-        return {
-          ...f,
-          payload: {
-            ...payload,
-            cells,
-          },
-        };
+        return { ...f, payload: { ...payload, cells } };
       })
     );
 
@@ -1899,11 +1698,7 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
       const result = await Print.printToFileAsync({ html });
 
       if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(result.uri, {
-          mimeType: "application/pdf",
-          dialogTitle: "Télécharger le PDF de la balise",
-          UTI: "com.adobe.pdf",
-        });
+        await Sharing.shareAsync(result.uri, { mimeType: "application/pdf", dialogTitle: "Télécharger le PDF de la balise", UTI: "com.adobe.pdf" });
       } else {
         Alert.alert("PDF créé", "Le PDF a été généré.");
       }
@@ -1915,9 +1710,9 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
   }, [balise, orderedFormats, usageList]);
 
   const handleToggleFreeze = useCallback(() => {
-    if (!balise) return;
-    setBalise((prev) => (prev ? { ...prev, frozen: !prev.frozen } : prev));
-  }, [balise]);
+    if (!latestStateRef.current.balise) return;
+    updateBaliseDraft({ frozen: !latestStateRef.current.balise.frozen });
+  }, [updateBaliseDraft]);
 
   const handleDelete = useCallback(() => {
     if (!balise || !currentUserId) return;
@@ -1939,9 +1734,7 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
 
       (async () => {
         try {
-          if (!isNew) {
-            await deleteBaliseInSupabase(balise.id, currentUserId);
-          }
+          if (!isNew) await deleteBaliseInSupabase(balise.id, currentUserId);
           await AsyncStorage.removeItem(BALISE_EDIT_DRAFT_KEY);
           setPage("gestionBalises");
         } catch (e: any) {
@@ -1973,9 +1766,7 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
         style: "destructive",
         onPress: async () => {
           try {
-            if (!isNew) {
-              await deleteBaliseInSupabase(balise.id, currentUserId);
-            }
+            if (!isNew) await deleteBaliseInSupabase(balise.id, currentUserId);
             await AsyncStorage.removeItem(BALISE_EDIT_DRAFT_KEY);
             setPage("gestionBalises");
           } catch (e: any) {
@@ -1987,9 +1778,7 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
   }, [balise, currentUserId, currentIsUsed, isNew, setPage]);
 
   const toggleParcoursSelection = useCallback((id: string) => {
-    setSelectedParcoursIds((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
-    );
+    setSelectedParcoursIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   }, []);
 
   const handleRemoveFromSelectedParcours = useCallback(async () => {
@@ -2040,42 +1829,24 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
 
       <View style={styles.header}>
         <View style={styles.headerRow}>
-          <Pressable
-            onPress={goBack}
-            style={({ pressed }) => [styles.headerBtn, pressed && styles.pressedStyle]}
-            hitSlop={10}
-          >
+          <Pressable onPress={goBack} style={({ pressed }) => [styles.headerBtn, pressed && styles.pressedStyle]} hitSlop={10}>
             <ArrowLeft color="#fff" size={18} />
           </Pressable>
 
           <View style={styles.headerActions}>
             <Pressable
               onPress={handleExportPdf}
-              style={({ pressed }) => [
-                styles.iconBtn,
-                exportingPdf && styles.iconBtnDisabled,
-                pressed && !exportingPdf && styles.pressedStyle,
-              ]}
+              style={({ pressed }) => [styles.iconBtn, exportingPdf && styles.iconBtnDisabled, pressed && !exportingPdf && styles.pressedStyle]}
               disabled={exportingPdf}
             >
               <FileText size={18} color="#fff" />
             </Pressable>
 
-            <Pressable
-              onPress={handleToggleFreeze}
-              style={({ pressed }) => [
-                styles.iconBtn,
-                balise.frozen && styles.iconBtnFrozenActive,
-                pressed && styles.pressedStyle,
-              ]}
-            >
+            <Pressable onPress={handleToggleFreeze} style={({ pressed }) => [styles.iconBtn, balise.frozen && styles.iconBtnFrozenActive, pressed && styles.pressedStyle]}>
               <Snowflake size={18} color="#fff" />
             </Pressable>
 
-            <Pressable
-              onPress={handleDelete}
-              style={({ pressed }) => [styles.iconBtnRed, pressed && styles.pressedStyle]}
-            >
+            <Pressable onPress={handleDelete} style={({ pressed }) => [styles.iconBtnRed, pressed && styles.pressedStyle]}>
               <Trash2 size={18} color="#fff" />
             </Pressable>
           </View>
@@ -2087,16 +1858,7 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
           <Text style={styles.header2LabelCentered}>N° balise</Text>
           <TextInput
             value={balise.numero_balise}
-            onChangeText={(v) =>
-              setBalise((prev) =>
-                prev
-                  ? {
-                      ...prev,
-                      numero_balise: v.replace(/[^\d]/g, ""),
-                    }
-                  : prev
-              )
-            }
+            onChangeText={(v) => updateBaliseDraft({ numero_balise: v.replace(/[^0-9]/g, "") })}
             keyboardType="number-pad"
             style={styles.header2InputCentered}
             placeholder="0"
@@ -2110,9 +1872,7 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
           <Text style={styles.header2LabelCentered}>Points</Text>
           <TextInput
             value={String(balise.points ?? "")}
-            onChangeText={(v) =>
-              setBalise((prev) => (prev ? { ...prev, points: v } : prev))
-            }
+            onChangeText={(v) => updateBaliseDraft({ points: v })}
             keyboardType={Platform.OS === "ios" ? "decimal-pad" : "numeric"}
             style={styles.header2InputCentered}
             placeholder="0"
@@ -2122,13 +1882,7 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
           />
         </View>
 
-        <Pressable
-          onPress={() => currentUsageCount > 0 && setShowParcoursList(true)}
-          style={({ pressed }) => [
-            styles.header2ChipSmall,
-            pressed && currentUsageCount > 0 && styles.pressedStyle,
-          ]}
-        >
+        <Pressable onPress={() => currentUsageCount > 0 && setShowParcoursList(true)} style={({ pressed }) => [styles.header2ChipSmall, pressed && currentUsageCount > 0 && styles.pressedStyle]}>
           <Text style={styles.header2LabelCentered}>Parcours</Text>
           <Text style={styles.header2InputCentered}>{currentUsageCount}</Text>
         </Pressable>
@@ -2152,26 +1906,14 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
                 snapToInterval={cardWidth + cardGap}
                 snapToAlignment="start"
                 showsHorizontalScrollIndicator={false}
-                contentContainerStyle={[
-                  styles.horizontalCardsContent,
-                  { paddingHorizontal: sidePadding },
-                ]}
+                contentContainerStyle={[styles.horizontalCardsContent, { paddingHorizontal: sidePadding }]}
                 keyboardShouldPersistTaps="handled"
                 onMomentumScrollEnd={handleScrollEnd}
                 onScrollEndDrag={handleScrollEnd}
                 scrollEventThrottle={16}
               >
                 {orderedFormats.map((format, index) => (
-                  <View
-                    key={format.id}
-                    style={[
-                      styles.cardSlot,
-                      {
-                        width: cardWidth,
-                        marginRight: index === orderedFormats.length - 1 ? 0 : cardGap,
-                      },
-                    ]}
-                  >
+                  <View key={format.id} style={[styles.cardSlot, { width: cardWidth, marginRight: index === orderedFormats.length - 1 ? 0 : cardGap }]}> 
                     <FormatCard
                       format={format}
                       baliseCode={String(balise.code ?? "")}
@@ -2180,9 +1922,7 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
                       gridZoneHeight={gridZoneHeight}
                       isMobile={isMobile}
                       onRemove={() => removeFormat(format.id)}
-                      onChangeCode={(v) =>
-                        setBalise((prev) => (prev ? { ...prev, code: v } : prev))
-                      }
+                      onChangeCode={(v) => updateBaliseDraft({ code: v })}
                       onChangePayload={(payload) => updateFormatPayload(format.id, payload)}
                       onStartEditTableCell={handleStartEditTableCell}
                     />
@@ -2193,14 +1933,7 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
               {orderedFormats.length > 1 ? (
                 <View style={styles.paginationDots}>
                   {orderedFormats.map((_, index) => (
-                    <Pressable
-                      key={`dot-${index}`}
-                      onPress={() => scrollToFormatIndex(index, true)}
-                      style={[
-                        styles.paginationDot,
-                        index === activeFormatIndex && styles.paginationDotActive,
-                      ]}
-                    />
+                    <Pressable key={`dot-${index}`} onPress={() => scrollToFormatIndex(index, true)} style={[styles.paginationDot, index === activeFormatIndex && styles.paginationDotActive]} />
                   ))}
                 </View>
               ) : null}
@@ -2213,11 +1946,7 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
         <View style={styles.floatingEditorBar}>
           <View style={styles.floatingEditorTop}>
             <Text style={styles.floatingEditorTitle}>Édition de la case</Text>
-
-            <Pressable
-              onPress={() => setActiveCellEditor(null)}
-              style={({ pressed }) => [styles.floatingEditorClose, pressed && styles.pressedStyle]}
-            >
+            <Pressable onPress={() => setActiveCellEditor(null)} style={({ pressed }) => [styles.floatingEditorClose, pressed && styles.pressedStyle]}>
               <X size={14} color="#334155" />
             </Pressable>
           </View>
@@ -2236,17 +1965,11 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
           />
 
           <View style={styles.floatingEditorActions}>
-            <Pressable
-              onPress={handleEditorClear}
-              style={({ pressed }) => [styles.floatingEditorGhostBtn, pressed && styles.pressedStyle]}
-            >
+            <Pressable onPress={handleEditorClear} style={({ pressed }) => [styles.floatingEditorGhostBtn, pressed && styles.pressedStyle]}>
               <Text style={styles.floatingEditorGhostTxt}>Effacer</Text>
             </Pressable>
 
-            <Pressable
-              onPress={handleEditorApply}
-              style={({ pressed }) => [styles.floatingEditorPrimaryBtn, pressed && styles.pressedStyle]}
-            >
+            <Pressable onPress={handleEditorApply} style={({ pressed }) => [styles.floatingEditorPrimaryBtn, pressed && styles.pressedStyle]}>
               <Text style={styles.floatingEditorPrimaryTxt}>Valider</Text>
             </Pressable>
           </View>
@@ -2256,11 +1979,7 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
       <View style={styles.fabWrap} pointerEvents="box-none">
         <Pressable
           onPress={() => setShowFormatPicker(true)}
-          style={({ pressed }) => [
-            styles.fab,
-            availableTypes.length === 0 && styles.fabDisabled,
-            pressed && availableTypes.length > 0 && styles.pressedStyle,
-          ]}
+          style={({ pressed }) => [styles.fab, availableTypes.length === 0 && styles.fabDisabled, pressed && availableTypes.length > 0 && styles.pressedStyle]}
           disabled={availableTypes.length === 0}
         >
           <Plus size={22} color="#0f172a" />
@@ -2268,30 +1987,21 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
         </Pressable>
       </View>
 
-      <Modal
-        visible={showParcoursList}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setShowParcoursList(false)}
-      >
+      <Modal visible={showParcoursList} transparent animationType="fade" onRequestClose={() => setShowParcoursList(false)}>
         <View style={styles.modalCenterRoot}>
           <Pressable style={styles.centerBackdrop} onPress={() => setShowParcoursList(false)} />
 
           <View style={styles.usageModalCard}>
             <View style={styles.modalTopRow}>
               <Text style={styles.modalTitle}>Présence dans les parcours</Text>
-              <Pressable
-                onPress={() => setShowParcoursList(false)}
-                style={({ pressed }) => [styles.modalCloseBtn, pressed && styles.pressedStyle]}
-              >
+              <Pressable onPress={() => setShowParcoursList(false)} style={({ pressed }) => [styles.modalCloseBtn, pressed && styles.pressedStyle]}>
                 <X size={16} color="#334155" />
               </Pressable>
             </View>
 
             {showDeleteInfo && currentIsUsed ? (
               <Text style={styles.warningText}>
-                Attention : cette balise est utilisée dans un ou plusieurs parcours.
-                Elle ne peut pas être supprimée tant qu'elle y est encore liée.
+                Attention : cette balise est utilisée dans un ou plusieurs parcours. Elle ne peut pas être supprimée tant qu'elle y est encore liée.
               </Text>
             ) : null}
 
@@ -2305,21 +2015,8 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
                   const checked = selectedParcoursIds.includes(p.id);
 
                   return (
-                    <Pressable
-                      key={p.id}
-                      onPress={() => toggleParcoursSelection(p.id)}
-                      style={({ pressed }) => [
-                        styles.parcoursRow,
-                        checked && styles.parcoursRowChecked,
-                        pressed && styles.pressedStyle,
-                      ]}
-                    >
-                      <View
-                        style={[
-                          styles.checkboxDark,
-                          checked && styles.checkboxDarkChecked,
-                        ]}
-                      />
+                    <Pressable key={p.id} onPress={() => toggleParcoursSelection(p.id)} style={({ pressed }) => [styles.parcoursRow, checked && styles.parcoursRowChecked, pressed && styles.pressedStyle]}>
+                      <View style={[styles.checkboxDark, checked && styles.checkboxDarkChecked]} />
                       <Text style={styles.parcoursName}>{p.nom}</Text>
                     </Pressable>
                   );
@@ -2328,10 +2025,7 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
             </ScrollView>
 
             <View style={styles.modalActionsRow}>
-              <Pressable
-                onPress={() => setShowParcoursList(false)}
-                style={({ pressed }) => [styles.secondaryBtnInline, pressed && styles.pressedStyle]}
-              >
+              <Pressable onPress={() => setShowParcoursList(false)} style={({ pressed }) => [styles.secondaryBtnInline, pressed && styles.pressedStyle]}>
                 <Text style={styles.secondaryBtnTxt}>Fermer</Text>
               </Pressable>
 
@@ -2340,40 +2034,25 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
                 disabled={selectedParcoursIds.length === 0 || removingFromParcours}
                 style={({ pressed }) => [
                   styles.removeFromParcoursBtn,
-                  (selectedParcoursIds.length === 0 || removingFromParcours) &&
-                    styles.removeFromParcoursBtnDisabled,
-                  pressed &&
-                    selectedParcoursIds.length > 0 &&
-                    !removingFromParcours &&
-                    styles.pressedStyle,
+                  (selectedParcoursIds.length === 0 || removingFromParcours) && styles.removeFromParcoursBtnDisabled,
+                  pressed && selectedParcoursIds.length > 0 && !removingFromParcours && styles.pressedStyle,
                 ]}
               >
-                <Text style={styles.removeFromParcoursBtnTxt}>
-                  {removingFromParcours ? "Retrait..." : "Retirer la balise"}
-                </Text>
+                <Text style={styles.removeFromParcoursBtnTxt}>{removingFromParcours ? "Retrait..." : "Retirer la balise"}</Text>
               </Pressable>
             </View>
           </View>
         </View>
       </Modal>
 
-      <Modal
-        visible={showFormatPicker}
-        animationType="fade"
-        transparent={false}
-        presentationStyle="fullScreen"
-        onRequestClose={() => setShowFormatPicker(false)}
-      >
+      <Modal visible={showFormatPicker} animationType="fade" transparent={false} presentationStyle="fullScreen" onRequestClose={() => setShowFormatPicker(false)}>
         <SafeAreaView style={styles.fullModalRoot}>
           <StatusBar hidden />
           <View style={styles.fullModalOverlay}>
             <View style={styles.fullModalSheet}>
               <View style={styles.modalTopRow}>
                 <Text style={styles.modalTitle}>Ajouter un format</Text>
-                <Pressable
-                  onPress={() => setShowFormatPicker(false)}
-                  style={({ pressed }) => [styles.modalCloseBtn, pressed && styles.pressedStyle]}
-                >
+                <Pressable onPress={() => setShowFormatPicker(false)} style={({ pressed }) => [styles.modalCloseBtn, pressed && styles.pressedStyle]}>
                   <X size={16} color="#334155" />
                 </Pressable>
               </View>
@@ -2381,18 +2060,10 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
               {availableTypes.length === 0 ? (
                 <Text style={styles.pickerEmptyText}>Les 4 formats sont déjà présents.</Text>
               ) : (
-                <ScrollView
-                  showsVerticalScrollIndicator={false}
-                  keyboardShouldPersistTaps="handled"
-                  contentContainerStyle={styles.pickerScrollContent}
-                >
+                <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.pickerScrollContent}>
                   <View style={styles.pickerGrid}>
                     {availableTypes.map((option) => (
-                      <Pressable
-                        key={option.id}
-                        onPress={() => addFormat(option.id)}
-                        style={({ pressed }) => [styles.pickerItem, pressed && styles.pressedStyle]}
-                      >
+                      <Pressable key={option.id} onPress={() => addFormat(option.id)} style={({ pressed }) => [styles.pickerItem, pressed && styles.pressedStyle]}>
                         <View style={styles.pickerItemRow}>
                           <PickerFormatIcon type={option.id} />
                           <Text style={styles.pickerItemTitleOnly}>{option.label}</Text>
@@ -2416,24 +2087,9 @@ export default CreationBalise;
    Styles
 ========================= */
 const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: C_BG,
-  },
-
-  loadingWrap: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 24,
-  },
-
-  loadingText: {
-    marginTop: 10,
-    color: "rgba(15,23,42,0.7)",
-    fontWeight: "600",
-  },
-
+  root: { flex: 1, backgroundColor: C_BG },
+  loadingWrap: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24 },
+  loadingText: { marginTop: 10, color: "rgba(15,23,42,0.7)", fontWeight: "600" },
   header: {
     backgroundColor: C_HEADER,
     paddingHorizontal: 14,
@@ -2446,15 +2102,7 @@ const styles = StyleSheet.create({
     elevation: 6,
     zIndex: 20,
   },
-
-  headerRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 10,
-    minHeight: 44,
-  },
-
+  headerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10, minHeight: 44 },
   headerBtn: {
     width: 38,
     height: 38,
@@ -2465,14 +2113,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-
-  headerActions: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    flexShrink: 0,
-  },
-
+  headerActions: { flexDirection: "row", alignItems: "center", gap: 8, flexShrink: 0 },
   iconBtn: {
     width: 38,
     height: 38,
@@ -2483,12 +2124,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-
-  iconBtnFrozenActive: {
-    backgroundColor: C_BLUE_STRONG,
-    borderColor: "rgba(255,255,255,0.18)",
-  },
-
+  iconBtnFrozenActive: { backgroundColor: C_BLUE_STRONG, borderColor: "rgba(255,255,255,0.18)" },
   iconBtnRed: {
     width: 38,
     height: 38,
@@ -2499,11 +2135,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-
-  iconBtnDisabled: {
-    opacity: 0.45,
-  },
-
+  iconBtnDisabled: { opacity: 0.45 },
   header2: {
     backgroundColor: C_HEADER_2,
     paddingHorizontal: 12,
@@ -2515,7 +2147,6 @@ const styles = StyleSheet.create({
     borderTopColor: "rgba(255,255,255,0.08)",
     zIndex: 10,
   },
-
   header2Chip: {
     flex: 1,
     backgroundColor: "rgba(255,255,255,0.14)",
@@ -2527,7 +2158,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-
   header2ChipSmall: {
     width: 96,
     backgroundColor: "rgba(255,255,255,0.14)",
@@ -2539,73 +2169,15 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-
-  header2LabelCentered: {
-    color: "rgba(255,255,255,0.84)",
-    fontSize: 11,
-    fontWeight: "800",
-    marginBottom: 4,
-    textAlign: "center",
-  },
-
-  header2InputCentered: {
-    color: "#fff",
-    fontSize: 22,
-    fontWeight: "900",
-    paddingVertical: 0,
-    minHeight: 28,
-    width: "100%",
-    textAlign: "center",
-  },
-
-  contentZone: {
-    flex: 1,
-    backgroundColor: C_CONTENT_BG,
-    borderTopWidth: 1,
-    borderTopColor: C_CONTENT_BORDER,
-    overflow: "visible",
-  },
-
-  mainArea: {
-    flex: 1,
-    minHeight: 0,
-    overflow: "visible",
-  },
-
-  formatsSection: {
-    flex: 1,
-    paddingTop: 2,
-    overflow: "visible",
-  },
-
-  horizontalCardsContent: {
-    alignItems: "flex-start",
-    paddingTop: 0,
-    paddingBottom: 118,
-  },
-
-  cardSlot: {
-    justifyContent: "flex-start",
-    alignItems: "center",
-    overflow: "visible",
-    zIndex: 10,
-  },
-
-  emptyStateWrap: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 20,
-    paddingBottom: 86,
-  },
-
-  emptyStateText: {
-    color: C_MUTED,
-    fontSize: 19,
-    fontWeight: "800",
-    textAlign: "center",
-  },
-
+  header2LabelCentered: { color: "rgba(255,255,255,0.84)", fontSize: 11, fontWeight: "800", marginBottom: 4, textAlign: "center" },
+  header2InputCentered: { color: "#fff", fontSize: 22, fontWeight: "900", paddingVertical: 0, minHeight: 28, width: "100%", textAlign: "center" },
+  contentZone: { flex: 1, backgroundColor: C_CONTENT_BG, borderTopWidth: 1, borderTopColor: C_CONTENT_BORDER, overflow: "visible" },
+  mainArea: { flex: 1, minHeight: 0, overflow: "visible" },
+  formatsSection: { flex: 1, paddingTop: 2, overflow: "visible" },
+  horizontalCardsContent: { alignItems: "flex-start", paddingTop: 0, paddingBottom: 118 },
+  cardSlot: { justifyContent: "flex-start", alignItems: "center", overflow: "visible", zIndex: 10 },
+  emptyStateWrap: { flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 20, paddingBottom: 86 },
+  emptyStateText: { color: C_MUTED, fontSize: 19, fontWeight: "800", textAlign: "center" },
   formatCard: {
     backgroundColor: C_CARD,
     borderWidth: 1.5,
@@ -2619,48 +2191,11 @@ const styles = StyleSheet.create({
     elevation: Platform.OS === "android" ? 3 : 0,
     zIndex: 20,
   },
-
-  formatCardTopCompact: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 10,
-    minHeight: 32,
-  },
-
-  formatTitleTextCompact: {
-    color: C_TEXT,
-    fontWeight: "900",
-    fontSize: 16,
-    flex: 1,
-  },
-
-  compactHeaderRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    minHeight: 38,
-    overflow: "visible",
-    zIndex: 50,
-  },
-
-  compactHeaderTitle: {
-    color: C_TEXT,
-    fontWeight: "900",
-    fontSize: 16,
-    flexShrink: 0,
-  },
-
-  compactHeaderControls: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    minWidth: 0,
-    overflow: "visible",
-    zIndex: 60,
-  },
-
+  formatCardTopCompact: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10, minHeight: 32 },
+  formatTitleTextCompact: { color: C_TEXT, fontWeight: "900", fontSize: 16, flex: 1 },
+  compactHeaderRow: { flexDirection: "row", alignItems: "center", gap: 8, minHeight: 38, overflow: "visible", zIndex: 50 },
+  compactHeaderTitle: { color: C_TEXT, fontWeight: "900", fontSize: 16, flexShrink: 0 },
+  compactHeaderControls: { flex: 1, flexDirection: "row", alignItems: "center", gap: 6, minWidth: 0, overflow: "visible", zIndex: 60 },
   closeMiniBtnCompact: {
     width: 34,
     height: 34,
@@ -2672,17 +2207,8 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     flexShrink: 0,
   },
-
-  editorBlockCompact: {
-    marginTop: 10,
-    gap: 8,
-  },
-
-  editorBlockCompactTight: {
-    marginTop: 8,
-    gap: 6,
-  },
-
+  editorBlockCompact: { marginTop: 10, gap: 8 },
+  editorBlockCompactTight: { marginTop: 8, gap: 6 },
   cardInputCompact: {
     backgroundColor: "rgba(0,0,0,0.035)",
     borderWidth: 1,
@@ -2693,15 +2219,7 @@ const styles = StyleSheet.create({
     paddingVertical: Platform.select({ web: 12, default: 12 }),
     fontSize: 16,
   },
-
-  gridPickerWrap: {
-    flex: 1,
-    position: "relative",
-    zIndex: 9999,
-    minWidth: 0,
-    overflow: "visible",
-  },
-
+  gridPickerWrap: { flex: 1, position: "relative", zIndex: 9999, minWidth: 0, overflow: "visible" },
   gridPickerButton: {
     height: 36,
     borderRadius: 11,
@@ -2714,14 +2232,7 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     gap: 4,
   },
-
-  gridPickerButtonText: {
-    color: C_TEXT,
-    fontWeight: "800",
-    fontSize: 14,
-    flex: 1,
-  },
-
+  gridPickerButtonText: { color: C_TEXT, fontWeight: "800", fontSize: 14, flex: 1 },
   gridPickerMenu: {
     position: "absolute",
     top: 42,
@@ -2739,136 +2250,27 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 6 },
     shadowRadius: 12,
   },
-
-  gridPickerItem: {
-    paddingVertical: 8,
-    paddingHorizontal: 8,
-    borderRadius: 8,
-  },
-
-  gridPickerItemActive: {
-    backgroundColor: "rgba(37,99,235,0.10)",
-  },
-
-  gridPickerItemText: {
-    color: C_TEXT,
-    fontWeight: "700",
-    fontSize: 13,
-  },
-
-  gridPickerItemTextActive: {
-    color: C_BLUE_SOFT,
-  },
-
-  fixedContentZone: {
-    alignItems: "center",
-    justifyContent: "center",
-    overflow: "hidden",
-  },
-
-  whiteGridWrapCompact: {
-    backgroundColor: "#fff",
-    borderWidth: 1,
-    borderColor: C_BORDER,
-    borderRadius: 18,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  whiteGridRowCompact: {
-    flexDirection: "row",
-  },
-
-  whiteGridCellCompact: {
-    borderRadius: 9,
-    borderWidth: 1,
-    borderColor: "#d1d5db",
-    backgroundColor: "#fff",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  blackDotCompact: {
-    width: 12,
-    height: 12,
-    borderRadius: 999,
-    backgroundColor: "#111827",
-  },
-
-  qrActionRowCompact: {
-    alignItems: "flex-end",
-  },
-
-  generateBtnCompact: {
-    backgroundColor: C_BLUE_SOFT,
-    borderRadius: 11,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-  },
-
-  generateBtnTextCompact: {
-    color: "#fff",
-    fontWeight: "800",
-    fontSize: 14,
-  },
-
-  fakeQrWrapCompact: {
-    backgroundColor: "#fff",
-    borderWidth: 1,
-    borderColor: C_BORDER,
-    borderRadius: 14,
-    padding: 10,
-  },
-
-  fakeQrRow: {
-    flexDirection: "row",
-  },
-
-  fakeQrPixelCompact: {
-    width: 7,
-    height: 7,
-    backgroundColor: "#fff",
-  },
-
-  fakeQrPixelDark: {
-    backgroundColor: "#111827",
-  },
-
-  tableFixedWrap: {
-    backgroundColor: "#fff",
-    borderWidth: 1,
-    borderColor: C_BORDER,
-    borderRadius: 18,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  tableEditorRowCompact: {
-    flexDirection: "row",
-  },
-
-  tableCellPressable: {
-    backgroundColor: "#fff",
-    borderWidth: 1,
-    borderColor: C_BORDER,
-    borderRadius: 10,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 2,
-  },
-
-  tableCellPressableText: {
-    color: C_TEXT,
-    fontSize: 13,
-    fontWeight: "700",
-    textAlign: "center",
-  },
-
-  tableCellPressablePlaceholder: {
-    color: "rgba(15,23,42,0.35)",
-    fontWeight: "600",
-  },
-
+  gridPickerItem: { paddingVertical: 8, paddingHorizontal: 8, borderRadius: 8 },
+  gridPickerItemActive: { backgroundColor: "rgba(37,99,235,0.10)" },
+  gridPickerItemText: { color: C_TEXT, fontWeight: "700", fontSize: 13 },
+  gridPickerItemTextActive: { color: C_BLUE_SOFT },
+  fixedContentZone: { alignItems: "center", justifyContent: "center", overflow: "hidden" },
+  whiteGridWrapCompact: { backgroundColor: "#fff", borderWidth: 1, borderColor: C_BORDER, borderRadius: 18, alignItems: "center", justifyContent: "center" },
+  whiteGridRowCompact: { flexDirection: "row" },
+  whiteGridCellCompact: { borderRadius: 9, borderWidth: 1, borderColor: "#d1d5db", backgroundColor: "#fff", alignItems: "center", justifyContent: "center" },
+  blackDotCompact: { width: 12, height: 12, borderRadius: 999, backgroundColor: "#111827" },
+  qrActionRowCompact: { alignItems: "flex-end" },
+  generateBtnCompact: { backgroundColor: C_BLUE_SOFT, borderRadius: 11, paddingHorizontal: 12, paddingVertical: 8 },
+  generateBtnTextCompact: { color: "#fff", fontWeight: "800", fontSize: 14 },
+  fakeQrWrapCompact: { backgroundColor: "#fff", borderWidth: 1, borderColor: C_BORDER, borderRadius: 14, padding: 10 },
+  fakeQrRow: { flexDirection: "row" },
+  fakeQrPixelCompact: { width: 7, height: 7, backgroundColor: "#fff" },
+  fakeQrPixelDark: { backgroundColor: "#111827" },
+  tableFixedWrap: { backgroundColor: "#fff", borderWidth: 1, borderColor: C_BORDER, borderRadius: 18, alignItems: "center", justifyContent: "center" },
+  tableEditorRowCompact: { flexDirection: "row" },
+  tableCellPressable: { backgroundColor: "#fff", borderWidth: 1, borderColor: C_BORDER, borderRadius: 10, alignItems: "center", justifyContent: "center", paddingHorizontal: 2 },
+  tableCellPressableText: { color: C_TEXT, fontSize: 13, fontWeight: "700", textAlign: "center" },
+  tableCellPressablePlaceholder: { color: "rgba(15,23,42,0.35)", fontWeight: "600" },
   tableCellInputWeb: {
     backgroundColor: "#fff",
     borderWidth: 1,
@@ -2882,7 +2284,6 @@ const styles = StyleSheet.create({
     paddingVertical: 0,
     outlineStyle: "none" as any,
   },
-
   floatingEditorBar: {
     position: "absolute",
     left: 10,
@@ -2899,86 +2300,16 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
     elevation: 12,
   },
-
-  floatingEditorTop: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 8,
-    gap: 8,
-  },
-
-  floatingEditorTitle: {
-    color: C_TEXT,
-    fontWeight: "900",
-    fontSize: 15,
-    flex: 1,
-  },
-
-  floatingEditorClose: {
-    width: 30,
-    height: 30,
-    borderRadius: 10,
-    backgroundColor: "rgba(0,0,0,0.06)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  floatingEditorInput: {
-    backgroundColor: "#F8FAFC",
-    borderWidth: 1,
-    borderColor: C_BORDER,
-    borderRadius: 12,
-    color: C_TEXT,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-    fontSize: 18,
-    fontWeight: "700",
-  },
-
-  floatingEditorActions: {
-    marginTop: 10,
-    flexDirection: "row",
-    gap: 8,
-  },
-
-  floatingEditorGhostBtn: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.06)",
-    borderRadius: 12,
-    paddingVertical: 11,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  floatingEditorGhostTxt: {
-    color: C_TEXT,
-    fontWeight: "800",
-  },
-
-  floatingEditorPrimaryBtn: {
-    flex: 1,
-    backgroundColor: C_BLUE_SOFT,
-    borderRadius: 12,
-    paddingVertical: 11,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  floatingEditorPrimaryTxt: {
-    color: "#fff",
-    fontWeight: "800",
-  },
-
-  fabWrap: {
-    position: "absolute",
-    bottom: 26,
-    left: 0,
-    right: 0,
-    alignItems: "center",
-    zIndex: 5,
-  },
-
+  floatingEditorTop: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8, gap: 8 },
+  floatingEditorTitle: { color: C_TEXT, fontWeight: "900", fontSize: 15, flex: 1 },
+  floatingEditorClose: { width: 30, height: 30, borderRadius: 10, backgroundColor: "rgba(0,0,0,0.06)", alignItems: "center", justifyContent: "center" },
+  floatingEditorInput: { backgroundColor: "#F8FAFC", borderWidth: 1, borderColor: C_BORDER, borderRadius: 12, color: C_TEXT, paddingHorizontal: 12, paddingVertical: 12, fontSize: 18, fontWeight: "700" },
+  floatingEditorActions: { marginTop: 10, flexDirection: "row", gap: 8 },
+  floatingEditorGhostBtn: { flex: 1, backgroundColor: "rgba(0,0,0,0.06)", borderRadius: 12, paddingVertical: 11, alignItems: "center", justifyContent: "center" },
+  floatingEditorGhostTxt: { color: C_TEXT, fontWeight: "800" },
+  floatingEditorPrimaryBtn: { flex: 1, backgroundColor: C_BLUE_SOFT, borderRadius: 12, paddingVertical: 11, alignItems: "center", justifyContent: "center" },
+  floatingEditorPrimaryTxt: { color: "#fff", fontWeight: "800" },
+  fabWrap: { position: "absolute", bottom: 26, left: 0, right: 0, alignItems: "center", zIndex: 5 },
   fab: {
     flexDirection: "row",
     alignItems: "center",
@@ -2995,137 +2326,26 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
     elevation: 6,
   },
-
-  fabDisabled: {
-    opacity: 0.45,
-  },
-
-  fabText: {
-    color: "#233548",
-    fontWeight: "800",
-  },
-
-  paginationDots: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: 98,
-    flexDirection: "row",
-    justifyContent: "center",
-    alignItems: "center",
-    gap: 8,
-    zIndex: 5,
-  },
-
-  paginationDot: {
-    width: 9,
-    height: 9,
-    borderRadius: 999,
-    backgroundColor: "rgba(15,23,42,0.18)",
-  },
-
-  paginationDotActive: {
-    width: 22,
-    backgroundColor: C_BLUE_SOFT,
-  },
-
-  modalCenterRoot: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 18,
-  },
-
-  centerBackdrop: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(0,0,0,0.45)",
-  },
-
-  usageModalCard: {
-    width: "100%",
-    maxWidth: 620,
-    backgroundColor: "#fff",
-    borderRadius: 24,
-    padding: 18,
-    borderWidth: 1,
-    borderColor: C_BORDER,
-  },
-
-  modalTopRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 12,
-    marginBottom: 14,
-  },
-
-  modalTitle: {
-    color: C_TEXT,
-    fontSize: 20,
-    fontWeight: "900",
-    flex: 1,
-  },
-
-  modalCloseBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 12,
-    backgroundColor: "rgba(0,0,0,0.06)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  pickerEmptyText: {
-    color: C_MUTED,
-    fontWeight: "600",
-  },
-
-  pickerScrollContent: {
-    paddingBottom: 8,
-  },
-
-  pickerGrid: {
-    gap: 10,
-  },
-
-  pickerItem: {
-    backgroundColor: "#EAF3F9",
-    borderWidth: 1,
-    borderColor: "#C9D5DF",
-    borderRadius: 16,
-    padding: 16,
-  },
-
-  pickerItemRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 14,
-  },
-
-  pickerItemTitleOnly: {
-    color: C_TEXT,
-    fontWeight: "900",
-    fontSize: 18,
-    flexShrink: 1,
-  },
-
-  noUsageWrap: {
-    paddingVertical: 18,
-    alignItems: "center",
-  },
-
-  noUsageText: {
-    color: C_MUTED,
-    fontWeight: "600",
-  },
-
-  warningText: {
-    color: "#b45309",
-    fontWeight: "700",
-    lineHeight: 20,
-    marginBottom: 12,
-  },
-
+  fabDisabled: { opacity: 0.45 },
+  fabText: { color: "#233548", fontWeight: "800" },
+  paginationDots: { position: "absolute", left: 0, right: 0, bottom: 98, flexDirection: "row", justifyContent: "center", alignItems: "center", gap: 8, zIndex: 5 },
+  paginationDot: { width: 9, height: 9, borderRadius: 999, backgroundColor: "rgba(15,23,42,0.18)" },
+  paginationDotActive: { width: 22, backgroundColor: C_BLUE_SOFT },
+  modalCenterRoot: { flex: 1, alignItems: "center", justifyContent: "center", padding: 18 },
+  centerBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.45)" },
+  usageModalCard: { width: "100%", maxWidth: 620, backgroundColor: "#fff", borderRadius: 24, padding: 18, borderWidth: 1, borderColor: C_BORDER },
+  modalTopRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14 },
+  modalTitle: { color: C_TEXT, fontSize: 20, fontWeight: "900", flex: 1 },
+  modalCloseBtn: { width: 36, height: 36, borderRadius: 12, backgroundColor: "rgba(0,0,0,0.06)", alignItems: "center", justifyContent: "center" },
+  pickerEmptyText: { color: C_MUTED, fontWeight: "600" },
+  pickerScrollContent: { paddingBottom: 8 },
+  pickerGrid: { gap: 10 },
+  pickerItem: { backgroundColor: "#EAF3F9", borderWidth: 1, borderColor: "#C9D5DF", borderRadius: 16, padding: 16 },
+  pickerItemRow: { flexDirection: "row", alignItems: "center", gap: 14 },
+  pickerItemTitleOnly: { color: C_TEXT, fontWeight: "900", fontSize: 18, flexShrink: 1 },
+  noUsageWrap: { paddingVertical: 18, alignItems: "center" },
+  noUsageText: { color: C_MUTED, fontWeight: "600" },
+  warningText: { color: "#b45309", fontWeight: "700", lineHeight: 20, marginBottom: 12 },
   parcoursRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -3138,246 +2358,39 @@ const styles = StyleSheet.create({
     paddingVertical: 13,
     marginBottom: 9,
   },
-
-  parcoursRowChecked: {
-    backgroundColor: "rgba(16,185,129,0.10)",
-    borderColor: "rgba(16,185,129,0.35)",
-  },
-
-  parcoursName: {
-    flex: 1,
-    color: C_TEXT,
-    fontWeight: "700",
-  },
-
-  checkboxDark: {
-    width: 18,
-    height: 18,
-    borderRadius: 5,
-    borderWidth: 1,
-    borderColor: "rgba(0,0,0,0.3)",
-    backgroundColor: "transparent",
-  },
-
-  checkboxDarkChecked: {
-    backgroundColor: "#10b981",
-    borderColor: "#10b981",
-  },
-
-  modalActionsRow: {
-    marginTop: 12,
-    flexDirection: "row",
-    gap: 10,
-    alignItems: "center",
-  },
-
-  secondaryBtnInline: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderRadius: 12,
-    backgroundColor: "rgba(0,0,0,0.06)",
-  },
-
-  secondaryBtnTxt: {
-    color: C_TEXT,
-    fontWeight: "800",
-  },
-
-  removeFromParcoursBtn: {
-    flex: 1,
-    backgroundColor: "#ef4444",
-    paddingHorizontal: 14,
-    paddingVertical: 13,
-    borderRadius: 12,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  removeFromParcoursBtnDisabled: {
-    opacity: 0.5,
-  },
-
-  removeFromParcoursBtnTxt: {
-    color: "#fff",
-    fontWeight: "800",
-    textAlign: "center",
-  },
-
-  pressedStyle: {
-    opacity: 0.82,
-  },
-
-  fullModalRoot: {
-    flex: 1,
-    backgroundColor: "rgba(15,23,42,0.45)",
-  },
-
-  fullModalOverlay: {
-    flex: 1,
-    justifyContent: "center",
-    padding: 16,
-  },
-
-  fullModalSheet: {
-    width: "100%",
-    maxWidth: 620,
-    alignSelf: "center",
-    backgroundColor: "#fff",
-    borderRadius: 26,
-    padding: 18,
-    borderWidth: 1,
-    borderColor: C_BORDER,
-    maxHeight: "92%",
-  },
-
-  miniIconBox: {
-    width: 74,
-    height: 74,
-    borderRadius: 14,
-    backgroundColor: "#fff",
-    borderWidth: 1,
-    borderColor: "rgba(15,23,42,0.15)",
-    alignItems: "center",
-    justifyContent: "center",
-    flexDirection: "row",
-  },
-
-  miniCodeA: {
-    fontSize: 22,
-    fontWeight: "900",
-    color: "#1e293b",
-  },
-
-  miniCodek: {
-    fontSize: 20,
-    fontWeight: "900",
-    color: "#2563eb",
-    marginLeft: 1,
-    marginTop: 3,
-  },
-
-  miniCode5: {
-    fontSize: 22,
-    fontWeight: "900",
-    color: "#f59e0b",
-    marginLeft: 2,
-  },
-
-  miniCodeBang: {
-    fontSize: 22,
-    fontWeight: "900",
-    color: "#ef4444",
-    marginLeft: 2,
-  },
-
-  miniGridBox: {
-    width: 74,
-    height: 74,
-    borderRadius: 12,
-    backgroundColor: "#fff",
-    borderWidth: 1,
-    borderColor: "rgba(15,23,42,0.15)",
-    padding: 4,
-    justifyContent: "center",
-  },
-
-  miniGridRow: {
-    flexDirection: "row",
-    flex: 1,
-  },
-
-  miniGridCell: {
-    flex: 1,
-    borderWidth: 0.5,
-    borderColor: "rgba(15,23,42,0.35)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  miniGridDot: {
-    width: 9,
-    height: 9,
-    borderRadius: 999,
-    backgroundColor: "#111827",
-  },
-
-  miniQrBox: {
-    width: 74,
-    height: 74,
-    borderRadius: 12,
-    backgroundColor: "#fff",
-    borderWidth: 1,
-    borderColor: "rgba(15,23,42,0.15)",
-    padding: 6,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  miniQrRow: {
-    flexDirection: "row",
-  },
-
-  miniQrPixel: {
-    width: 5,
-    height: 5,
-    backgroundColor: "#fff",
-  },
-
-  miniQrPixelDark: {
-    backgroundColor: "#111827",
-  },
-
-  miniTableBox: {
-    width: 74,
-    height: 74,
-    borderRadius: 12,
-    backgroundColor: "#fff",
-    borderWidth: 1,
-    borderColor: "rgba(15,23,42,0.15)",
-    overflow: "hidden",
-  },
-
-  miniTableRow: {
-    flexDirection: "row",
-    flex: 1,
-  },
-
-  miniTableCell: {
-    flex: 1,
-    borderWidth: 0.5,
-    borderColor: "rgba(15,23,42,0.35)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  miniTableText: {
-    fontSize: 13,
-    fontWeight: "800",
-    color: "#1f2937",
-  },
-
-  rows3IconWrap: {
-    width: 16,
-    height: 14,
-    justifyContent: "space-between",
-  },
-
-  rows3Line: {
-    height: 2.2,
-    borderRadius: 999,
-    width: "100%",
-  },
-
-  cols3IconWrap: {
-    width: 16,
-    height: 14,
-    flexDirection: "row",
-    justifyContent: "space-between",
-  },
-
-  cols3Line: {
-    width: 2.2,
-    borderRadius: 999,
-    height: "100%",
-  },
+  parcoursRowChecked: { backgroundColor: "rgba(16,185,129,0.10)", borderColor: "rgba(16,185,129,0.35)" },
+  parcoursName: { flex: 1, color: C_TEXT, fontWeight: "700" },
+  checkboxDark: { width: 18, height: 18, borderRadius: 5, borderWidth: 1, borderColor: "rgba(0,0,0,0.3)", backgroundColor: "transparent" },
+  checkboxDarkChecked: { backgroundColor: "#10b981", borderColor: "#10b981" },
+  modalActionsRow: { marginTop: 12, flexDirection: "row", gap: 10, alignItems: "center" },
+  secondaryBtnInline: { paddingHorizontal: 16, paddingVertical: 12, borderRadius: 12, backgroundColor: "rgba(0,0,0,0.06)" },
+  secondaryBtnTxt: { color: C_TEXT, fontWeight: "800" },
+  removeFromParcoursBtn: { flex: 1, backgroundColor: "#ef4444", paddingHorizontal: 14, paddingVertical: 13, borderRadius: 12, alignItems: "center", justifyContent: "center" },
+  removeFromParcoursBtnDisabled: { opacity: 0.5 },
+  removeFromParcoursBtnTxt: { color: "#fff", fontWeight: "800", textAlign: "center" },
+  pressedStyle: { opacity: 0.82 },
+  fullModalRoot: { flex: 1, backgroundColor: "rgba(15,23,42,0.45)" },
+  fullModalOverlay: { flex: 1, justifyContent: "center", padding: 16 },
+  fullModalSheet: { width: "100%", maxWidth: 620, alignSelf: "center", backgroundColor: "#fff", borderRadius: 26, padding: 18, borderWidth: 1, borderColor: C_BORDER, maxHeight: "92%" },
+  miniIconBox: { width: 74, height: 74, borderRadius: 14, backgroundColor: "#fff", borderWidth: 1, borderColor: "rgba(15,23,42,0.15)", alignItems: "center", justifyContent: "center", flexDirection: "row" },
+  miniCodeA: { fontSize: 22, fontWeight: "900", color: "#1e293b" },
+  miniCodek: { fontSize: 20, fontWeight: "900", color: "#2563eb", marginLeft: 1, marginTop: 3 },
+  miniCode5: { fontSize: 22, fontWeight: "900", color: "#f59e0b", marginLeft: 2 },
+  miniCodeBang: { fontSize: 22, fontWeight: "900", color: "#ef4444", marginLeft: 2 },
+  miniGridBox: { width: 74, height: 74, borderRadius: 12, backgroundColor: "#fff", borderWidth: 1, borderColor: "rgba(15,23,42,0.15)", padding: 4, justifyContent: "center" },
+  miniGridRow: { flexDirection: "row", flex: 1 },
+  miniGridCell: { flex: 1, borderWidth: 0.5, borderColor: "rgba(15,23,42,0.35)", alignItems: "center", justifyContent: "center" },
+  miniGridDot: { width: 9, height: 9, borderRadius: 999, backgroundColor: "#111827" },
+  miniQrBox: { width: 74, height: 74, borderRadius: 12, backgroundColor: "#fff", borderWidth: 1, borderColor: "rgba(15,23,42,0.15)", padding: 6, alignItems: "center", justifyContent: "center" },
+  miniQrRow: { flexDirection: "row" },
+  miniQrPixel: { width: 5, height: 5, backgroundColor: "#fff" },
+  miniQrPixelDark: { backgroundColor: "#111827" },
+  miniTableBox: { width: 74, height: 74, borderRadius: 12, backgroundColor: "#fff", borderWidth: 1, borderColor: "rgba(15,23,42,0.15)", overflow: "hidden" },
+  miniTableRow: { flexDirection: "row", flex: 1 },
+  miniTableCell: { flex: 1, borderWidth: 0.5, borderColor: "rgba(15,23,42,0.35)", alignItems: "center", justifyContent: "center" },
+  miniTableText: { fontSize: 13, fontWeight: "800", color: "#1f2937" },
+  rows3IconWrap: { width: 16, height: 14, justifyContent: "space-between" },
+  rows3Line: { height: 2.2, borderRadius: 999, width: "100%" },
+  cols3IconWrap: { width: 16, height: 14, flexDirection: "row", justifyContent: "space-between" },
+  cols3Line: { width: 2.2, borderRadius: 999, height: "100%" },
 });

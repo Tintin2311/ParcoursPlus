@@ -488,12 +488,31 @@ const MesParcours: React.FC<Props> = ({
           setError(null);
         }
 
+        const { data: authData, error: authError } = await supabase.auth.getUser();
+        if (authError) throw authError;
+
+        const connectedUserId = authData.user?.id ?? null;
+        const ownerId = professeur?.user_id ?? professeur?.id ?? connectedUserId;
+
+        if (!ownerId) {
+          throw new Error("Professeur non connecté.");
+        }
+
         const [
           { data: foldersData, error: foldersError },
           { data: parcoursData, error: parcoursError },
         ] = await Promise.all([
-          supabase.from("parcours_folders").select("*").order("ordre", { ascending: true }),
-          supabase.from("parcours").select("*").order("ordre", { ascending: true }),
+          supabase
+            .from("parcours_folders")
+            .select("*")
+            .eq("user_id", ownerId)
+            .order("ordre", { ascending: true }),
+
+          supabase
+            .from("parcours")
+            .select("*")
+            .eq("user_id", ownerId)
+            .order("ordre", { ascending: true }),
         ]);
 
         if (foldersError) throw foldersError;
@@ -516,7 +535,7 @@ const MesParcours: React.FC<Props> = ({
         else setLoading(false);
       }
     },
-    [currentFolderId]
+    [currentFolderId, professeur]
   );
 
   const refreshData = useCallback(async () => {
@@ -1457,9 +1476,7 @@ const { error } = await supabase.from("parcours_folders").insert({
                 style={styles.actionRow}
               >
                 <Trash2 size={18} color={C_DANGER} />
-                <Text style={[styles.actionRowText, { color: C_DANGER }]}>
-                  Supprimer
-                </Text>
+                <Text style={[styles.actionRowText, { color: C_DANGER }]}>Supprimer</Text>
               </TouchableOpacity>
             </>
           ) : selectedItem?.type === "course" ? (
@@ -1488,9 +1505,7 @@ const { error } = await supabase.from("parcours_folders").insert({
                 style={styles.actionRow}
               >
                 <Trash2 size={18} color={C_DANGER} />
-                <Text style={[styles.actionRowText, { color: C_DANGER }]}>
-                  Supprimer
-                </Text>
+                <Text style={[styles.actionRowText, { color: C_DANGER }]}>Supprimer</Text>
               </TouchableOpacity>
             </>
           ) : null}

@@ -1,9 +1,6 @@
-import React, { useMemo, useRef, useState, useCallback } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Alert,
-  Animated,
   Modal,
-  PanResponder,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -13,818 +10,1773 @@ import {
   TouchableOpacity,
   useWindowDimensions,
   View,
-  Platform,
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { Feather } from "@expo/vector-icons";
-import Svg, { Line, Defs, LinearGradient as SvgGradient, Stop, Circle } from "react-native-svg";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import Svg, { Circle, Path } from "react-native-svg";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+type Props = {
+  carte: any;
+  onBack: () => void;
+  onOpenCarte?: (carte: any) => void;
+};
 
-type Props = { carte: any; onBack: () => void };
-type Outil = "selection" | "ajouter" | "deplacer" | "relier";
-type ConditionType = "points_total" | "reussir_parcours" | "reussir_parcours_tentatives";
+type Outil =
+  | "selection"
+  | "ajouter"
+  | "deplacer"
+  | "relier"
+  | "ciseaux"
+  | "supprimer";
 
 type Noeud = {
   id: string;
   titre: string;
   ligne: number;
   colonne: number;
-  parcoursMax: number;
   color: string;
-};
-
-type Condition = {
-  id: string;
-  type: ConditionType;
-  active: boolean;
-  valeur1: string;
-  valeur2: string;
 };
 
 type Lien = {
   id: string;
   from: string;
   to: string;
-  conditions: Condition[];
 };
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+type PageArbre = {
+  id: string;
+  nom: string;
+  noeuds: Noeud[];
+  liens: Lien[];
+};
 
-const CELL_W = 160;
-const CELL_H = 140;
-const GRID_LEFT = 50;
-const GRID_TOP = 50;
-const NODE_W = CELL_W - 20;
-const NODE_H = CELL_H - 20;
+type PendingAction = "move" | "add" | null;
 
-const NODE_COLORS = [
-  "#6366F1", "#EC4899", "#F59E0B", "#10B981", "#3B82F6",
-  "#8B5CF6", "#EF4444", "#14B8A6", "#F97316", "#06B6D4",
+const PAGE_BG = "#EDF2F6";
+const HEADER_BG = "#1F5B86";
+const HEADER_ICON_BG = "#2D6C97";
+const HEADER_TITLE = "#FFFFFF";
+const CONTENT_BG = "#EEF3F7";
+const CONTENT_BORDER = "#C6D2DC";
+const CARD_BG = "#FFFFFF";
+const CARD_BORDER = "#C9D5DF";
+const CARD_TITLE = "#233548";
+const CARD_SUBTITLE = "#5F7386";
+const TEXT_BG = "#E8F1FD";
+const DANGER = "#EF4444";
+const SUCCESS = "#22C55E";
+const WARNING = "#F59E0B";
+
+const COLORS = [
+  "#1F5B86",
+  "#2D6C97",
+  "#38BDF8",
+  "#22C55E",
+  "#F59E0B",
+  "#A855F7",
+  "#EF4444",
+  "#14B8A6",
 ];
 
-const CONDITIONS_DEFAUT: Condition[] = [
-  { id: "points_total", type: "points_total", active: false, valeur1: "", valeur2: "" },
-  { id: "reussir_parcours", type: "reussir_parcours", active: false, valeur1: "", valeur2: "" },
-  { id: "reussir_parcours_tentatives", type: "reussir_parcours_tentatives", active: false, valeur1: "", valeur2: "" },
-];
-
-const TOOL_CONFIG: { id: Outil; icon: string; feather?: string; label: string }[] = [
-  { id: "ajouter", icon: "＋", label: "Ajouter" },
-  { id: "selection", feather: "mouse-pointer", icon: "", label: "Sélection" },
-  { id: "deplacer", feather: "move", icon: "", label: "Déplacer" },
-  { id: "relier", feather: "git-merge", icon: "", label: "Relier" },
-];
-
-function uid() { return Math.random().toString(36).slice(2, 10); }
-
-function conditionLabel(c: Condition) {
-  if (c.type === "points_total") return `⭐ ${c.valeur1 || "?"} pts`;
-  if (c.type === "reussir_parcours") return `✅ ${c.valeur1 || "?"} parcours`;
-  return `🎯 ${c.valeur1 || "?"} / ${c.valeur2 || "?"} tentatives`;
+function uid() {
+  return Math.random().toString(36).slice(2, 10);
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
+function createDefaultPage(): PageArbre {
+  return {
+    id: uid(),
+    nom: "Barème 1",
+    noeuds: [],
+    liens: [],
+  };
+}
 
-export default function CreationArbreDeCompetence({ carte, onBack }: Props) {
+export default function CreationArbreDeCompetence({
+  carte,
+  onBack,
+  onOpenCarte,
+}: Props) {
   const { width, height } = useWindowDimensions();
   const isPhone = width < 760;
 
-  // State
-  const [outil, setOutil] = useState<Outil>("selection");
-  const [infoVisible, setInfoVisible] = useState(false);
-  const [noeuds, setNoeuds] = useState<Noeud[]>([
-    { id: "depart", titre: "Départ", ligne: 0, colonne: 2, parcoursMax: 0, color: "#6366F1" },
-  ]);
-  const [liens, setLiens] = useState<Lien[]>([]);
-  const [selectedId, setSelectedId] = useState("depart");
-  const [linkStartId, setLinkStartId] = useState<string | null>(null);
-  const [addModalVisible, setAddModalVisible] = useState(false);
-  const [editNodeVisible, setEditNodeVisible] = useState(false);
-  const [nodeName, setNodeName] = useState("");
-  const [nodeParcoursMax, setNodeParcoursMax] = useState("0");
-  const [conditionModalLink, setConditionModalLink] = useState<Lien | null>(null);
-  const [conditionsDraft, setConditionsDraft] = useState<Condition[]>([]);
+  const CELL_W = isPhone ? 96 : 160;
+  const CELL_H = isPhone ? 88 : 140;
+  const ROW_GAP = isPhone ? 70 : 120;
+  const GRID_LEFT = isPhone ? 20 : 50;
+  const GRID_TOP = isPhone ? 20 : 50;
+  const NODE_W = isPhone ? 82 : CELL_W - 20;
+  const NODE_H = isPhone ? 72 : CELL_H - 20;
 
-  const dragStart = useRef<{ id: string; ligne: number; colonne: number } | null>(null);
+  const ligneToY = (ligne: number) => GRID_TOP + ligne * (CELL_H + ROW_GAP);
+
+  const storageKey = `arbre_competence_${carte?.id || "default"}`;
+
+  const [outil, setOutil] = useState<Outil>("selection");
+  const [pages, setPages] = useState<PageArbre[]>([createDefaultPage()]);
+  const [pageId, setPageId] = useState("");
+  const [selectedId, setSelectedId] = useState("");
+  const [moveSourceId, setMoveSourceId] = useState<string | null>(null);
+  const [moveTarget, setMoveTarget] = useState<{
+    ligne: number;
+    colonne: number;
+  } | null>(null);
+  const [pendingAddTarget, setPendingAddTarget] = useState<{
+    ligne: number;
+    colonne: number;
+  } | null>(null);
+  const [pendingAction, setPendingAction] = useState<PendingAction>(null);
+  const [linkStartId, setLinkStartId] = useState<string | null>(null);
+  const [selectedLinkId, setSelectedLinkId] = useState<string | null>(null);
+  const [renameVisible, setRenameVisible] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const [deleteConfirmVisible, setDeleteConfirmVisible] = useState(false);
+  const [deleteNodeVisible, setDeleteNodeVisible] = useState(false);
+  const [nodeToDelete, setNodeToDelete] = useState<Noeud | null>(null);
+  const [infoVisible, setInfoVisible] = useState(false);
+  const [linkError, setLinkError] = useState("");
+  const [breakWarningVisible, setBreakWarningVisible] = useState(false);
+  const [breakWillRemoveLinks, setBreakWillRemoveLinks] = useState<Lien[]>([]);
+  const [quitWarningVisible, setQuitWarningVisible] = useState(false);
+  const [unlinkedWarningIds, setUnlinkedWarningIds] = useState<string[]>([]);
+
+  const loadedRef = useRef(false);
   const colorIndex = useRef(1);
 
-  // Computed
-  const selectedNode = useMemo(() => noeuds.find((n) => n.id === selectedId) || null, [noeuds, selectedId]);
-  const maxLigne = Math.max(5, ...noeuds.map((n) => n.ligne + 2));
-  const maxColonne = Math.max(6, ...noeuds.map((n) => n.colonne + 2));
-  const canvasW = Math.max(maxColonne * CELL_W + GRID_LEFT + 80, isPhone ? 900 : width - 180);
-  const canvasH = Math.max(maxLigne * CELL_H + GRID_TOP + 80, height - 160);
+  useEffect(() => {
+    let mounted = true;
 
-  const pos = (n: Noeud) => ({ x: GRID_LEFT + n.colonne * CELL_W, y: GRID_TOP + n.ligne * CELL_H });
-  const nodeCenter = (n: Noeud) => {
+    async function load() {
+      try {
+        const raw = await AsyncStorage.getItem(storageKey);
+        if (!mounted) return;
+
+        if (raw) {
+          const data = JSON.parse(raw);
+
+          if (Array.isArray(data?.pages) && data.pages.length > 0) {
+            const fixedPages: PageArbre[] = data.pages.map((p: any) => ({
+              ...p,
+              liens: Array.isArray(p.liens) ? p.liens : [],
+              noeuds:
+                Array.isArray(p.noeuds) && p.noeuds.length > 0
+                  ? p.noeuds
+                  : createDefaultPage().noeuds,
+            }));
+
+            setPages(fixedPages);
+            setPageId(data.pageId || fixedPages[0].id);
+            setSelectedId(
+              data.selectedId || fixedPages[0]?.noeuds?.[0]?.id || ""
+            );
+          } else {
+            const first = createDefaultPage();
+            setPages([first]);
+            setPageId(first.id);
+            setSelectedId(first.noeuds[0]?.id || "");
+          }
+        } else {
+          const first = createDefaultPage();
+          setPages([first]);
+          setPageId(first.id);
+          setSelectedId(first.noeuds[0]?.id || "");
+        }
+      } catch {
+        const first = createDefaultPage();
+        setPages([first]);
+        setPageId(first.id);
+        setSelectedId(first.noeuds[0]?.id || "");
+      } finally {
+        loadedRef.current = true;
+      }
+    }
+
+    load();
+
+    return () => {
+      mounted = false;
+    };
+  }, [storageKey]);
+
+  useEffect(() => {
+    if (!loadedRef.current) return;
+
+    AsyncStorage.setItem(
+      storageKey,
+      JSON.stringify({
+        pages,
+        pageId,
+        selectedId,
+      })
+    ).catch(() => {});
+  }, [pages, pageId, selectedId, storageKey]);
+
+  const pageActive = useMemo(
+    () => pages.find((p) => p.id === pageId) || pages[0],
+    [pages, pageId]
+  );
+
+  const noeuds = pageActive?.noeuds || [];
+  const liens = pageActive?.liens || [];
+
+  const selectedNode = useMemo(
+    () => noeuds.find((n) => n.id === selectedId) || noeuds[0] || null,
+    [noeuds, selectedId]
+  );
+
+  const moveSource = useMemo(
+    () => noeuds.find((n) => n.id === moveSourceId) || null,
+    [noeuds, moveSourceId]
+  );
+
+  const selectedLink = useMemo(
+    () => liens.find((l) => l.id === selectedLinkId) || null,
+    [liens, selectedLinkId]
+  );
+
+  const unlinkedNodes = useMemo(() => {
+    if (noeuds.length <= 1) return [];
+
+    return noeuds.filter(
+      (node) => !liens.some((lien) => lien.from === node.id || lien.to === node.id)
+    );
+  }, [noeuds, liens]);
+
+  const hintText = useMemo(() => {
+    if (breakWarningVisible || quitWarningVisible) return "Valide ou annule avant de continuer";
+
+    if (outil === "relier") {
+      return linkStartId ? "Clique sur une carte voisine" : "Clique sur la carte de départ";
+    }
+
+    if (outil === "supprimer") return "Clique sur une carte à supprimer";
+
+    if (outil === "ciseaux") {
+      return selectedLink ? "Lien sélectionné : coupe en bas" : "Clique sur un trait";
+    }
+
+    if (outil === "deplacer") {
+      return moveSource ? "Clique sur une case puis confirme" : "Clique sur la carte à déplacer";
+    }
+
+    if (outil === "ajouter") return "Clique sur une case libre pour ajouter une carte";
+
+    return "Clique sur une carte pour l'ouvrir";
+  }, [
+    breakWarningVisible,
+    quitWarningVisible,
+    outil,
+    linkStartId,
+    selectedLink,
+    moveSource,
+  ]);
+
+  const maxLigne = Math.max(6, ...noeuds.map((n) => n.ligne + 3));
+  const maxColonne = Math.max(7, ...noeuds.map((n) => n.colonne + 3));
+
+  const canvasW = Math.max(
+    maxColonne * CELL_W + GRID_LEFT + 80,
+    isPhone ? 760 : width - 110
+  );
+
+  const canvasH = Math.max(
+    ligneToY(maxLigne) + CELL_H + 80,
+    isPhone ? height - 165 : height - 150
+  );
+
+  const isBlockingPromptOpen =
+    breakWarningVisible ||
+    quitWarningVisible ||
+    renameVisible ||
+    deleteConfirmVisible ||
+    deleteNodeVisible;
+
+  const canScrollCanvas =
+    !breakWarningVisible && !quitWarningVisible && !renameVisible && !deleteConfirmVisible;
+
+  const updateCurrentPage = (updater: (page: PageArbre) => PageArbre) => {
+    setPages((old) =>
+      old.map((p) => (p.id === pageActive.id ? updater(p) : p))
+    );
+  };
+
+  const pos = (n: Noeud) => ({
+    x: GRID_LEFT + n.colonne * CELL_W,
+    y: ligneToY(n.ligne),
+  });
+
+  const pointsConnexion = (n: Noeud) => {
     const p = pos(n);
-    return { x: p.x + NODE_W / 2, y: p.y + NODE_H / 2 };
+
+    return {
+      haut: { x: p.x + NODE_W / 2, y: p.y },
+      bas: { x: p.x + NODE_W / 2, y: p.y + NODE_H },
+      gauche: { x: p.x, y: p.y + NODE_H / 2 },
+      droite: { x: p.x + NODE_W, y: p.y + NODE_H / 2 },
+    };
+  };
+
+  const getNoeudAt = (
+    ligne: number,
+    colonne: number,
+    liste: Noeud[] = noeuds,
+    ignoreIds: string[] = []
+  ) => {
+    return (
+      liste.find(
+        (n) =>
+          !ignoreIds.includes(n.id) &&
+          n.ligne === ligne &&
+          n.colonne === colonne
+      ) || null
+    );
+  };
+
+  const cartesEntre = (
+    from: Noeud,
+    to: Noeud,
+    liste: Noeud[] = noeuds
+  ) => {
+    if (from.ligne === to.ligne) {
+      const minCol = Math.min(from.colonne, to.colonne);
+      const maxCol = Math.max(from.colonne, to.colonne);
+
+      for (let c = minCol + 1; c < maxCol; c += 1) {
+        const carte = getNoeudAt(from.ligne, c, liste, [from.id, to.id]);
+        if (carte) return true;
+      }
+
+      return false;
+    }
+
+    if (from.colonne === to.colonne) {
+      const minLigne = Math.min(from.ligne, to.ligne);
+      const maxLigne = Math.max(from.ligne, to.ligne);
+
+      for (let l = minLigne + 1; l < maxLigne; l += 1) {
+        const carte = getNoeudAt(l, from.colonne, liste, [from.id, to.id]);
+        if (carte) return true;
+      }
+
+      return false;
+    }
+
+    return false;
+  };
+
+  const lienValideDansListe = (
+    from: Noeud,
+    to: Noeud,
+    liste: Noeud[] = noeuds
+  ) => {
+    const dl = Math.abs(from.ligne - to.ligne);
+    const dc = Math.abs(from.colonne - to.colonne);
+
+    if (dl === 0 && dc === 0) return false;
+
+    if (from.ligne === to.ligne) {
+      return !cartesEntre(from, to, liste);
+    }
+
+    if (from.colonne === to.colonne) {
+      return !cartesEntre(from, to, liste);
+    }
+
+    if (dl === 1) return true;
+
+    return false;
+  };
+
+  const peutRelier = (from: Noeud, to: Noeud) => {
+    return lienValideDansListe(from, to, noeuds);
+  };
+
+  const connectorPoints = (from: Noeud, to: Noeud) => {
+    const pf = pointsConnexion(from);
+    const pt = pointsConnexion(to);
+
+    if (from.ligne === to.ligne) {
+      if (from.colonne < to.colonne) {
+        return { a: pf.droite, b: pt.gauche, mode: "horizontal" as const };
+      }
+
+      return { a: pf.gauche, b: pt.droite, mode: "horizontal" as const };
+    }
+
+    if (from.ligne < to.ligne) {
+      return { a: pf.bas, b: pt.haut, mode: "vertical" as const };
+    }
+
+    return { a: pf.haut, b: pt.bas, mode: "vertical" as const };
+  };
+
+  const creerCheminLien = (from: Noeud, to: Noeud) => {
+    const { a, b, mode } = connectorPoints(from, to);
+
+    if (mode === "horizontal") {
+      const midX = (a.x + b.x) / 2;
+      return {
+        a,
+        b,
+        d: `M ${a.x} ${a.y} L ${midX} ${a.y} L ${midX} ${b.y} L ${b.x} ${b.y}`,
+      };
+    }
+
+    const midY = (a.y + b.y) / 2;
+    return {
+      a,
+      b,
+      d: `M ${a.x} ${a.y} L ${a.x} ${midY} L ${b.x} ${midY} L ${b.x} ${b.y}`,
+    };
   };
 
   const placeOccupee = (ligne: number, colonne: number) =>
     noeuds.some((n) => n.ligne === ligne && n.colonne === colonne);
 
-  const trouverColonneLibre = (ligne: number) => {
-    for (let c = 0; c < 30; c++) if (!placeOccupee(ligne, c)) return c;
-    return 0;
+  const peutAjouterSurCase = (ligne: number, colonne: number) => {
+    return !placeOccupee(ligne, colonne);
   };
 
-  // Actions
-  const ajouterDossier = (placement: "meme" | "dessus") => {
-    const base = selectedNode || noeuds[0];
-    const ligne = placement === "dessus" ? Math.max(0, base.ligne - 1) : base.ligne;
-    const color = NODE_COLORS[colorIndex.current % NODE_COLORS.length];
-    colorIndex.current++;
+  const segmentCoupeRectangle = (
+    a: { x: number; y: number },
+    b: { x: number; y: number },
+    rect: { left: number; right: number; top: number; bottom: number }
+  ) => {
+    const marge = 8;
+    const left = rect.left + marge;
+    const right = rect.right - marge;
+    const top = rect.top + marge;
+    const bottom = rect.bottom - marge;
+
+    if (Math.abs(a.x - b.x) < 0.5) {
+      const x = a.x;
+      const minY = Math.min(a.y, b.y);
+      const maxY = Math.max(a.y, b.y);
+
+      return x >= left && x <= right && maxY >= top && minY <= bottom;
+    }
+
+    if (Math.abs(a.y - b.y) < 0.5) {
+      const y = a.y;
+      const minX = Math.min(a.x, b.x);
+      const maxX = Math.max(a.x, b.x);
+
+      return y >= top && y <= bottom && maxX >= left && minX <= right;
+    }
+
+    return false;
+  };
+
+  const lienTraverseCase = (lien: Lien, ligne: number, colonne: number) => {
+    const from = noeuds.find((n) => n.id === lien.from);
+    const to = noeuds.find((n) => n.id === lien.to);
+
+    if (!from || !to) return true;
+
+    const { a, b } = creerCheminLien(from, to);
+    const rect = {
+      left: GRID_LEFT + colonne * CELL_W,
+      right: GRID_LEFT + colonne * CELL_W + NODE_W,
+      top: ligneToY(ligne),
+      bottom: ligneToY(ligne) + NODE_H,
+    };
+
+    if (from.ligne === to.ligne) {
+      const midX = (a.x + b.x) / 2;
+      return (
+        segmentCoupeRectangle(a, { x: midX, y: a.y }, rect) ||
+        segmentCoupeRectangle({ x: midX, y: a.y }, { x: midX, y: b.y }, rect) ||
+        segmentCoupeRectangle({ x: midX, y: b.y }, b, rect)
+      );
+    }
+
+    const midY = (a.y + b.y) / 2;
+    return (
+      segmentCoupeRectangle(a, { x: a.x, y: midY }, rect) ||
+      segmentCoupeRectangle({ x: a.x, y: midY }, { x: b.x, y: midY }, rect) ||
+      segmentCoupeRectangle({ x: b.x, y: midY }, b, rect)
+    );
+  };
+
+  const liensCoupesParAjout = (ligne: number, colonne: number) => {
+    const noeudTemporaire: Noeud = {
+      id: "__temp_add__",
+      titre: "temp",
+      ligne,
+      colonne,
+      color: "#FFFFFF",
+    };
+
+    const listeSimulee = [...noeuds, noeudTemporaire];
+
+    return liens.filter((l) => {
+      const from = listeSimulee.find((n) => n.id === l.from);
+      const to = listeSimulee.find((n) => n.id === l.to);
+
+      if (!from || !to) return true;
+
+      if (!lienValideDansListe(from, to, listeSimulee)) return true;
+
+      return lienTraverseCase(l, ligne, colonne);
+    });
+  };
+
+  const ajouterNoeudSurCase = (
+    ligne: number,
+    colonne: number,
+    options?: { skipWarning?: boolean }
+  ) => {
+    if (!peutAjouterSurCase(ligne, colonne)) return;
+
+    const liensCasses = liensCoupesParAjout(ligne, colonne);
+
+    if (liensCasses.length > 0 && !options?.skipWarning) {
+      setPendingAction("add");
+      setPendingAddTarget({ ligne, colonne });
+      setBreakWillRemoveLinks(liensCasses);
+      setBreakWarningVisible(true);
+      return;
+    }
+
+    const color = COLORS[colorIndex.current % COLORS.length];
+    colorIndex.current += 1;
 
     const nouveau: Noeud = {
-      id: uid(), titre: `Dossier ${noeuds.length}`,
-      ligne, colonne: trouverColonneLibre(ligne),
-      parcoursMax: 5, color,
+      id: uid(),
+      titre: `Carte ${noeuds.length + 1}`,
+      ligne,
+      colonne,
+      color,
     };
-    setNoeuds((old) => [...old, nouveau]);
-    setSelectedId(nouveau.id);
-    setAddModalVisible(false);
-    setOutil("selection");
-  };
 
-  const ouvrirEditNode = () => {
-    if (!selectedNode) return;
-    setNodeName(selectedNode.titre);
-    setNodeParcoursMax(String(selectedNode.parcoursMax ?? 0));
-    setEditNodeVisible(true);
-  };
-
-  const sauverNode = () => {
-    if (!selectedNode) return;
-    setNoeuds((old) => old.map((n) =>
-      n.id === selectedNode.id
-        ? { ...n, titre: nodeName.trim() || "Dossier", parcoursMax: Math.max(0, Number(nodeParcoursMax || 0)) }
-        : n
-    ));
-    setEditNodeVisible(false);
-  };
-
-  const supprimerNode = () => {
-    if (!selectedNode || selectedNode.id === "depart") return;
-    setNoeuds((old) => old.filter((n) => n.id !== selectedNode.id));
-    setLiens((old) => old.filter((l) => l.from !== selectedNode.id && l.to !== selectedNode.id));
-    setSelectedId("depart");
-  };
-
-  const cliquerNoeud = (node: Noeud) => {
-    if (outil === "relier") {
-      if (!linkStartId) { setLinkStartId(node.id); setSelectedId(node.id); return; }
-      if (linkStartId !== node.id) {
-        const existe = liens.some((l) => l.from === linkStartId && l.to === node.id);
-        if (!existe) setLiens((old) => [...old, { id: uid(), from: linkStartId, to: node.id, conditions: [] }]);
-      }
-      setSelectedId(node.id); setLinkStartId(null); return;
-    }
-    setSelectedId(node.id);
-  };
-
-  const deplacerVers = (id: string, ligne: number, colonne: number) => {
-    const node = noeuds.find((n) => n.id === id);
-    if (!node) return;
-    const tL = Math.max(0, ligne), tC = Math.max(0, colonne);
-    const autre = noeuds.find((n) => n.id !== id && n.ligne === tL && n.colonne === tC);
-    setNoeuds((old) => old.map((n) => {
-      if (n.id === id) return { ...n, ligne: tL, colonne: tC };
-      if (autre && n.id === autre.id) return { ...n, ligne: node.ligne, colonne: node.colonne };
-      return n;
+    updateCurrentPage((p) => ({
+      ...p,
+      noeuds: [...p.noeuds, nouveau],
     }));
+
+    setSelectedId(nouveau.id);
+    setPendingAction(null);
+    setPendingAddTarget(null);
+    setBreakWarningVisible(false);
+    setBreakWillRemoveLinks([]);
   };
 
-  const createPanResponder = useCallback((node: Noeud) =>
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => outil === "deplacer",
-      onMoveShouldSetPanResponder: () => outil === "deplacer",
-      onPanResponderGrant: () => {
-        dragStart.current = { id: node.id, ligne: node.ligne, colonne: node.colonne };
-        setSelectedId(node.id);
-      },
-      onPanResponderRelease: (_, g) => {
-        if (!dragStart.current) return;
-        const dc = Math.round(g.dx / CELL_W);
-        const dl = Math.round(g.dy / CELL_H);
-        deplacerVers(dragStart.current.id, dragStart.current.ligne + dl, dragStart.current.colonne + dc);
-        dragStart.current = null;
-      },
-    }), [outil, noeuds]);
+  const simulerNoeudsApresDeplacement = (
+    node: Noeud,
+    futureLigne: number,
+    futureColonne: number
+  ) => {
+    const autre = noeuds.find(
+      (n) =>
+        n.id !== node.id &&
+        n.ligne === futureLigne &&
+        n.colonne === futureColonne
+    );
 
-  // Phone move helper
-  const deplacerMobile = (dir: "up" | "down" | "left" | "right") => {
-    if (!selectedNode) return;
-    const { ligne, colonne } = selectedNode;
-    const dl = dir === "up" ? -1 : dir === "down" ? 1 : 0;
-    const dc = dir === "left" ? -1 : dir === "right" ? 1 : 0;
-    deplacerVers(selectedNode.id, ligne + dl, colonne + dc);
-  };
+    return noeuds.map((n) => {
+      if (n.id === node.id) {
+        return { ...n, ligne: futureLigne, colonne: futureColonne };
+      }
 
-  // Conditions
-  const ouvrirConditions = (lien: Lien) => {
-    const merged = CONDITIONS_DEFAUT.map((base) => {
-      const existing = lien.conditions.find((c) => c.type === base.type);
-      return existing || { ...base, id: uid() };
+      if (autre && n.id === autre.id) {
+        return { ...n, ligne: node.ligne, colonne: node.colonne };
+      }
+
+      return n;
     });
-    setConditionModalLink(lien);
-    setConditionsDraft(merged);
   };
 
-  const maxParcoursDepuisLien = useMemo(() => {
-    if (!conditionModalLink) return 0;
-    const from = noeuds.find((n) => n.id === conditionModalLink.from);
-    return from?.parcoursMax ?? 0;
-  }, [conditionModalLink, noeuds]);
+  const deplacementVaCasserLiens = (
+    node: Noeud,
+    futureLigne: number,
+    futureColonne: number
+  ) => {
+    const noeudsSimules = simulerNoeudsApresDeplacement(
+      node,
+      futureLigne,
+      futureColonne
+    );
 
-  const clampParcours = (value: string) => {
-    const n = Math.max(0, Math.min(maxParcoursDepuisLien || 999, Number(value || 0)));
-    return Number.isFinite(n) ? String(n) : "";
+    const autre = noeuds.find(
+      (n) =>
+        n.id !== node.id &&
+        n.ligne === futureLigne &&
+        n.colonne === futureColonne
+    );
+
+    return liens.filter((l) => {
+      const from = noeudsSimules.find((n) => n.id === l.from);
+      const to = noeudsSimules.find((n) => n.id === l.to);
+
+      if (!from || !to) return true;
+
+      const ancienneFrom = noeuds.find((n) => n.id === l.from);
+      const ancienneTo = noeuds.find((n) => n.id === l.to);
+
+      const fromABouge =
+        ancienneFrom &&
+        (ancienneFrom.ligne !== from.ligne ||
+          ancienneFrom.colonne !== from.colonne);
+
+      const toABouge =
+        ancienneTo &&
+        (ancienneTo.ligne !== to.ligne || ancienneTo.colonne !== to.colonne);
+
+      if ((fromABouge || toABouge) && !lienValideDansListe(from, to, noeudsSimules)) {
+        return true;
+      }
+
+      const lienEstCeluiDuNoeudDeplace = l.from === node.id || l.to === node.id;
+      if (!lienEstCeluiDuNoeudDeplace && lienTraverseCase(l, futureLigne, futureColonne)) {
+        return true;
+      }
+
+      if (autre) {
+        const lienEstCeluiDeLaCarteEchangee = l.from === autre.id || l.to === autre.id;
+        if (!lienEstCeluiDeLaCarteEchangee && lienTraverseCase(l, node.ligne, node.colonne)) {
+          return true;
+        }
+      }
+
+      return false;
+    });
   };
 
-  const toggleCondition = (type: ConditionType) =>
-    setConditionsDraft((old) => old.map((c) => c.type === type ? { ...c, active: !c.active } : c));
+  const appliquerDeplacement = (cible: { ligne: number; colonne: number }) => {
+    if (!moveSource) return;
 
-  const majCondition = (type: ConditionType, patch: Partial<Condition>) =>
-    setConditionsDraft((old) => old.map((c) => c.type === type ? { ...c, ...patch } : c));
+    const tL = Math.max(0, cible.ligne);
+    const tC = Math.max(0, cible.colonne);
 
-  const sauverConditions = () => {
-    if (!conditionModalLink) return;
-    setLiens((old) => old.map((l) =>
-      l.id === conditionModalLink.id ? { ...l, conditions: conditionsDraft.filter((c) => c.active) } : l
-    ));
-    setConditionModalLink(null);
+    const autre = noeuds.find(
+      (n) => n.id !== moveSource.id && n.ligne === tL && n.colonne === tC
+    );
+
+    updateCurrentPage((p) => ({
+      ...p,
+      noeuds: p.noeuds.map((n) => {
+        if (n.id === moveSource.id) {
+          return { ...n, ligne: tL, colonne: tC };
+        }
+
+        if (autre && n.id === autre.id) {
+          return {
+            ...n,
+            ligne: moveSource.ligne,
+            colonne: moveSource.colonne,
+          };
+        }
+
+        return n;
+      }),
+    }));
+
+    setSelectedId(moveSource.id);
+    setMoveSourceId(null);
+    setMoveTarget(null);
+    setPendingAction(null);
+    setBreakWarningVisible(false);
+    setBreakWillRemoveLinks([]);
   };
 
-  const supprimerLien = () => {
-    if (!conditionModalLink) return;
-    setLiens((old) => old.filter((l) => l.id !== conditionModalLink.id));
-    setConditionModalLink(null);
+  const confirmerDeplacement = (
+    targetOverride?: { ligne: number; colonne: number },
+    force = false
+  ) => {
+    const cible = targetOverride || moveTarget;
+    if (!moveSource || !cible) return;
+
+    const tL = Math.max(0, cible.ligne);
+    const tC = Math.max(0, cible.colonne);
+
+    const liensCasses = deplacementVaCasserLiens(moveSource, tL, tC);
+
+    if (liensCasses.length > 0 && !force) {
+      setPendingAction("move");
+      setBreakWillRemoveLinks(liensCasses);
+      setBreakWarningVisible(true);
+      return;
+    }
+
+    appliquerDeplacement({ ligne: tL, colonne: tC });
   };
 
-  const sauvegarder = () =>
-    Alert.alert("💾 Sauvegarde", "Prochaine étape : sauvegarde Supabase de cet arbre.");
+  const annulerWarning = () => {
+    setBreakWarningVisible(false);
+    setBreakWillRemoveLinks([]);
+    setPendingAction(null);
+    setPendingAddTarget(null);
+    setMoveTarget(null);
+  };
 
-  const lienFromNode = conditionModalLink ? noeuds.find((n) => n.id === conditionModalLink.from) : null;
-  const lienToNode = conditionModalLink ? noeuds.find((n) => n.id === conditionModalLink.to) : null;
+  const validerWarning = () => {
+    updateCurrentPage((p) => ({
+      ...p,
+      liens: p.liens.filter(
+        (l) => !breakWillRemoveLinks.some((x) => x.id === l.id)
+      ),
+    }));
 
-  // ─── Render ───────────────────────────────────────────────────────────────
+    if (pendingAction === "add" && pendingAddTarget) {
+      const cible = pendingAddTarget;
+      setBreakWarningVisible(false);
+      setBreakWillRemoveLinks([]);
+      setPendingAction(null);
+      setPendingAddTarget(null);
+      ajouterNoeudSurCase(cible.ligne, cible.colonne, { skipWarning: true });
+      return;
+    }
+
+    if (pendingAction === "move" && moveTarget) {
+      const cible = moveTarget;
+      setBreakWarningVisible(false);
+      setBreakWillRemoveLinks([]);
+      setPendingAction(null);
+      appliquerDeplacement(cible);
+    }
+  };
+
+  const gererClicNoeud = (node: Noeud) => {
+    if (isBlockingPromptOpen) return;
+    if (outil === "ciseaux") return;
+
+    if (outil === "supprimer") {
+      setSelectedId(node.id);
+      setSelectedLinkId(null);
+
+      const liensAssocies = liens.filter(
+        (lien) =>
+          lien.from === node.id ||
+          lien.to === node.id ||
+          lienTraverseCase(lien, node.ligne, node.colonne)
+      );
+
+      setBreakWillRemoveLinks(liensAssocies);
+      setNodeToDelete(node);
+      setDeleteNodeVisible(true);
+      return;
+    }
+
+    if (outil === "ajouter") {
+      setSelectedId(node.id);
+      return;
+    }
+
+    if (outil === "selection") {
+      setSelectedId(node.id);
+
+      onOpenCarte?.({
+        ...node,
+        nom: node.titre,
+        arbre_page_id: pageActive.id,
+        arbre_page_nom: pageActive.nom,
+        carte_parent: carte,
+      });
+
+      return;
+    }
+
+    if (outil === "deplacer") {
+      if (!moveSourceId) {
+        setSelectedId(node.id);
+        setMoveSourceId(node.id);
+      } else if (moveSourceId !== node.id) {
+        const cible = { ligne: node.ligne, colonne: node.colonne };
+        setMoveTarget(cible);
+        confirmerDeplacement(cible);
+      }
+
+      return;
+    }
+
+    if (outil === "relier") {
+      setSelectedId(node.id);
+      setLinkError("");
+
+      if (!linkStartId) {
+        setLinkStartId(node.id);
+        return;
+      }
+
+      if (linkStartId === node.id) {
+        setLinkStartId(null);
+        return;
+      }
+
+      const fromNode = noeuds.find((n) => n.id === linkStartId);
+      const toNode = node;
+
+      if (!fromNode) {
+        setLinkStartId(null);
+        return;
+      }
+
+      if (!peutRelier(fromNode, toNode)) {
+        const memeLigne = fromNode.ligne === toNode.ligne;
+        const memeColonne = fromNode.colonne === toNode.colonne;
+
+        if (memeLigne) {
+          setLinkError(
+            "Impossible de relier ces 2 cartes : une carte se situe entre elles sur la ligne."
+          );
+        } else if (memeColonne) {
+          setLinkError(
+            "Impossible de relier ces 2 cartes : une carte se situe entre elles sur la colonne."
+          );
+        } else {
+          setLinkError(
+            "Impossible de relier ces 2 cartes : elles ne sont pas voisines."
+          );
+        }
+
+        setTimeout(() => setLinkError(""), 2400);
+        setLinkStartId(null);
+        return;
+      }
+
+      const exists = liens.some(
+        (l) =>
+          (l.from === linkStartId && l.to === node.id) ||
+          (l.from === node.id && l.to === linkStartId)
+      );
+
+      if (!exists) {
+        const newLink: Lien = {
+          id: uid(),
+          from: linkStartId,
+          to: node.id,
+        };
+
+        updateCurrentPage((p) => ({
+          ...p,
+          liens: [...(p.liens || []), newLink],
+        }));
+      }
+
+      setLinkStartId(null);
+    }
+  };
+
+  const couperLienSelectionne = () => {
+    if (!selectedLinkId || isBlockingPromptOpen) return;
+
+    updateCurrentPage((p) => ({
+      ...p,
+      liens: p.liens.filter((l) => l.id !== selectedLinkId),
+    }));
+
+    setSelectedLinkId(null);
+  };
+
+  const supprimerNoeud = (node: Noeud) => {
+    updateCurrentPage((p) => ({
+      ...p,
+      noeuds: p.noeuds.filter((n) => n.id !== node.id),
+      liens: p.liens.filter(
+        (l) =>
+          l.from !== node.id &&
+          l.to !== node.id &&
+          !lienTraverseCase(l, node.ligne, node.colonne)
+      ),
+    }));
+
+    const autreNoeud = noeuds.find((n) => n.id !== node.id);
+
+    if (autreNoeud) {
+      setSelectedId(autreNoeud.id);
+    }
+
+    setDeleteNodeVisible(false);
+    setNodeToDelete(null);
+  };
+
+  const creerPage = () => {
+    if (isBlockingPromptOpen) return;
+
+    const newPage = {
+      ...createDefaultPage(),
+      nom: `Barème ${pages.length + 1}`,
+    };
+
+    setPages((old) => [...old, newPage]);
+    setPageId(newPage.id);
+    setSelectedId("");
+  };
+
+  const supprimerPage = () => {
+    if (pages.length <= 1) return;
+
+    const remaining = pages.filter((p) => p.id !== pageActive.id);
+
+    setPages(remaining);
+    setPageId(remaining[0].id);
+    setSelectedId("");
+  };
+
+  const validerRenommerPage = () => {
+    const clean = renameValue.trim() || "Barème";
+
+    updateCurrentPage((p) => ({
+      ...p,
+      nom: clean,
+    }));
+
+    setRenameVisible(false);
+  };
+
+  function demanderRetour() {
+    if (deleteNodeVisible) {
+      setDeleteNodeVisible(false);
+      setNodeToDelete(null);
+      setBreakWillRemoveLinks([]);
+      return;
+    }
+
+    if (breakWarningVisible) {
+      annulerWarning();
+      return;
+    }
+
+    if (quitWarningVisible) {
+      setQuitWarningVisible(false);
+      setUnlinkedWarningIds([]);
+      return;
+    }
+
+    if (renameVisible) {
+      setRenameVisible(false);
+      return;
+    }
+
+    if (deleteConfirmVisible) {
+      setDeleteConfirmVisible(false);
+      return;
+    }
+
+    if (unlinkedNodes.length > 0) {
+      setUnlinkedWarningIds(unlinkedNodes.map((n) => n.id));
+      setQuitWarningVisible(true);
+      return;
+    }
+
+    onBack();
+  }
+
+  function changeOutil(next: Outil) {
+    if (isBlockingPromptOpen) return;
+
+    setOutil(next);
+    setMoveSourceId(null);
+    setMoveTarget(null);
+    setPendingAddTarget(null);
+    setPendingAction(null);
+    setLinkStartId(null);
+    setSelectedLinkId(null);
+    setLinkError("");
+  }
+
+  const renderLiensSVG = (interactive: boolean) => {
+    const orderedLiens = [...liens].sort((a, b) => {
+      const aDelete =
+        deleteNodeVisible &&
+        !!nodeToDelete &&
+        (a.from === nodeToDelete.id ||
+          a.to === nodeToDelete.id ||
+          lienTraverseCase(a, nodeToDelete.ligne, nodeToDelete.colonne) ||
+          breakWillRemoveLinks.some((x) => x.id === a.id));
+      const bDelete =
+        deleteNodeVisible &&
+        !!nodeToDelete &&
+        (b.from === nodeToDelete.id ||
+          b.to === nodeToDelete.id ||
+          lienTraverseCase(b, nodeToDelete.ligne, nodeToDelete.colonne) ||
+          breakWillRemoveLinks.some((x) => x.id === b.id));
+
+      if (aDelete && !bDelete) return 1;
+      if (!aDelete && bDelete) return -1;
+      if (a.id === selectedLinkId) return 1;
+      if (b.id === selectedLinkId) return -1;
+      return 0;
+    });
+
+    return (
+      <Svg
+        width={canvasW}
+        height={canvasH}
+        style={[
+          StyleSheet.absoluteFill,
+          interactive ? { zIndex: 20 } : { zIndex: 5 },
+        ]}
+        pointerEvents={interactive && !isBlockingPromptOpen ? "auto" : "none"}
+      >
+        {orderedLiens.map((lien) => {
+          const from = noeuds.find((n) => n.id === lien.from);
+          const to = noeuds.find((n) => n.id === lien.to);
+
+          if (!from || !to) return null;
+
+          const { a, b, d } = creerCheminLien(from, to);
+          const isSelected = selectedLinkId === lien.id;
+          const deleteTargetId = deleteNodeVisible
+            ? nodeToDelete?.id || selectedId
+            : null;
+          const isDeleteTargetLink =
+            !!deleteTargetId &&
+            (lien.from === deleteTargetId ||
+              lien.to === deleteTargetId ||
+              (!!nodeToDelete &&
+                lienTraverseCase(
+                  lien,
+                  nodeToDelete.ligne,
+                  nodeToDelete.colonne
+                )));
+          const willBreak =
+            (breakWarningVisible &&
+              breakWillRemoveLinks.some((x) => x.id === lien.id)) ||
+            (deleteNodeVisible &&
+              (isDeleteTargetLink ||
+                breakWillRemoveLinks.some((x) => x.id === lien.id)));
+
+          if (interactive) {
+            return (
+              <Path
+                key={`hit-${lien.id}`}
+                d={d}
+                stroke="rgba(255,0,0,0.001)"
+                strokeWidth={34}
+                fill="none"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                onPress={() => {
+                  if (!isBlockingPromptOpen) setSelectedLinkId(lien.id);
+                }}
+              />
+            );
+          }
+
+          return (
+            <React.Fragment key={lien.id}>
+              <Path
+                d={d}
+                stroke="rgba(15,23,42,0.18)"
+                strokeWidth={isSelected || willBreak ? 11 : 9}
+                fill="none"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                opacity={isSelected || willBreak ? 0.75 : 0.45}
+              />
+              <Path
+                d={d}
+                stroke={isSelected || willBreak ? DANGER : SUCCESS}
+                strokeWidth={isSelected || willBreak ? 6 : 5}
+                fill="none"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                opacity={1}
+              />
+              <Path
+                d={d}
+                stroke={isSelected || willBreak ? "#FCA5A5" : "#BBF7D0"}
+                strokeWidth={2}
+                fill="none"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                opacity={isSelected || willBreak ? 1 : 0.75}
+              />
+              <Circle
+                cx={a.x}
+                cy={a.y}
+                r={isSelected || willBreak ? 6 : 5}
+                fill={isSelected || willBreak ? DANGER : SUCCESS}
+                opacity={1}
+              />
+              <Circle
+                cx={b.x}
+                cy={b.y}
+                r={isSelected || willBreak ? 6 : 5}
+                fill={isSelected || willBreak ? DANGER : SUCCESS}
+                opacity={1}
+              />
+            </React.Fragment>
+          );
+        })}
+      </Svg>
+    );
+  };
+
+  const renderDeleteLinksOverlay = () => {
+    if (!deleteNodeVisible) return null;
+
+    const deleteTargetId = nodeToDelete?.id || selectedId;
+    if (!deleteTargetId) return null;
+
+    const liensASupprimer = liens.filter(
+      (lien) =>
+        lien.from === deleteTargetId ||
+        lien.to === deleteTargetId ||
+        (!!nodeToDelete &&
+          lienTraverseCase(lien, nodeToDelete.ligne, nodeToDelete.colonne)) ||
+        breakWillRemoveLinks.some((x) => x.id === lien.id)
+    );
+
+    if (liensASupprimer.length === 0) return null;
+
+    return (
+      <Svg
+        width={canvasW}
+        height={canvasH}
+        style={[StyleSheet.absoluteFill, S.deleteLinksSvg]}
+        pointerEvents="none"
+      >
+        {liensASupprimer.map((lien) => {
+          const from = noeuds.find((n) => n.id === lien.from);
+          const to = noeuds.find((n) => n.id === lien.to);
+
+          if (!from || !to) return null;
+
+          const { d } = creerCheminLien(from, to);
+
+          return (
+            <React.Fragment key={`delete-overlay-${lien.id}`}>
+              <Path
+                d={d}
+                stroke="rgba(127,29,29,0.35)"
+                strokeWidth={8}
+                fill="none"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                opacity={0.9}
+              />
+              <Path
+                d={d}
+                stroke={DANGER}
+                strokeWidth={5}
+                fill="none"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                opacity={1}
+              />
+              <Path
+                d={d}
+                stroke="#FCA5A5"
+                strokeWidth={1.5}
+                fill="none"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                opacity={0.9}
+              />
+            </React.Fragment>
+          );
+        })}
+      </Svg>
+    );
+  };
+
+  const renderTools = () => (
+    <>
+      {(
+        [
+          ["ajouter", "＋", "Ajouter", "#1F5B86"],
+          ["selection", "mouse-pointer", "Sélection", "#1F5B86"],
+          ["deplacer", "move", "Déplacer", "#1F5B86"],
+          ["relier", "git-merge", "Relier", "#1F5B86"],
+          ["supprimer", "slash", "Supprimer", "#1F5B86"],
+        ] as any[]
+      ).map(([id, icon, label, color]) => (
+        <TouchableOpacity
+          key={id}
+          style={[S.toolBtn, outil === id && S.toolBtnActive]}
+          onPress={() => changeOutil(id)}
+          activeOpacity={0.85}
+          disabled={isBlockingPromptOpen}
+        >
+          {id === "ajouter" ? (
+            <Text
+              style={[
+                S.toolIcon,
+                { color: outil === id ? HEADER_TITLE : color },
+              ]}
+            >
+              {icon}
+            </Text>
+          ) : (
+            <Feather
+              name={icon}
+              size={isPhone ? 17 : 20}
+              color={outil === id ? HEADER_TITLE : color}
+            />
+          )}
+
+          <Text
+            style={[
+              S.toolLabel,
+              { color: outil === id ? HEADER_TITLE : color },
+            ]}
+          >
+            {label}
+          </Text>
+        </TouchableOpacity>
+      ))}
+
+      <TouchableOpacity
+        style={[S.toolBtn, outil === "ciseaux" && S.toolBtnActive]}
+        onPress={() => changeOutil("ciseaux")}
+        activeOpacity={0.85}
+        disabled={isBlockingPromptOpen}
+      >
+        <Feather
+          name="scissors"
+          size={isPhone ? 17 : 20}
+          color={outil === "ciseaux" ? HEADER_TITLE : HEADER_BG}
+        />
+
+        <Text style={[S.toolLabel, outil === "ciseaux" && S.toolLabelActive]}>
+          Ciseaux
+        </Text>
+      </TouchableOpacity>
+    </>
+  );
 
   return (
     <SafeAreaView style={S.safe}>
-      {/* Background */}
-      <LinearGradient colors={["#0F0C29", "#302B63", "#24243E"]} style={StyleSheet.absoluteFill} />
-
-      {/* Decorative dots */}
-      <View style={S.dots} pointerEvents="none">
-        {[...Array(30)].map((_, i) => (
-          <View
-            key={i}
-            style={[S.dot, {
-              left: `${(i * 37) % 100}%`,
-              top: `${(i * 53) % 100}%`,
-              opacity: 0.04 + (i % 5) * 0.02,
-              width: 2 + (i % 4),
-              height: 2 + (i % 4),
-            }]}
-          />
-        ))}
-      </View>
-
-      {/* ── TOP BAR ── */}
       <View style={S.topBar}>
-        <TouchableOpacity onPress={onBack} style={S.backBtn} activeOpacity={0.8}>
-          <Feather name="chevron-left" size={20} color="#E2E8F0" />
-          <Text style={S.backText}>Retour</Text>
+        <TouchableOpacity
+          onPress={demanderRetour}
+          style={S.backBtn}
+          disabled={false}
+          activeOpacity={0.9}
+        >
+          <Feather name="arrow-left" size={20} color={HEADER_TITLE} />
         </TouchableOpacity>
 
         <View style={S.titleBox}>
-          <Text style={S.titleMain}>Arbre de compétence</Text>
-          <View style={S.titleBadge}>
-            <Text style={S.titleBadgeText}>{carte?.nom || "Carte sans nom"}</Text>
-          </View>
+          <Text style={S.titleMain}>Arbre de compétences</Text>
+          <Text style={S.titleSub} numberOfLines={1}>
+            {carte?.nom || carte?.titre || "Carte de compétence"}
+          </Text>
         </View>
 
-        <TouchableOpacity onPress={() => setInfoVisible(true)} style={S.iconBtn} activeOpacity={0.8}>
-          <Feather name="help-circle" size={20} color="#A5B4FC" />
-        </TouchableOpacity>
-
-        <TouchableOpacity onPress={sauvegarder} style={S.saveBtn} activeOpacity={0.8}>
-          <Feather name="save" size={17} color="white" />
-          <Text style={S.saveBtnText}>Sauver</Text>
+        <TouchableOpacity
+          style={S.infoBtn}
+          disabled={isBlockingPromptOpen}
+          onPress={() => setInfoVisible(true)}
+          activeOpacity={0.9}
+        >
+          <Feather name="info" size={18} color={HEADER_TITLE} />
         </TouchableOpacity>
       </View>
 
-      {/* ── BODY ── */}
-      <View style={S.body}>
-        {/* ── TOOLS BAR ── */}
-        <View style={S.toolsBar}>
-          {TOOL_CONFIG.map((tool) => (
-            <TouchableOpacity
-              key={tool.id}
-              style={[S.toolBtn, outil === tool.id && S.toolBtnActive]}
-              onPress={() => {
-                if (tool.id === "ajouter") { setOutil("ajouter"); setAddModalVisible(true); }
-                else { setOutil(tool.id); setLinkStartId(null); }
-              }}
-              activeOpacity={0.8}
+      <View style={S.pagesBar}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={S.pagesScroll}
+        >
+          {pages.map((p) => {
+            const active = p.id === pageActive.id;
+
+            return (
+              <TouchableOpacity
+                key={p.id}
+                style={[S.pageChip, active && S.pageChipActive]}
+                disabled={isBlockingPromptOpen}
+                onPress={() => {
+                  setPageId(p.id);
+                  setSelectedId(p.noeuds[0]?.id || "");
+                }}
+              >
+                <Text
+                  style={[S.pageChipText, active && S.pageChipTextActive]}
+                >
+                  {p.nom}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+
+          <TouchableOpacity
+            style={S.pageAddBtn}
+            onPress={creerPage}
+            disabled={isBlockingPromptOpen}
+          >
+            <Feather name="plus" size={16} color={HEADER_TITLE} />
+          </TouchableOpacity>
+        </ScrollView>
+
+        <TouchableOpacity
+          style={S.pageActionBtn}
+          disabled={isBlockingPromptOpen}
+          onPress={() => {
+            setRenameValue(pageActive?.nom || "");
+            setRenameVisible(true);
+          }}
+        >
+          <Feather name="edit-2" size={14} color={HEADER_BG} />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[S.pageActionBtn, pages.length <= 1 && { opacity: 0.35 }]}
+          onPress={() => pages.length > 1 && setDeleteConfirmVisible(true)}
+          disabled={pages.length <= 1 || isBlockingPromptOpen}
+        >
+          <Feather name="trash-2" size={14} color={DANGER} />
+        </TouchableOpacity>
+      </View>
+
+      {isPhone && (
+        <>
+          <View style={S.mobileToolsBar}>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              showsVerticalScrollIndicator={false}
+              bounces={false}
+              alwaysBounceVertical={false}
+              directionalLockEnabled
+              nestedScrollEnabled={false}
+              scrollEventThrottle={16}
+              style={S.mobileToolsHorizontalScroll}
+              contentContainerStyle={S.mobileToolsScroll}
             >
-              {tool.feather ? (
-                <Feather name={tool.feather as any} size={20} color={outil === tool.id ? "#1E1B4B" : "#A5B4FC"} />
-              ) : (
-                <Text style={[S.toolIcon, outil === tool.id && { color: "#1E1B4B" }]}>{tool.icon}</Text>
-              )}
-              <Text style={[S.toolLabel, outil === tool.id && { color: "#1E1B4B" }]}>{tool.label}</Text>
-            </TouchableOpacity>
-          ))}
-
-          {/* Link indicator */}
-          {outil === "relier" && (
-            <View style={S.linkStatus}>
-              <View style={[S.linkDot, { backgroundColor: linkStartId ? "#10B981" : "#6366F1" }]} />
-              <Text style={S.linkStatusText}>
-                {linkStartId ? "→ 2ème" : "1er nœud"}
-              </Text>
-            </View>
-          )}
-
-          {/* Stats */}
-          <View style={S.toolStats}>
-            <Text style={S.toolStatN}>{noeuds.length}</Text>
-            <Text style={S.toolStatL}>nœuds</Text>
-            <Text style={S.toolStatN}>{liens.length}</Text>
-            <Text style={S.toolStatL}>liens</Text>
+              {renderTools()}
+            </ScrollView>
           </View>
+
+          <View style={S.inlineHintBar}>
+            <Text style={S.inlineHintText}>{hintText}</Text>
+          </View>
+        </>
+      )}
+
+      {!isPhone && (
+        <View style={S.inlineHintBarDesktop}>
+          <Text style={S.inlineHintText}>{hintText}</Text>
         </View>
+      )}
 
-        {/* ── CANVAS ── */}
+      <View style={S.body}>
+        {!isPhone && (
+          <View style={S.toolsBar}>
+            {renderTools()}
+
+            <View style={S.toolStats}>
+              <Text style={S.toolStatN}>{noeuds.length}</Text>
+              <Text style={S.toolStatL}>cartes</Text>
+              <Text style={S.toolStatN}>{liens.length}</Text>
+              <Text style={S.toolStatL}>liens</Text>
+            </View>
+          </View>
+        )}
+
         <View style={S.canvasWrap}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false}
-            contentContainerStyle={{ width: canvasW }}>
-            <ScrollView showsVerticalScrollIndicator={false}
-              contentContainerStyle={{ width: canvasW, height: canvasH }}>
-              <View style={[S.canvas, { width: canvasW, height: canvasH }]}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{ width: canvasW }}
+            scrollEnabled={canScrollCanvas}
+          >
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={{ width: canvasW, height: canvasH }}
+              scrollEnabled={canScrollCanvas}
+            >
+              <View style={[S.canvas, { width: canvasW, height: canvasH }]}> 
+                {renderLiensSVG(false)}
+                {deleteNodeVisible && renderDeleteLinksOverlay()}
+                {outil === "ciseaux" && renderLiensSVG(true)}
 
-                {/* Grid dots */}
                 {Array.from({ length: maxLigne + 1 }).map((_, l) =>
-                  Array.from({ length: maxColonne + 1 }).map((__, c) => (
-                    <View key={`${l}-${c}`} style={[S.gridDot, {
-                      left: GRID_LEFT + c * CELL_W - 3,
-                      top: GRID_TOP + l * CELL_H - 3,
-                    }]} />
-                  ))
-                )}
+                  Array.from({ length: maxColonne + 1 }).map((__, c) => {
+                    const occupied = placeOccupee(l, c);
 
-                {/* Grid cells highlight for drop target */}
-                {outil === "deplacer" && Array.from({ length: maxLigne + 1 }).map((_, l) =>
-                  Array.from({ length: maxColonne + 1 }).map((__, c) => (
-                    !placeOccupee(l, c) && (
-                      <View key={`cell-${l}-${c}`} style={[S.gridCellEmpty, {
-                        left: GRID_LEFT + c * CELL_W,
-                        top: GRID_TOP + l * CELL_H,
-                        width: NODE_W,
-                        height: NODE_H,
-                      }]} />
-                    )
-                  ))
-                )}
+                    const canAdd =
+                      !isBlockingPromptOpen &&
+                      outil === "ajouter" &&
+                      peutAjouterSurCase(l, c);
 
-                {/* SVG Lines */}
-                <Svg style={StyleSheet.absoluteFill} pointerEvents="none">
-                  <Defs>
-                    <SvgGradient id="lineGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                      <Stop offset="0%" stopColor="#6366F1" stopOpacity="0.8" />
-                      <Stop offset="100%" stopColor="#10B981" stopOpacity="0.8" />
-                    </SvgGradient>
-                  </Defs>
-                  {liens.map((lien) => {
-                    const from = noeuds.find((n) => n.id === lien.from);
-                    const to = noeuds.find((n) => n.id === lien.to);
-                    if (!from || !to) return null;
-                    const a = nodeCenter(from), b = nodeCenter(to);
+                    const canMoveTarget =
+                      !isBlockingPromptOpen &&
+                      outil === "deplacer" &&
+                      !!moveSource &&
+                      !(moveSource.ligne === l && moveSource.colonne === c);
+
+                    const activeCell = canAdd || canMoveTarget;
+                    const addWouldBreak =
+                      canAdd && liensCoupesParAjout(l, c).length > 0;
+
                     return (
-                      <React.Fragment key={lien.id}>
-                        {/* Shadow */}
-                        <Line x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-                          stroke="#000" strokeWidth="10" strokeOpacity="0.3" strokeLinecap="round" />
-                        {/* Main */}
-                        <Line x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-                          stroke="url(#lineGrad)" strokeWidth="5" strokeLinecap="round"
-                          strokeDasharray={lien.conditions.length === 0 ? "10,6" : undefined} />
-                        {/* Dots at ends */}
-                        <Circle cx={a.x} cy={a.y} r="7" fill="#6366F1" />
-                        <Circle cx={b.x} cy={b.y} r="7" fill="#10B981" />
-                      </React.Fragment>
+                      <TouchableOpacity
+                        key={`${l}-${c}`}
+                        activeOpacity={activeCell ? 0.7 : 1}
+                        disabled={!activeCell}
+                        onPress={() => {
+                          if (canAdd) {
+                            ajouterNoeudSurCase(l, c);
+                            return;
+                          }
+
+                          if (canMoveTarget) {
+                            const cible = { ligne: l, colonne: c };
+                            setMoveTarget(cible);
+                            confirmerDeplacement(cible);
+                          }
+                        }}
+                        style={[
+                          S.gridCell,
+                          {
+                            left: GRID_LEFT + c * CELL_W,
+                            top: ligneToY(l),
+                            width: NODE_W,
+                            height: NODE_H,
+                          },
+                          occupied && S.gridCellOccupied,
+                          canAdd && S.gridCellAdd,
+                          addWouldBreak && S.gridCellAddDanger,
+                          canMoveTarget && S.gridCellMove,
+                          moveTarget?.ligne === l &&
+                            moveTarget?.colonne === c &&
+                            S.gridCellChosen,
+                        ]}
+                      >
+                        {canAdd && (
+                          <Text
+                            style={[
+                              S.gridAddText,
+                              addWouldBreak && S.gridAddTextDanger,
+                            ]}
+                          >
+                            ＋
+                          </Text>
+                        )}
+
+                        {canMoveTarget && !occupied && (
+                          <Text style={S.gridMoveText}>ici</Text>
+                        )}
+                      </TouchableOpacity>
                     );
-                  })}
-                </Svg>
+                  })
+                )}
 
-                {/* Link bubbles */}
-                {liens.map((lien) => {
-                  const from = noeuds.find((n) => n.id === lien.from);
-                  const to = noeuds.find((n) => n.id === lien.to);
-                  if (!from || !to) return null;
-                  const a = nodeCenter(from), b = nodeCenter(to);
-                  const hasConditions = lien.conditions.length > 0;
-                  const label = hasConditions ? lien.conditions.map(conditionLabel).join(" • ") : "Définir conditions";
-
-                  return (
-                    <TouchableOpacity
-                      key={lien.id}
-                      onPress={() => ouvrirConditions(lien)}
-                      style={[S.linkBubble, {
-                        left: (a.x + b.x) / 2 - 72,
-                        top: (a.y + b.y) / 2 - 16,
-                        borderColor: hasConditions ? "#10B981" : "#6366F1",
-                      }]}
-                      activeOpacity={0.85}
-                    >
-                      <Text style={S.lockIcon}>{hasConditions ? "🔒" : "+"}</Text>
-                      <Text numberOfLines={1} style={[S.linkBubbleText, { color: hasConditions ? "#10B981" : "#A5B4FC" }]}>
-                        {label}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-
-                {/* Nodes */}
                 {noeuds.map((node) => {
                   const p = pos(node);
                   const selected = selectedId === node.id;
-                  const isStart = linkStartId === node.id;
-                  const pan = createPanResponder(node);
-                  const isDepart = node.id === "depart";
+                  const isMoveSource = moveSourceId === node.id;
+                  const isLinkStart = linkStartId === node.id;
+                  const isDeleteTarget = deleteNodeVisible && nodeToDelete?.id === node.id;
+                  const isUnlinkedWarning =
+                    quitWarningVisible && unlinkedWarningIds.includes(node.id);
+
+                  const bgColor = isMoveSource
+                    ? WARNING
+                    : isLinkStart
+                    ? SUCCESS
+                    : selected
+                    ? node.color
+                    : CARD_BG;
+
+                  const borderColor = isUnlinkedWarning
+                    ? DANGER
+                    : isDeleteTarget
+                    ? "#FCA5A5"
+                    : isMoveSource
+                    ? "#FCD34D"
+                    : isLinkStart
+                    ? "#86EFAC"
+                    : selected
+                    ? HEADER_BG
+                    : CARD_BORDER;
+
+                  const textColor = selected || isMoveSource || isLinkStart || isUnlinkedWarning ? HEADER_TITLE : CARD_TITLE;
 
                   return (
-                    <TouchableOpacity
+                    <Pressable
                       key={node.id}
-                      {...pan.panHandlers}
-                      onPress={() => cliquerNoeud(node)}
-                      activeOpacity={0.9}
-                      style={[S.node, {
-                        left: p.x, top: p.y,
-                        width: NODE_W, height: NODE_H,
-                      }]}
+                      onPress={() => gererClicNoeud(node)}
+                      disabled={isBlockingPromptOpen}
+                      style={[
+                        S.node,
+                        {
+                          left: p.x,
+                          top: p.y,
+                          width: NODE_W,
+                          height: NODE_H,
+                          backgroundColor: isUnlinkedWarning ? DANGER : bgColor,
+                          borderColor,
+                        },
+                        selected && S.nodeSelected,
+                        isMoveSource && S.nodeMoveSource,
+                        isLinkStart && S.nodeLinkStart,
+                        isDeleteTarget && S.nodeDeleteTarget,
+                        isUnlinkedWarning && S.nodeUnlinkedWarning,
+                      ]}
                     >
-                      {/* Glow */}
-                      {selected && (
-                        <View style={[S.nodeGlow, { backgroundColor: node.color }]} />
-                      )}
-
-                      {/* Card */}
                       <LinearGradient
-                        colors={selected
-                          ? [node.color, `${node.color}CC`]
-                          : isStart
-                          ? ["#065F46", "#047857"]
-                          : ["#1E1B4B", "#2D2A5E"]}
-                        style={S.nodeCard}
-                        start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
-                      >
-                        {/* Top accent */}
-                        <View style={[S.nodeAccent, { backgroundColor: node.color }]} />
+                        colors={["rgba(255,255,255,0.20)", "rgba(255,255,255,0)"]}
+                        style={StyleSheet.absoluteFill}
+                        pointerEvents="none"
+                      />
 
-                        {/* Icon area */}
-                        <View style={[S.nodeIconBox, { borderColor: `${node.color}60` }]}>
-                          <Text style={S.nodeEmoji}>{isDepart ? "🏁" : "🗂️"}</Text>
+                      <View pointerEvents="none" style={S.nodeContent}>
+                        <View
+                          style={[
+                            S.nodeIconBox,
+                            {
+                              borderColor: selected || isMoveSource || isLinkStart ? "rgba(255,255,255,0.75)" : TEXT_BG,
+                              backgroundColor: selected || isMoveSource || isLinkStart ? "rgba(255,255,255,0.16)" : TEXT_BG,
+                            },
+                          ]}
+                        >
+                          <Text style={S.nodeEmoji}>🧩</Text>
                         </View>
 
-                        <Text numberOfLines={2} style={S.nodeTitle}>{node.titre}</Text>
+                        <Text numberOfLines={2} style={[S.nodeTitle, { color: textColor }]}> 
+                          {node.titre}
+                        </Text>
 
-                        {!isDepart && (
-                          <View style={[S.nodeCountBadge, { backgroundColor: `${node.color}30` }]}>
-                            <Text style={[S.nodeCountText, { color: node.color }]}>
-                              {node.parcoursMax} parcours
-                            </Text>
-                          </View>
-                        )}
-
-                        {isStart && (
-                          <View style={S.linkingBadge}>
-                            <Text style={S.linkingBadgeText}>ORIGIN</Text>
-                          </View>
-                        )}
-
-                        {/* Selection ring */}
-                        {selected && (
-                          <View style={[S.selectedRing, { borderColor: node.color }]} />
-                        )}
-                      </LinearGradient>
-                    </TouchableOpacity>
+                        {isMoveSource && <Text style={S.badge}>À déplacer</Text>}
+                        {isLinkStart && <Text style={S.badge}>Départ lien</Text>}
+                      </View>
+                    </Pressable>
                   );
                 })}
               </View>
             </ScrollView>
           </ScrollView>
         </View>
-
-        {/* ── RIGHT PANEL (tablet/desktop only) ── */}
-        {!isPhone && (
-          <View style={S.rightPanel}>
-            <Text style={S.panelHeading}>Sélection</Text>
-
-            {selectedNode ? (
-              <>
-                <View style={[S.panelNodePreview, { borderColor: selectedNode.color }]}>
-                  <Text style={S.panelNodeEmoji}>{selectedNode.id === "depart" ? "🏁" : "🗂️"}</Text>
-                  <View style={{ flex: 1 }}>
-                    <Text style={S.panelNodeName}>{selectedNode.titre}</Text>
-                    {selectedNode.id !== "depart" && (
-                      <Text style={[S.panelNodeSub, { color: selectedNode.color }]}>
-                        {selectedNode.parcoursMax} parcours
-                      </Text>
-                    )}
-                  </View>
-                </View>
-
-                <TouchableOpacity style={S.panelBtn} onPress={ouvrirEditNode} activeOpacity={0.8}>
-                  <Feather name="edit-2" size={15} color="#A5B4FC" style={{ marginRight: 8 }} />
-                  <Text style={S.panelBtnText}>Modifier le dossier</Text>
-                </TouchableOpacity>
-
-                {outil === "deplacer" && (
-                  <View style={S.moveArrows}>
-                    <Text style={S.moveLabel}>Déplacer</Text>
-                    <View style={S.arrowRow}>
-                      <View style={{ width: 44 }} />
-                      <TouchableOpacity style={S.arrowBtn} onPress={() => deplacerMobile("up")}>
-                        <Feather name="arrow-up" size={18} color="white" />
-                      </TouchableOpacity>
-                      <View style={{ width: 44 }} />
-                    </View>
-                    <View style={S.arrowRow}>
-                      <TouchableOpacity style={S.arrowBtn} onPress={() => deplacerMobile("left")}>
-                        <Feather name="arrow-left" size={18} color="white" />
-                      </TouchableOpacity>
-                      <View style={[S.arrowBtn, { backgroundColor: "transparent" }]} />
-                      <TouchableOpacity style={S.arrowBtn} onPress={() => deplacerMobile("right")}>
-                        <Feather name="arrow-right" size={18} color="white" />
-                      </TouchableOpacity>
-                    </View>
-                    <View style={S.arrowRow}>
-                      <View style={{ width: 44 }} />
-                      <TouchableOpacity style={S.arrowBtn} onPress={() => deplacerMobile("down")}>
-                        <Feather name="arrow-down" size={18} color="white" />
-                      </TouchableOpacity>
-                      <View style={{ width: 44 }} />
-                    </View>
-                  </View>
-                )}
-
-                <TouchableOpacity
-                  style={[S.panelDanger, selectedNode.id === "depart" && { opacity: 0.3 }]}
-                  onPress={supprimerNode}
-                  disabled={selectedNode.id === "depart"}
-                  activeOpacity={0.8}
-                >
-                  <Feather name="trash-2" size={15} color="#F87171" style={{ marginRight: 8 }} />
-                  <Text style={S.panelDangerText}>Supprimer</Text>
-                </TouchableOpacity>
-              </>
-            ) : (
-              <Text style={S.panelEmpty}>Aucun nœud sélectionné</Text>
-            )}
-
-            {/* Hint */}
-            <View style={S.hintBox}>
-              <Text style={S.hintTitle}>
-                {outil === "selection" ? "🖱️ Sélection" :
-                 outil === "deplacer" ? "✋ Déplacement" :
-                 outil === "relier" ? "🔗 Liaison" : "➕ Ajout"}
-              </Text>
-              <Text style={S.hintText}>
-                {outil === "deplacer"
-                  ? "Glisse un nœud pour le déplacer. Les nœuds s'échangent si la case est prise."
-                  : outil === "relier"
-                  ? linkStartId
-                    ? "Clique maintenant sur le nœud d'arrivée."
-                    : "Clique sur le nœud de départ du lien."
-                  : outil === "ajouter"
-                  ? "Clique sur + pour ajouter un dossier."
-                  : "Clique sur un nœud pour le sélectionner."}
-              </Text>
-            </View>
-          </View>
-        )}
       </View>
 
-      {/* Phone: move arrows when deplacer tool */}
-      {isPhone && outil === "deplacer" && selectedNode && (
-        <View style={S.phoneArrows}>
-          <View style={S.arrowRow}>
-            <View style={{ width: 44 }} />
-            <TouchableOpacity style={S.arrowBtn} onPress={() => deplacerMobile("up")}>
-              <Feather name="arrow-up" size={18} color="white" />
-            </TouchableOpacity>
+      {!!linkError && !breakWarningVisible && (
+        <View style={S.toast}>
+          <Text style={S.toastText}>{linkError}</Text>
+        </View>
+      )}
+
+      {outil === "ciseaux" && selectedLink && !breakWarningVisible && (
+        <View style={S.cutOverlay}>
+          <Text style={S.cutOverlayText}>Lien sélectionné</Text>
+
+          <TouchableOpacity style={S.cutCancelBtn} onPress={() => setSelectedLinkId(null)}>
+            <Text style={S.cutCancelText}>Annuler</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={S.cutConfirmBtn} onPress={couperLienSelectionne}>
+            <Text style={S.cutConfirmText}>Couper</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {quitWarningVisible && (
+        <View style={S.blockingLayer} pointerEvents="auto">
+          <View style={S.breakWarningBar}>
+            <View style={S.breakWarningTextBox}>
+              <Text style={S.breakWarningTitle}>Attention : une carte n'est pas reliée.</Text>
+              <Text style={S.breakWarningText}>
+                {unlinkedNodes.length > 1
+                  ? `${unlinkedNodes.length} cartes ne sont pas reliées. Elles sont affichées en rouge. Êtes-vous certain de vouloir quitter ?`
+                  : `Une carte n'est pas reliée. Elle est affichée en rouge. Êtes-vous certain de vouloir quitter ?`}
+              </Text>
+            </View>
+
+            <View style={S.breakWarningActions}>
+              <TouchableOpacity
+                style={S.breakCancelBtn}
+                onPress={() => {
+                  setQuitWarningVisible(false);
+                  setUnlinkedWarningIds([]);
+                }}
+              >
+                <Text style={S.breakCancelText}>Annuler</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={S.breakConfirmBtn} onPress={onBack}>
+                <Text style={S.breakConfirmText}>Quitter</Text>
+              </TouchableOpacity>
+            </View>
           </View>
-          <View style={S.arrowRow}>
-            <TouchableOpacity style={S.arrowBtn} onPress={() => deplacerMobile("left")}>
-              <Feather name="arrow-left" size={18} color="white" />
+        </View>
+      )}
+
+      {breakWarningVisible && (
+        <View style={S.blockingLayer} pointerEvents="auto">
+          <View style={S.breakWarningBar}>
+            <View style={S.breakWarningTextBox}>
+              <Text style={S.breakWarningTitle}>Attention : les liens rouges vont être supprimés.</Text>
+              <Text style={S.breakWarningText}>
+                {pendingAction === "add"
+                  ? `Cette case est placée sur le chemin d'un lien. Si tu ajoutes une carte ici, cela va couper ${breakWillRemoveLinks.length} lien${breakWillRemoveLinks.length > 1 ? "s" : ""}.`
+                  : `Êtes-vous certain de souhaiter déplacer cette carte ici ? Cela va couper ${breakWillRemoveLinks.length} lien${breakWillRemoveLinks.length > 1 ? "s" : ""}.`}
+              </Text>
+            </View>
+
+            <View style={S.breakWarningActions}>
+              <TouchableOpacity style={S.breakCancelBtn} onPress={annulerWarning}>
+                <Text style={S.breakCancelText}>Annuler</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={S.breakConfirmBtn} onPress={validerWarning}>
+                <Text style={S.breakConfirmText}>Valider</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      )}
+
+      <Modal visible={infoVisible} transparent animationType="fade" statusBarTranslucent>
+        <Pressable style={S.infoModalBg} onPress={() => setInfoVisible(false)}>
+          <Pressable style={S.infoModalCard} onPress={() => {}}>
+            <View style={S.infoModalHeader}>
+              <View style={S.infoBigIcon}>
+                <Feather name="info" size={22} color={HEADER_BG} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={S.infoModalTitle}>Comment fonctionne l'arbre ?</Text>
+                <Text style={S.infoModalSubtitle}>
+                  Construis un barème en plaçant des cartes puis en créant des liens entre elles.
+                </Text>
+              </View>
+            </View>
+
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={S.infoScrollContent}
+              nestedScrollEnabled={true}
+              bounces={true}
+              scrollEventThrottle={16}
+            >
+              <View style={S.infoSection}>
+                <Text style={S.infoSectionTitle}>1. Ajouter des cartes</Text>
+                <View style={S.infoIllustrationRow}>
+                  <View style={S.infoMiniCardDashed}><Text style={S.infoMiniPlus}>＋</Text></View>
+                  <Feather name="arrow-right" size={18} color={HEADER_BG} />
+                  <View style={S.infoMiniCardBlue}><Text style={S.infoMiniEmoji}>🧩</Text><Text style={S.infoMiniCardText}>Carte</Text></View>
+                </View>
+                <Text style={S.infoText}>
+                  Choisis l'outil Ajouter, puis clique sur une case libre. Le barème commence vide : tu places toi-même la première carte.
+                </Text>
+              </View>
+
+              <View style={S.infoSection}>
+                <Text style={S.infoSectionTitle}>2. Relier les cartes</Text>
+                <View style={S.infoLinkDemo}>
+                  <View style={S.infoMiniCard}><Text style={S.infoMiniCardTextDark}>Carte 1</Text></View>
+                  <View style={S.infoGreenLine} />
+                  <View style={S.infoMiniCard}><Text style={S.infoMiniCardTextDark}>Carte 2</Text></View>
+                </View>
+                <Text style={S.infoText}>
+                  Choisis Relier, clique sur une première carte, puis clique sur une deuxième carte. Un lien vert apparaît. Les liens servent à montrer quelles cartes sont connectées dans ton barème.
+                </Text>
+              </View>
+
+              <View style={S.infoSection}>
+                <Text style={S.infoSectionTitle}>3. Déplacer sans casser le barème</Text>
+                <View style={S.infoLinkDemo}>
+                  <View style={S.infoMiniCard}><Text style={S.infoMiniCardTextDark}>Carte</Text></View>
+                  <View style={S.infoRedLine} />
+                  <View style={S.infoMiniCardWarning}><Text style={S.infoMiniCardText}>!</Text></View>
+                </View>
+                <Text style={S.infoText}>
+                  Si tu déplaces ou ajoutes une carte sur un lien, l'application te prévient. Le lien concerné devient rouge et tu dois choisir Valider ou Annuler avant de continuer.
+                </Text>
+              </View>
+
+              <View style={S.infoSection}>
+                <Text style={S.infoSectionTitle}>4. Supprimer ou couper</Text>
+                <Text style={S.infoText}>
+                  L'outil Supprimer efface une carte après confirmation. Les liens qui disparaîtront sont affichés en rouge. L'outil Ciseaux sert uniquement à couper un lien sélectionné.
+                </Text>
+              </View>
+
+              <View style={S.infoSection}>
+                <Text style={S.infoSectionTitle}>5. Avant de quitter</Text>
+                <Text style={S.infoText}>
+                  Si une carte n'est reliée à aucune autre, un message d'avertissement apparaît au retour. La carte isolée devient rouge pour être facile à repérer.
+                </Text>
+              </View>
+            </ScrollView>
+
+            <TouchableOpacity style={S.infoCloseBtn} onPress={() => setInfoVisible(false)}>
+              <Text style={S.infoCloseText}>J'ai compris</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={S.arrowBtn} onPress={() => deplacerMobile("down")}>
-              <Feather name="arrow-down" size={18} color="white" />
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal visible={renameVisible} transparent animationType="fade">
+        <Pressable style={S.modalBg} onPress={() => setRenameVisible(false)}>
+          <Pressable style={S.modalCard}>
+            <Text style={S.modalTitle}>Renommer le barème</Text>
+
+            <TextInput
+              value={renameValue}
+              onChangeText={setRenameValue}
+              placeholder="Nom du barème"
+              placeholderTextColor="#94A3B8"
+              style={S.input}
+            />
+
+            <TouchableOpacity style={S.primaryBtnFull} onPress={validerRenommerPage}>
+              <Text style={S.primaryBtnText}>Valider</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={S.arrowBtn} onPress={() => deplacerMobile("right")}>
-              <Feather name="arrow-right" size={18} color="white" />
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      {deleteNodeVisible && nodeToDelete && (
+        <View style={S.deleteNodeBar} pointerEvents="auto">
+          <View style={S.deleteNodeTextBox}>
+            <Text style={S.deleteNodeTitle}>Supprimer cette carte ?</Text>
+            <Text style={S.deleteNodeText}>
+              La carte <Text style={{ color: DANGER, fontWeight: "900" }}>"{nodeToDelete.titre}"</Text> sera supprimée ainsi que tous les liens associés. Les liens concernés sont affichés en rouge.
+            </Text>
+          </View>
+
+          <View style={S.deleteNodeActions}>
+            <TouchableOpacity
+              style={S.breakCancelBtn}
+              onPress={() => {
+                setDeleteNodeVisible(false);
+                setNodeToDelete(null);
+              }}
+            >
+              <Text style={S.breakCancelText}>Annuler</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={S.breakConfirmBtn} onPress={() => supprimerNoeud(nodeToDelete)}>
+              <Text style={S.breakConfirmText}>Supprimer</Text>
             </TouchableOpacity>
           </View>
         </View>
       )}
 
-      {/* ── MODAL: Ajouter ── */}
-      <Modal visible={addModalVisible} transparent animationType="fade">
-        <Pressable style={S.modalBg} onPress={() => setAddModalVisible(false)}>
+      <Modal visible={deleteConfirmVisible} transparent animationType="fade">
+        <Pressable style={S.modalBg} onPress={() => setDeleteConfirmVisible(false)}>
           <Pressable style={S.modalCard}>
-            <View style={S.modalHeader}>
-              <Text style={S.modalTitle}>Ajouter un dossier</Text>
-              <TouchableOpacity onPress={() => setAddModalVisible(false)}>
-                <Feather name="x" size={22} color="#64748B" />
-              </TouchableOpacity>
-            </View>
-            <Text style={S.modalSub}>Où placer le nouveau dossier ?</Text>
-
-            <TouchableOpacity style={S.choiceCard} onPress={() => ajouterDossier("meme")} activeOpacity={0.85}>
-              <LinearGradient colors={["#4F46E5", "#6366F1"]} style={S.choiceGradient}>
-                <Text style={S.choiceEmoji}>➡️</Text>
-                <View>
-                  <Text style={S.choiceTitle}>Même ligne</Text>
-                  <Text style={S.choiceSub}>À côté du nœud sélectionné</Text>
-                </View>
-              </LinearGradient>
-            </TouchableOpacity>
-
-            <TouchableOpacity style={S.choiceCard} onPress={() => ajouterDossier("dessus")} activeOpacity={0.85}>
-              <LinearGradient colors={["#0891B2", "#06B6D4"]} style={S.choiceGradient}>
-                <Text style={S.choiceEmoji}>⬆️</Text>
-                <View>
-                  <Text style={S.choiceTitle}>Ligne du dessus</Text>
-                  <Text style={S.choiceSub}>Niveau supérieur de l'arbre</Text>
-                </View>
-              </LinearGradient>
-            </TouchableOpacity>
-          </Pressable>
-        </Pressable>
-      </Modal>
-
-      {/* ── MODAL: Editer nœud ── */}
-      <Modal visible={editNodeVisible} transparent animationType="fade">
-        <Pressable style={S.modalBg} onPress={() => setEditNodeVisible(false)}>
-          <Pressable style={S.modalCard}>
-            <View style={S.modalHeader}>
-              <Text style={S.modalTitle}>Modifier le dossier</Text>
-              <TouchableOpacity onPress={() => setEditNodeVisible(false)}>
-                <Feather name="x" size={22} color="#64748B" />
-              </TouchableOpacity>
+            <View style={S.modalDangerIcon}>
+              <Feather name="trash-2" size={28} color={DANGER} />
             </View>
 
-            <Text style={S.inputLabel}>Nom du dossier</Text>
-            <TextInput
-              value={nodeName} onChangeText={setNodeName}
-              style={S.input} placeholder="Ex: Fractions, Conjugaison…"
-              placeholderTextColor="#4B5563" selectionColor="#6366F1"
-            />
+            <Text style={S.modalTitle}>Supprimer ce barème ?</Text>
 
-            <Text style={S.inputLabel}>Nombre de parcours dans ce dossier</Text>
-            <TextInput
-              value={nodeParcoursMax} onChangeText={setNodeParcoursMax}
-              keyboardType="numeric" style={S.input}
-              placeholder="Ex: 5" placeholderTextColor="#4B5563" selectionColor="#6366F1"
-            />
+            <Text style={S.modalText}>
+              Le barème <Text style={{ color: DANGER, fontWeight: "900" }}>"{pageActive?.nom}"</Text> sera entièrement supprimé, y compris toutes ses cartes et tous ses liens. Cette action est irréversible.
+            </Text>
 
-            <TouchableOpacity style={S.primaryBtn} onPress={sauverNode} activeOpacity={0.85}>
-              <LinearGradient colors={["#4F46E5", "#6366F1"]} style={S.primaryBtnGrad}>
-                <Feather name="check" size={18} color="white" style={{ marginRight: 8 }} />
-                <Text style={S.primaryBtnText}>Valider</Text>
-              </LinearGradient>
-            </TouchableOpacity>
-          </Pressable>
-        </Pressable>
-      </Modal>
+            <View style={S.modalActions}>
+              <TouchableOpacity style={S.secondaryBtn} onPress={() => setDeleteConfirmVisible(false)}>
+                <Text style={S.secondaryBtnText}>Annuler</Text>
+              </TouchableOpacity>
 
-      {/* ── MODAL: Conditions ── */}
-      <Modal visible={!!conditionModalLink} transparent animationType="fade">
-        <Pressable style={S.modalBg} onPress={() => setConditionModalLink(null)}>
-          <Pressable style={S.modalCardLarge}>
-            <View style={S.modalHeader}>
-              <View style={{ flex: 1 }}>
-                <Text style={S.modalTitle}>Conditions de déblocage</Text>
-                {lienFromNode && lienToNode && (
-                  <Text style={S.modalSub}>
-                    <Text style={{ color: lienFromNode.color }}>{lienFromNode.titre}</Text>
-                    {" → "}
-                    <Text style={{ color: lienToNode.color }}>{lienToNode.titre}</Text>
-                  </Text>
-                )}
-              </View>
-              <TouchableOpacity onPress={() => setConditionModalLink(null)}>
-                <Feather name="x" size={22} color="#64748B" />
+              <TouchableOpacity
+                style={S.dangerBtn}
+                onPress={() => {
+                  setDeleteConfirmVisible(false);
+                  supprimerPage();
+                }}
+              >
+                <Feather name="trash-2" size={14} color="white" />
+                <Text style={S.primaryBtnText}>Supprimer</Text>
               </TouchableOpacity>
             </View>
-
-            {maxParcoursDepuisLien > 0 && (
-              <View style={S.infoChip}>
-                <Feather name="info" size={13} color="#6366F1" style={{ marginRight: 6 }} />
-                <Text style={S.infoChipText}>
-                  Dossier précédent : {maxParcoursDepuisLien} parcours max
-                </Text>
-              </View>
-            )}
-
-            <ScrollView style={{ maxHeight: 400 }} showsVerticalScrollIndicator={false}>
-              {conditionsDraft.map((c) => (
-                <TouchableOpacity
-                  key={c.type}
-                  activeOpacity={0.9}
-                  onPress={() => toggleCondition(c.type)}
-                  style={[S.condCard, c.active && S.condCardActive]}
-                >
-                  <View style={S.condHeader}>
-                    <View style={[S.condCheck, c.active && S.condCheckActive]}>
-                      {c.active && <Feather name="check" size={14} color="white" />}
-                    </View>
-                    <Text style={[S.condTitle, c.active && { color: "#E0E7FF" }]}>
-                      {c.type === "points_total" ? "⭐ Atteindre X points au total"
-                       : c.type === "reussir_parcours" ? "✅ Réussir X parcours du dossier"
-                       : "🎯 Réussir X parcours en Y tentatives"}
-                    </Text>
-                  </View>
-
-                  {c.type === "points_total" && (
-                    <TextInput value={c.valeur1}
-                      onChangeText={(v) => majCondition(c.type, { valeur1: v, active: true })}
-                      keyboardType="numeric" style={S.condInput}
-                      placeholder="Nombre de points requis" placeholderTextColor="#6B7280"
-                      selectionColor="#6366F1"
-                    />
-                  )}
-
-                  {c.type === "reussir_parcours" && (
-                    <TextInput value={c.valeur1}
-                      onChangeText={(v) => majCondition(c.type, { valeur1: clampParcours(v), active: true })}
-                      keyboardType="numeric" style={S.condInput}
-                      placeholder={`Nb parcours réussis (max ${maxParcoursDepuisLien})`}
-                      placeholderTextColor="#6B7280" selectionColor="#6366F1"
-                    />
-                  )}
-
-                  {c.type === "reussir_parcours_tentatives" && (
-                    <View style={{ flexDirection: "row", gap: 10 }}>
-                      <TextInput value={c.valeur1}
-                        onChangeText={(v) => majCondition(c.type, { valeur1: clampParcours(v), active: true })}
-                        keyboardType="numeric" style={[S.condInput, { flex: 1 }]}
-                        placeholder="X parcours" placeholderTextColor="#6B7280" selectionColor="#6366F1"
-                      />
-                      <TextInput value={c.valeur2}
-                        onChangeText={(v) => majCondition(c.type, { valeur2: v, active: true })}
-                        keyboardType="numeric" style={[S.condInput, { flex: 1 }]}
-                        placeholder="Y tentatives" placeholderTextColor="#6B7280" selectionColor="#6366F1"
-                      />
-                    </View>
-                  )}
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-
-            <View style={S.condActions}>
-              <TouchableOpacity style={S.deleteLinkBtn} onPress={supprimerLien} activeOpacity={0.8}>
-                <Feather name="trash-2" size={15} color="#F87171" style={{ marginRight: 6 }} />
-                <Text style={S.deleteLinkText}>Supprimer le lien</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity style={S.primaryBtnSmall} onPress={sauverConditions} activeOpacity={0.85}>
-                <LinearGradient colors={["#4F46E5", "#6366F1"]} style={S.primaryBtnSmallGrad}>
-                  <Feather name="check" size={16} color="white" style={{ marginRight: 6 }} />
-                  <Text style={S.primaryBtnText}>Valider</Text>
-                </LinearGradient>
-              </TouchableOpacity>
-            </View>
-          </Pressable>
-        </Pressable>
-      </Modal>
-
-      {/* ── MODAL: Légende ── */}
-      <Modal visible={infoVisible} transparent animationType="fade">
-        <Pressable style={S.modalBg} onPress={() => setInfoVisible(false)}>
-          <Pressable style={S.modalCard}>
-            <View style={S.modalHeader}>
-              <Text style={S.modalTitle}>Légende des outils</Text>
-              <TouchableOpacity onPress={() => setInfoVisible(false)}>
-                <Feather name="x" size={22} color="#64748B" />
-              </TouchableOpacity>
-            </View>
-            {[
-              { icon: "＋", text: "Ajouter un dossier sur la même ligne ou au dessus" },
-              { icon: "🖱️", text: "Sélectionner un nœud pour le modifier" },
-              { icon: "✋", text: "Glisser-déposer un nœud (échange si case occupée)" },
-              { icon: "🔗", text: "Relier : cliquer sur 2 nœuds pour créer un lien" },
-              { icon: "🔒", text: "Cliquer sur un lien pour définir ses conditions" },
-            ].map((item, i) => (
-              <View key={i} style={S.legendRow}>
-                <Text style={S.legendIcon}>{item.icon}</Text>
-                <Text style={S.legendText}>{item.text}</Text>
-              </View>
-            ))}
           </Pressable>
         </Pressable>
       </Modal>
@@ -832,192 +1784,935 @@ export default function CreationArbreDeCompetence({ carte, onBack }: Props) {
   );
 }
 
-// ─── Styles ───────────────────────────────────────────────────────────────────
-
 const S = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: "#0F0C29" },
+  safe: {
+    flex: 1,
+    backgroundColor: PAGE_BG,
+  },
 
-  dots: { ...StyleSheet.absoluteFillObject, overflow: "hidden" },
-  dot: { position: "absolute", borderRadius: 99, backgroundColor: "white" },
-
-  // Top bar
   topBar: {
-    height: 64,
-    paddingHorizontal: 16,
+    minHeight: 78,
+    backgroundColor: HEADER_BG,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,255,255,0.12)",
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: "rgba(99,102,241,0.2)",
   },
+
   backBtn: {
-    flexDirection: "row", alignItems: "center", gap: 4,
-    paddingHorizontal: 12, paddingVertical: 8,
-    borderRadius: 12, backgroundColor: "rgba(255,255,255,0.06)",
-    borderWidth: 1, borderColor: "rgba(255,255,255,0.1)",
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: HEADER_ICON_BG,
+    alignItems: "center",
+    justifyContent: "center",
   },
-  backText: { color: "#E2E8F0", fontSize: 14, fontWeight: "700" },
-  titleBox: { flex: 1, flexDirection: "row", alignItems: "center", gap: 10, flexWrap: "wrap" },
-  titleMain: { color: "white", fontSize: 18, fontWeight: "800", letterSpacing: -0.3 },
-  titleBadge: {
-    paddingHorizontal: 10, paddingVertical: 3,
-    borderRadius: 20, backgroundColor: "rgba(99,102,241,0.25)",
-    borderWidth: 1, borderColor: "rgba(99,102,241,0.5)",
-  },
-  titleBadgeText: { color: "#A5B4FC", fontSize: 12, fontWeight: "700" },
-  iconBtn: {
-    width: 40, height: 40, borderRadius: 12,
-    backgroundColor: "rgba(255,255,255,0.06)",
-    borderWidth: 1, borderColor: "rgba(255,255,255,0.1)",
-    alignItems: "center", justifyContent: "center",
-  },
-  saveBtn: {
-    flexDirection: "row", alignItems: "center", gap: 6,
-    paddingHorizontal: 14, paddingVertical: 8,
-    borderRadius: 12, backgroundColor: "#4F46E5",
-    shadowColor: "#6366F1", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.5, shadowRadius: 10,
-  },
-  saveBtnText: { color: "white", fontSize: 13, fontWeight: "800" },
 
-  // Body
-  body: { flex: 1, flexDirection: "row", padding: 10, gap: 10 },
+  titleBox: {
+    flex: 1,
+  },
 
-  // Tools
+  titleMain: {
+    color: HEADER_TITLE,
+    fontSize: 18,
+    fontWeight: "800",
+    letterSpacing: 0.3,
+  },
+
+  titleSub: {
+    color: "rgba(255,255,255,0.78)",
+    fontSize: 12,
+    fontWeight: "700",
+    marginTop: 2,
+  },
+
+  infoBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: HEADER_ICON_BG,
+  },
+
+  pagesBar: {
+    minHeight: 50,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: CONTENT_BG,
+    borderBottomWidth: 1,
+    borderBottomColor: CONTENT_BORDER,
+  },
+
+  pagesScroll: {
+    alignItems: "center",
+    gap: 8,
+  },
+
+  pageChip: {
+    paddingHorizontal: 13,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: CARD_BG,
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+  },
+
+  pageChipActive: {
+    backgroundColor: HEADER_BG,
+    borderColor: HEADER_BG,
+  },
+
+  pageChipText: {
+    color: CARD_TITLE,
+    fontSize: 12,
+    fontWeight: "900",
+  },
+
+  pageChipTextActive: {
+    color: HEADER_TITLE,
+  },
+
+  pageAddBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: HEADER_BG,
+  },
+
+  pageActionBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: CARD_BG,
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+  },
+
+  mobileToolsBar: {
+    height: 72,
+    maxHeight: 72,
+    overflow: "hidden",
+    backgroundColor: CARD_BG,
+    borderBottomWidth: 1,
+    borderBottomColor: CONTENT_BORDER,
+  },
+
+  inlineHintBar: {
+    minHeight: 30,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: CONTENT_BORDER,
+    backgroundColor: TEXT_BG,
+  },
+
+  inlineHintBarDesktop: {
+    minHeight: 34,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: CONTENT_BORDER,
+    backgroundColor: TEXT_BG,
+  },
+
+  inlineHintText: {
+    color: HEADER_BG,
+    textAlign: "center",
+    fontSize: 12,
+    fontWeight: "900",
+  },
+
+  mobileToolsHorizontalScroll: {
+    height: 72,
+    maxHeight: 72,
+  },
+
+  mobileToolsScroll: {
+    height: 72,
+    maxHeight: 72,
+    flexDirection: "row",
+    flexWrap: "nowrap",
+    alignItems: "center",
+    paddingHorizontal: 8,
+    gap: 6,
+  },
+
+  body: {
+    flex: 1,
+    flexDirection: "row",
+    padding: 10,
+    gap: 10,
+    backgroundColor: CONTENT_BG,
+  },
+
   toolsBar: {
-    width: 76,
+    width: 78,
     borderRadius: 20,
-    backgroundColor: "rgba(255,255,255,0.04)",
-    borderWidth: 1, borderColor: "rgba(255,255,255,0.08)",
-    paddingVertical: 12, paddingHorizontal: 8,
-    alignItems: "center", gap: 6,
+    backgroundColor: CARD_BG,
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+    paddingVertical: 12,
+    paddingHorizontal: 8,
+    alignItems: "center",
+    gap: 8,
+    shadowColor: "#000",
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
   },
+
   toolBtn: {
-    width: 60, paddingVertical: 10,
-    borderRadius: 14, alignItems: "center",
-    backgroundColor: "transparent",
-    borderWidth: 1, borderColor: "transparent",
-    gap: 4,
+    minWidth: 58,
+    paddingHorizontal: 7,
+    paddingVertical: 7,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 3,
+    borderWidth: 1,
+    borderColor: "transparent",
   },
+
   toolBtnActive: {
-    backgroundColor: "#A5B4FC",
-    borderColor: "rgba(255,255,255,0.3)",
-    shadowColor: "#6366F1", shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.8, shadowRadius: 12,
+    backgroundColor: HEADER_BG,
+    borderColor: HEADER_BG,
   },
-  toolIcon: { fontSize: 22, color: "#A5B4FC" },
-  toolLabel: { color: "#6B7280", fontSize: 9, fontWeight: "700", textAlign: "center" },
-  linkStatus: { alignItems: "center", gap: 4, marginTop: 4 },
-  linkDot: { width: 8, height: 8, borderRadius: 4 },
-  linkStatusText: { color: "#94A3B8", fontSize: 9, fontWeight: "700" },
-  toolStats: { marginTop: "auto" as any, alignItems: "center", gap: 0 },
-  toolStatN: { color: "white", fontSize: 18, fontWeight: "800", lineHeight: 22 },
-  toolStatL: { color: "#4B5563", fontSize: 9, fontWeight: "700", marginBottom: 6 },
 
-  // Canvas
-  canvasWrap: { flex: 1, borderRadius: 20, overflow: "hidden", backgroundColor: "rgba(255,255,255,0.02)", borderWidth: 1, borderColor: "rgba(255,255,255,0.06)" },
-  canvas: { position: "relative", backgroundColor: "transparent" },
-  gridDot: { position: "absolute", width: 6, height: 6, borderRadius: 3, backgroundColor: "rgba(99,102,241,0.15)" },
-  gridCellEmpty: { position: "absolute", borderRadius: 18, borderWidth: 2, borderColor: "rgba(99,102,241,0.1)", borderStyle: "dashed" },
+  toolIcon: {
+    fontSize: 21,
+    color: HEADER_BG,
+  },
 
-  // Nodes
-  node: { position: "absolute", zIndex: 20 },
-  nodeGlow: { position: "absolute", inset: -8, borderRadius: 26, opacity: 0.3, zIndex: -1 },
-  nodeCard: { flex: 1, borderRadius: 22, padding: 12, alignItems: "center", justifyContent: "center", overflow: "hidden" },
-  nodeAccent: { position: "absolute", top: 0, left: 0, right: 0, height: 3, borderTopLeftRadius: 22, borderTopRightRadius: 22 },
-  nodeIconBox: { width: 52, height: 52, borderRadius: 16, borderWidth: 2, backgroundColor: "rgba(255,255,255,0.08)", alignItems: "center", justifyContent: "center", marginBottom: 8 },
-  nodeEmoji: { fontSize: 28 },
-  nodeTitle: { color: "white", fontSize: 13, fontWeight: "800", textAlign: "center", letterSpacing: -0.2 },
-  nodeCountBadge: { marginTop: 6, paddingHorizontal: 10, paddingVertical: 3, borderRadius: 20 },
-  nodeCountText: { fontSize: 11, fontWeight: "800" },
-  linkingBadge: { position: "absolute", top: 10, right: 10, backgroundColor: "#10B981", borderRadius: 8, paddingHorizontal: 6, paddingVertical: 2 },
-  linkingBadgeText: { color: "white", fontSize: 8, fontWeight: "900", letterSpacing: 0.5 },
-  selectedRing: { position: "absolute", inset: 0, borderRadius: 22, borderWidth: 3 },
+  toolIconSmall: {
+    fontSize: 17,
+    color: "#1F5B86",
+  },
 
-  // Link bubbles
-  linkBubble: {
-    position: "absolute", zIndex: 30,
-    flexDirection: "row", alignItems: "center", gap: 4,
-    width: 144, paddingVertical: 5, paddingHorizontal: 8,
-    backgroundColor: "#0F172A", borderRadius: 20,
+  toolIconActive: {
+    color: HEADER_TITLE,
+  },
+
+  toolLabel: {
+    color: "#1F5B86",
+    fontSize: 8,
+    fontWeight: "900",
+    textAlign: "center",
+  },
+
+  toolLabelActive: {
+    color: HEADER_TITLE,
+    fontWeight: "900",
+  },
+
+  toolStats: {
+    marginTop: "auto",
+    alignItems: "center",
+  },
+
+  toolStatN: {
+    color: HEADER_BG,
+    fontSize: 18,
+    fontWeight: "900",
+    marginTop: 4,
+  },
+
+  toolStatL: {
+    color: CARD_SUBTITLE,
+    fontSize: 9,
+    fontWeight: "800",
+  },
+
+  canvasWrap: {
+    flex: 1,
+    borderRadius: 0,
+    overflow: "hidden",
+    backgroundColor: "transparent",
+    borderWidth: 0,
+    borderColor: "transparent",
+  },
+
+  canvas: {
+    position: "relative",
+    backgroundColor: CONTENT_BG,
+  },
+
+  gridCell: {
+    position: "absolute",
+    borderRadius: 18,
     borderWidth: 1.5,
-    shadowColor: "#000", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.5, shadowRadius: 8,
+    borderStyle: "dashed",
+    borderColor: "rgba(31,91,134,0.12)",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 10,
   },
-  lockIcon: { fontSize: 11 },
-  linkBubbleText: { flex: 1, fontSize: 9, fontWeight: "800", textAlign: "left" },
 
-  // Right panel
-  rightPanel: {
-    width: 240, borderRadius: 20,
-    backgroundColor: "rgba(255,255,255,0.03)",
-    borderWidth: 1, borderColor: "rgba(255,255,255,0.08)",
-    padding: 14, gap: 8,
+  gridCellOccupied: {
+    borderColor: "transparent",
   },
-  panelHeading: { color: "#4B5563", fontSize: 11, fontWeight: "800", letterSpacing: 1.2, textTransform: "uppercase", marginBottom: 4 },
-  panelNodePreview: { flexDirection: "row", alignItems: "center", gap: 10, padding: 12, borderRadius: 14, backgroundColor: "rgba(255,255,255,0.04)", borderWidth: 2 },
-  panelNodeEmoji: { fontSize: 28 },
-  panelNodeName: { color: "white", fontSize: 15, fontWeight: "800" },
-  panelNodeSub: { fontSize: 12, fontWeight: "700", marginTop: 2 },
-  panelBtn: { flexDirection: "row", alignItems: "center", padding: 12, borderRadius: 14, backgroundColor: "rgba(99,102,241,0.12)", borderWidth: 1, borderColor: "rgba(99,102,241,0.25)" },
-  panelBtnText: { color: "#A5B4FC", fontSize: 13, fontWeight: "700" },
-  panelDanger: { flexDirection: "row", alignItems: "center", padding: 12, borderRadius: 14, backgroundColor: "rgba(239,68,68,0.08)", borderWidth: 1, borderColor: "rgba(239,68,68,0.2)" },
-  panelDangerText: { color: "#F87171", fontSize: 13, fontWeight: "700" },
-  panelEmpty: { color: "#374151", fontSize: 13, fontWeight: "600", textAlign: "center", marginTop: 20 },
-  hintBox: { marginTop: 8, padding: 12, borderRadius: 14, backgroundColor: "rgba(99,102,241,0.08)", borderWidth: 1, borderColor: "rgba(99,102,241,0.15)" },
-  hintTitle: { color: "#A5B4FC", fontSize: 12, fontWeight: "800", marginBottom: 6 },
-  hintText: { color: "#6B7280", fontSize: 12, fontWeight: "600", lineHeight: 18 },
 
-  // Move arrows
-  moveArrows: { alignItems: "center", gap: 6, paddingVertical: 8 },
-  moveLabel: { color: "#4B5563", fontSize: 11, fontWeight: "800", letterSpacing: 1 },
-  arrowRow: { flexDirection: "row", gap: 6 },
-  arrowBtn: { width: 44, height: 44, borderRadius: 12, backgroundColor: "rgba(99,102,241,0.2)", borderWidth: 1, borderColor: "rgba(99,102,241,0.3)", alignItems: "center", justifyContent: "center" },
-  phoneArrows: { position: "absolute", bottom: 100, right: 20, gap: 6 },
+  gridCellAdd: {
+    backgroundColor: "rgba(31,91,134,0.08)",
+    borderColor: HEADER_BG,
+    borderWidth: 2,
+    zIndex: 15,
+  },
 
-  // Modals
-  modalBg: { flex: 1, backgroundColor: "rgba(0,0,0,0.75)", alignItems: "center", justifyContent: "center", padding: 20 },
-  modalCard: { width: "100%", maxWidth: 440, backgroundColor: "#0F172A", borderRadius: 24, padding: 20, borderWidth: 1, borderColor: "rgba(99,102,241,0.25)" },
-  modalCardLarge: { width: "100%", maxWidth: 600, backgroundColor: "#0F172A", borderRadius: 24, padding: 20, borderWidth: 1, borderColor: "rgba(99,102,241,0.25)" },
-  modalHeader: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 12 },
-  modalTitle: { color: "white", fontSize: 22, fontWeight: "800", letterSpacing: -0.3 },
-  modalSub: { color: "#6B7280", fontSize: 13, fontWeight: "600", lineHeight: 18, marginBottom: 8 },
+  gridCellAddDanger: {
+    backgroundColor: "rgba(239,68,68,0.10)",
+    borderColor: DANGER,
+  },
 
-  // Choice cards
-  choiceCard: { borderRadius: 18, overflow: "hidden", marginTop: 10 },
-  choiceGradient: { flexDirection: "row", alignItems: "center", gap: 14, padding: 16 },
-  choiceEmoji: { fontSize: 28 },
-  choiceTitle: { color: "white", fontSize: 16, fontWeight: "800" },
-  choiceSub: { color: "rgba(255,255,255,0.7)", fontSize: 12, fontWeight: "600", marginTop: 2 },
+  gridCellMove: {
+    backgroundColor: "rgba(245,158,11,0.08)",
+    borderColor: "rgba(245,158,11,0.45)",
+    borderWidth: 2,
+    zIndex: 15,
+  },
 
-  // Input
-  inputLabel: { color: "#6B7280", fontSize: 12, fontWeight: "700", marginTop: 12, marginBottom: 4 },
-  input: { borderWidth: 1.5, borderColor: "rgba(99,102,241,0.3)", borderRadius: 14, paddingHorizontal: 14, paddingVertical: 12, fontWeight: "700", color: "white", backgroundColor: "rgba(255,255,255,0.04)", fontSize: 15 },
+  gridCellChosen: {
+    backgroundColor: "rgba(34,197,94,0.14)",
+    borderColor: SUCCESS,
+    borderWidth: 3,
+    shadowColor: SUCCESS,
+    shadowOpacity: 0.35,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 0 },
+  },
 
-  // Primary button
-  primaryBtn: { borderRadius: 14, overflow: "hidden", marginTop: 18 },
-  primaryBtnGrad: { flexDirection: "row", alignItems: "center", justifyContent: "center", paddingVertical: 14 },
-  primaryBtnSmall: { borderRadius: 14, overflow: "hidden" },
-  primaryBtnSmallGrad: { flexDirection: "row", alignItems: "center", justifyContent: "center", paddingHorizontal: 18, paddingVertical: 12 },
-  primaryBtnText: { color: "white", fontSize: 15, fontWeight: "800" },
+  gridAddText: {
+    color: HEADER_BG,
+    fontSize: 28,
+    fontWeight: "900",
+  },
 
-  // Info chip
-  infoChip: { flexDirection: "row", alignItems: "center", padding: 10, borderRadius: 12, backgroundColor: "rgba(99,102,241,0.1)", borderWidth: 1, borderColor: "rgba(99,102,241,0.2)", marginBottom: 12 },
-  infoChipText: { color: "#818CF8", fontSize: 12, fontWeight: "700" },
+  gridAddTextDanger: {
+    color: DANGER,
+  },
 
-  // Conditions
-  condCard: { padding: 14, borderRadius: 18, backgroundColor: "rgba(255,255,255,0.03)", borderWidth: 2, borderColor: "rgba(255,255,255,0.06)", marginBottom: 10 },
-  condCardActive: { backgroundColor: "rgba(99,102,241,0.12)", borderColor: "#6366F1" },
-  condHeader: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 6 },
-  condCheck: { width: 24, height: 24, borderRadius: 7, borderWidth: 2, borderColor: "#374151", alignItems: "center", justifyContent: "center" },
-  condCheckActive: { backgroundColor: "#6366F1", borderColor: "#6366F1" },
-  condTitle: { flex: 1, color: "#94A3B8", fontSize: 14, fontWeight: "700" },
-  condInput: { marginTop: 8, borderWidth: 1.5, borderColor: "rgba(99,102,241,0.3)", borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, fontWeight: "700", color: "white", backgroundColor: "rgba(255,255,255,0.04)", fontSize: 14 },
+  gridMoveText: {
+    color: WARNING,
+    fontSize: 11,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
 
-  // Cond actions
-  condActions: { flexDirection: "row", justifyContent: "flex-end", alignItems: "center", gap: 10, marginTop: 16 },
-  deleteLinkBtn: { flexDirection: "row", alignItems: "center", paddingHorizontal: 14, paddingVertical: 11, borderRadius: 14, backgroundColor: "rgba(239,68,68,0.1)", borderWidth: 1, borderColor: "rgba(239,68,68,0.2)" },
-  deleteLinkText: { color: "#F87171", fontSize: 13, fontWeight: "700" },
+  deleteLinksSvg: {
+    zIndex: 35,
+    elevation: 35,
+  },
 
-  // Legend
-  legendRow: { flexDirection: "row", alignItems: "flex-start", gap: 12, marginTop: 12 },
-  legendIcon: { fontSize: 18, width: 28, textAlign: "center" },
-  legendText: { flex: 1, color: "#94A3B8", fontSize: 14, fontWeight: "600", lineHeight: 20 },
+  node: {
+    position: "absolute",
+    zIndex: 40,
+    borderRadius: 22,
+    borderWidth: 1.5,
+    overflow: "hidden",
+    shadowColor: "#000",
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 3,
+  },
+
+  nodeSelected: {
+    borderWidth: 3,
+    shadowOpacity: 0.18,
+    shadowRadius: 12,
+  },
+
+  nodeMoveSource: {
+    borderWidth: 3,
+  },
+
+  nodeLinkStart: {
+    borderWidth: 3,
+  },
+
+  nodeDeleteTarget: {
+    borderWidth: 4,
+    shadowColor: DANGER,
+    shadowOpacity: 0.45,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 0 },
+  },
+
+  nodeUnlinkedWarning: {
+    borderWidth: 4,
+    shadowColor: DANGER,
+    shadowOpacity: 0.55,
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: 0 },
+  },
+
+  nodeContent: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 6,
+  },
+
+  nodeIconBox: {
+    width: 38,
+    height: 38,
+    borderRadius: 13,
+    borderWidth: 2,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 5,
+  },
+
+  nodeEmoji: {
+    fontSize: 22,
+  },
+
+  nodeTitle: {
+    fontSize: 11,
+    fontWeight: "900",
+    textAlign: "center",
+  },
+
+  badge: {
+    marginTop: 2,
+    color: HEADER_TITLE,
+    fontSize: 8,
+    fontWeight: "900",
+    backgroundColor: "rgba(15,23,42,0.35)",
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 999,
+    overflow: "hidden",
+  },
+
+  toast: {
+    position: "absolute",
+    left: 16,
+    right: 16,
+    bottom: 18,
+    borderRadius: 16,
+    backgroundColor: "#7F1D1D",
+    borderWidth: 1,
+    borderColor: "rgba(248,113,113,0.8)",
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    zIndex: 300,
+  },
+
+  toastText: {
+    color: HEADER_TITLE,
+    fontSize: 13,
+    fontWeight: "900",
+    textAlign: "center",
+  },
+
+  cutOverlay: {
+    position: "absolute",
+    left: 16,
+    right: 16,
+    bottom: 18,
+    minHeight: 58,
+    borderRadius: 18,
+    backgroundColor: CARD_BG,
+    borderWidth: 1,
+    borderColor: "rgba(239,68,68,0.35)",
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 14,
+    gap: 10,
+    zIndex: 100,
+    shadowColor: "#000",
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 5 },
+    elevation: 4,
+  },
+
+  cutOverlayText: {
+    flex: 1,
+    color: CARD_TITLE,
+    fontSize: 14,
+    fontWeight: "900",
+  },
+
+  cutCancelBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: "#E2E8F0",
+  },
+
+  cutCancelText: {
+    color: CARD_TITLE,
+    fontWeight: "900",
+  },
+
+  cutConfirmBtn: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: DANGER,
+  },
+
+  cutConfirmText: {
+    color: HEADER_TITLE,
+    fontWeight: "900",
+  },
+
+  blockingLayer: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    zIndex: 500,
+    backgroundColor: "rgba(15,23,42,0.08)",
+    justifyContent: "flex-end",
+    padding: 12,
+  },
+
+  deleteNodeBar: {
+    position: "absolute",
+    left: 12,
+    right: 12,
+    bottom: 42,
+    borderRadius: 18,
+    backgroundColor: CARD_BG,
+    borderWidth: 1,
+    borderColor: "rgba(239,68,68,0.35)",
+    flexDirection: "column",
+    alignItems: "stretch",
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    gap: 10,
+    zIndex: 520,
+    shadowColor: "#000",
+    shadowOpacity: 0.14,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 5,
+  },
+
+  deleteNodeTextBox: {
+    flex: 1,
+  },
+
+  deleteNodeTitle: {
+    color: DANGER,
+    fontSize: 14,
+    fontWeight: "900",
+    marginBottom: 3,
+    textAlign: "center",
+  },
+
+  deleteNodeText: {
+    color: CARD_TITLE,
+    fontSize: 12,
+    fontWeight: "800",
+    lineHeight: 17,
+    textAlign: "center",
+  },
+
+  deleteNodeActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+  },
+
+  breakWarningBar: {
+    position: "absolute",
+    left: 12,
+    right: 12,
+    bottom: 72,
+    borderRadius: 18,
+    backgroundColor: CARD_BG,
+    borderWidth: 1,
+    borderColor: "rgba(239,68,68,0.35)",
+    flexDirection: "column",
+    alignItems: "stretch",
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    gap: 12,
+    zIndex: 540,
+    shadowColor: "#000",
+    shadowOpacity: 0.14,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 5,
+  },
+
+  breakWarningTextBox: {
+    minHeight: 58,
+    justifyContent: "center",
+  },
+
+  breakWarningTitle: {
+    color: DANGER,
+    fontSize: 16,
+    fontWeight: "900",
+    marginBottom: 3,
+    textAlign: "center",
+  },
+
+  breakWarningText: {
+    color: CARD_TITLE,
+    fontSize: 13,
+    fontWeight: "800",
+    lineHeight: 17,
+    textAlign: "center",
+  },
+
+  breakWarningActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 12,
+  },
+
+  breakCancelBtn: {
+    flex: 1,
+    maxWidth: 260,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    borderRadius: 14,
+    backgroundColor: "#E2E8F0",
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+    alignItems: "center",
+  },
+
+  breakCancelText: {
+    color: CARD_TITLE,
+    fontWeight: "900",
+  },
+
+  breakConfirmBtn: {
+    flex: 1,
+    maxWidth: 260,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    borderRadius: 14,
+    backgroundColor: DANGER,
+    alignItems: "center",
+  },
+
+  breakConfirmText: {
+    color: HEADER_TITLE,
+    fontWeight: "900",
+  },
+
+  infoModalBg: {
+    flex: 1,
+    backgroundColor: "rgba(15,23,42,0.38)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 18,
+  },
+
+  infoModalCard: {
+    overflow: "hidden",
+    width: "100%",
+    maxWidth: 620,
+    maxHeight: "86%",
+    flexShrink: 1,
+    borderRadius: 24,
+    backgroundColor: CARD_BG,
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+    padding: 16,
+  },
+
+  infoModalHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    marginBottom: 12,
+  },
+
+  infoBigIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 16,
+    backgroundColor: TEXT_BG,
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  infoModalTitle: {
+    color: CARD_TITLE,
+    fontSize: 20,
+    fontWeight: "900",
+  },
+
+  infoModalSubtitle: {
+    color: CARD_SUBTITLE,
+    fontSize: 12,
+    fontWeight: "700",
+    marginTop: 3,
+    lineHeight: 17,
+  },
+
+  infoScrollContent: {
+    flexGrow: 1,
+    paddingBottom: 8,
+    gap: 10,
+  },
+
+  infoSection: {
+    borderRadius: 18,
+    backgroundColor: "#F8FAFC",
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+    padding: 12,
+  },
+
+  infoSectionTitle: {
+    color: HEADER_BG,
+    fontSize: 14,
+    fontWeight: "900",
+    marginBottom: 8,
+  },
+
+  infoText: {
+    color: CARD_TITLE,
+    fontSize: 12,
+    fontWeight: "700",
+    lineHeight: 18,
+  },
+
+  infoIllustrationRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    marginBottom: 8,
+  },
+
+  infoLinkDemo: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 8,
+  },
+
+  infoMiniCardDashed: {
+    width: 72,
+    height: 54,
+    borderRadius: 16,
+    borderWidth: 2,
+    borderStyle: "dashed",
+    borderColor: HEADER_BG,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: TEXT_BG,
+  },
+
+  infoMiniPlus: {
+    color: HEADER_BG,
+    fontSize: 24,
+    fontWeight: "900",
+  },
+
+  infoMiniCard: {
+    width: 76,
+    height: 54,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+    backgroundColor: CARD_BG,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  infoMiniCardBlue: {
+    width: 76,
+    height: 54,
+    borderRadius: 16,
+    borderWidth: 2,
+    borderColor: HEADER_ICON_BG,
+    backgroundColor: HEADER_BG,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  infoMiniCardWarning: {
+    width: 76,
+    height: 54,
+    borderRadius: 16,
+    borderWidth: 2,
+    borderColor: "#FCA5A5",
+    backgroundColor: DANGER,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  infoMiniEmoji: {
+    fontSize: 18,
+    marginBottom: 1,
+  },
+
+  infoMiniCardText: {
+    color: HEADER_TITLE,
+    fontSize: 11,
+    fontWeight: "900",
+    textAlign: "center",
+  },
+
+  infoMiniCardTextDark: {
+    color: CARD_TITLE,
+    fontSize: 11,
+    fontWeight: "900",
+    textAlign: "center",
+  },
+
+  infoGreenLine: {
+    width: 72,
+    height: 7,
+    backgroundColor: SUCCESS,
+    borderTopWidth: 2,
+    borderBottomWidth: 2,
+    borderColor: "#BBF7D0",
+  },
+
+  infoRedLine: {
+    width: 72,
+    height: 7,
+    backgroundColor: DANGER,
+    borderTopWidth: 2,
+    borderBottomWidth: 2,
+    borderColor: "#FCA5A5",
+  },
+
+  infoCloseBtn: {
+    marginTop: 12,
+    borderRadius: 16,
+    backgroundColor: HEADER_BG,
+    paddingVertical: 13,
+    alignItems: "center",
+  },
+
+  infoCloseText: {
+    color: HEADER_TITLE,
+    fontSize: 14,
+    fontWeight: "900",
+  },
+
+  modalBg: {
+    flex: 1,
+    backgroundColor: "rgba(15,23,42,0.38)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 20,
+  },
+
+  modalCard: {
+    width: "100%",
+    maxWidth: 420,
+    borderRadius: 22,
+    backgroundColor: CARD_BG,
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+    padding: 18,
+  },
+
+  modalTitle: {
+    color: CARD_TITLE,
+    fontSize: 20,
+    fontWeight: "900",
+    marginBottom: 10,
+  },
+
+  modalText: {
+    color: CARD_TITLE,
+    fontSize: 14,
+    fontWeight: "700",
+    lineHeight: 20,
+  },
+
+  modalActions: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 10,
+    marginTop: 18,
+  },
+
+  secondaryBtn: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 14,
+    backgroundColor: "#E2E8F0",
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+  },
+
+  secondaryBtnText: {
+    color: CARD_TITLE,
+    fontSize: 14,
+    fontWeight: "900",
+  },
+
+  dangerBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 14,
+    backgroundColor: DANGER,
+  },
+
+  modalDangerIcon: {
+    width: 56,
+    height: 56,
+    borderRadius: 18,
+    backgroundColor: "rgba(239,68,68,0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(239,68,68,0.25)",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 14,
+  },
+
+  primaryBtnFull: {
+    marginTop: 14,
+    borderRadius: 14,
+    backgroundColor: HEADER_BG,
+    paddingVertical: 13,
+    alignItems: "center",
+  },
+
+  primaryBtnText: {
+    color: HEADER_TITLE,
+    fontSize: 14,
+    fontWeight: "900",
+  },
+
+  input: {
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    color: CARD_TITLE,
+    fontWeight: "800",
+    backgroundColor: "#F8FAFC",
+  },
 });

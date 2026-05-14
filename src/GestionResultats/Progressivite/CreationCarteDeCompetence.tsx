@@ -15,7 +15,6 @@ import {
   useWindowDimensions,
   View,
 } from "react-native";
-import { LinearGradient } from "expo-linear-gradient";
 import { Feather } from "@expo/vector-icons";
 import { supabase } from "../../supabaseClient";
 
@@ -35,6 +34,16 @@ type CarteCompetence = {
   icone?: string | null;
   ordre?: number | null;
 };
+
+const PAGE_BG = "#EDF2F6";
+const CONTENT_BG = "#EEF3F7";
+const CARD_BG = "#FFFFFF";
+const CARD_BORDER = "#C9D5DF";
+const CARD_TITLE = "#233548";
+const CARD_SUBTITLE = "#5F7386";
+const HEADER_BG = "#1F5B86";
+const HEADER_ICON_BG = "#2D6C97";
+const TEXT_BG = "#E8F1FD";
 
 const COULEURS = ["#38BDF8", "#22C55E", "#F59E0B", "#A855F7", "#EF4444", "#14B8A6"];
 
@@ -61,6 +70,8 @@ export default function CreationCarteDeCompetence({
   onOpenCarte: (carte: CarteCompetence) => void;
 }) {
   const { width } = useWindowDimensions();
+  const isDesktop = width >= 1100;
+  const isTablet = width >= 768 && width < 1100;
   const isSmall = width < 720;
 
   const [loading, setLoading] = useState(true);
@@ -76,6 +87,8 @@ export default function CreationCarteDeCompetence({
   const [description, setDescription] = useState("");
   const [couleur, setCouleur] = useState(COULEURS[0]);
   const [icone, setIcone] = useState("map");
+
+  const horizontalPadding = isDesktop ? 28 : isTablet ? 22 : 14;
 
   const nbColonnes = useMemo(() => {
     if (width >= 1100) return 4;
@@ -241,20 +254,17 @@ export default function CreationCarteDeCompetence({
 
   const renderCarte = ({ item }: { item: CarteCompetence }) => (
     <TouchableOpacity
-      activeOpacity={0.88}
+      activeOpacity={0.9}
       style={[
         styles.skillCard,
         {
           width: isSmall ? "47%" : `${100 / nbColonnes - 2}%`,
-          borderColor: item.couleur || "#38BDF8",
+          borderColor: CARD_BORDER,
         },
       ]}
       onPress={() => onOpenCarte(item)}
     >
-      <LinearGradient
-        colors={["#FFFFFF", "#E0F2FE"]}
-        style={styles.skillCardInner}
-      >
+      <View style={styles.skillCardInner}>
         <TouchableOpacity
           style={styles.deleteBtn}
           onPress={() => supprimerCarte(item)}
@@ -263,7 +273,7 @@ export default function CreationCarteDeCompetence({
           <Feather name="trash-2" size={16} color="#EF4444" />
         </TouchableOpacity>
 
-        <View style={[styles.iconeBadge, { backgroundColor: item.couleur || "#38BDF8" }]}>
+        <View style={[styles.iconeBadge, { backgroundColor: item.couleur || HEADER_ICON_BG }]}>
           <Text style={styles.emoji}>{emojiIcone(item.icone)}</Text>
         </View>
 
@@ -280,14 +290,14 @@ export default function CreationCarteDeCompetence({
             {item.description}
           </Text>
         )}
-      </LinearGradient>
+      </View>
     </TouchableOpacity>
   );
 
   return (
     <SafeAreaView style={styles.safe}>
-      <LinearGradient colors={["#0EA5E9", "#60A5FA", "#DBEAFE"]} style={styles.container}>
-        <View style={styles.topBar}>
+      <View style={styles.container}>
+        <View style={[styles.topBar, { paddingHorizontal: horizontalPadding }]}> 
           <View>
             <Text style={styles.title}>Progressivité</Text>
             <Text style={styles.subtitle}>Cartes de compétences</Text>
@@ -302,7 +312,7 @@ export default function CreationCarteDeCompetence({
           </TouchableOpacity>
         </View>
 
-        <View style={styles.classZone}>
+        <View style={[styles.classZone, { paddingHorizontal: horizontalPadding }]}> 
           <ScrollView horizontal showsHorizontalScrollIndicator={false}>
             {classes.map((classe) => {
               const active = classe.id === classeId;
@@ -323,7 +333,7 @@ export default function CreationCarteDeCompetence({
 
         {loading ? (
           <View style={styles.loadingBox}>
-            <ActivityIndicator size="large" color="white" />
+            <ActivityIndicator size="large" color={HEADER_BG} />
             <Text style={styles.loadingText}>Chargement...</Text>
           </View>
         ) : !classeId ? (
@@ -357,7 +367,7 @@ export default function CreationCarteDeCompetence({
             numColumns={nbColonnes}
             keyExtractor={(item) => item.id}
             renderItem={renderCarte}
-            contentContainerStyle={styles.grid}
+            contentContainerStyle={[styles.grid, { paddingHorizontal: horizontalPadding }]}
             columnWrapperStyle={styles.row}
             showsVerticalScrollIndicator={false}
           />
@@ -447,7 +457,7 @@ export default function CreationCarteDeCompetence({
             </Pressable>
           </Pressable>
         </Modal>
-      </LinearGradient>
+      </View>
     </SafeAreaView>
   );
 }
@@ -455,103 +465,120 @@ export default function CreationCarteDeCompetence({
 const styles = StyleSheet.create({
   safe: {
     flex: 1,
-    backgroundColor: "#0EA5E9",
+    backgroundColor: PAGE_BG,
   },
+
   container: {
     flex: 1,
+    backgroundColor: CONTENT_BG,
   },
+
   topBar: {
-    height: 92,
-    paddingHorizontal: 20,
-    paddingTop: 8,
+    minHeight: 92,
+    paddingTop: 24,
+    paddingBottom: 12,
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
     justifyContent: "space-between",
   },
+
   title: {
-    color: "white",
+    color: CARD_TITLE,
     fontSize: 31,
     fontWeight: "900",
     letterSpacing: 0.2,
   },
+
   subtitle: {
-    color: "#E0F2FE",
+    color: CARD_SUBTITLE,
     fontSize: 15,
     fontWeight: "800",
     marginTop: 2,
   },
+
   addTopBtn: {
     width: 52,
     height: 52,
     borderRadius: 18,
-    backgroundColor: "#0F172A",
+    backgroundColor: HEADER_BG,
     alignItems: "center",
     justifyContent: "center",
     shadowColor: "#0F172A",
-    shadowOpacity: 0.25,
+    shadowOpacity: 0.2,
     shadowRadius: 10,
     shadowOffset: { width: 0, height: 5 },
     elevation: 7,
   },
+
   classZone: {
-    paddingHorizontal: 16,
-    paddingBottom: 12,
+    paddingBottom: 14,
   },
+
   classPill: {
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderRadius: 999,
-    backgroundColor: "rgba(255,255,255,0.45)",
+    backgroundColor: CARD_BG,
     marginRight: 10,
-    borderWidth: 2,
-    borderColor: "rgba(255,255,255,0.6)",
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
   },
+
   classPillActive: {
-    backgroundColor: "#0F172A",
-    borderColor: "#FFFFFF",
+    backgroundColor: HEADER_BG,
+    borderColor: HEADER_BG,
   },
+
   classText: {
-    color: "#0F172A",
+    color: CARD_TITLE,
     fontWeight: "900",
   },
+
   classTextActive: {
     color: "white",
   },
+
   loadingBox: {
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
   },
+
   loadingText: {
-    color: "white",
+    color: CARD_SUBTITLE,
     fontWeight: "900",
     marginTop: 10,
   },
+
   grid: {
-    paddingHorizontal: 16,
     paddingBottom: 120,
   },
+
   row: {
     justifyContent: "space-between",
   },
+
   skillCard: {
     marginBottom: 18,
-    borderRadius: 24,
-    borderWidth: 3,
-    backgroundColor: "white",
-    shadowColor: "#0F172A",
-    shadowOpacity: 0.22,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 7 },
-    elevation: 7,
+    borderRadius: 22,
+    borderWidth: 1,
+    backgroundColor: CARD_BG,
+    shadowColor: "#000",
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
     overflow: "hidden",
   },
+
   skillCardInner: {
     minHeight: 176,
     padding: 12,
     alignItems: "center",
     justifyContent: "center",
+    backgroundColor: CARD_BG,
   },
+
   deleteBtn: {
     position: "absolute",
     top: 8,
@@ -559,88 +586,101 @@ const styles = StyleSheet.create({
     width: 30,
     height: 30,
     borderRadius: 12,
-    backgroundColor: "rgba(255,255,255,0.9)",
+    backgroundColor: "rgba(255,255,255,0.95)",
     alignItems: "center",
     justifyContent: "center",
     zIndex: 5,
   },
+
   iconeBadge: {
-    width: 82,
-    height: 82,
-    borderRadius: 24,
+    width: 74,
+    height: 74,
+    borderRadius: 22,
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: 10,
+    marginBottom: 12,
     borderWidth: 4,
-    borderColor: "rgba(255,255,255,0.9)",
+    borderColor: TEXT_BG,
   },
+
   emoji: {
-    fontSize: 42,
+    fontSize: 38,
   },
+
   percentPill: {
-    backgroundColor: "#2563EB",
+    backgroundColor: HEADER_ICON_BG,
     paddingHorizontal: 18,
     paddingVertical: 4,
     borderRadius: 999,
-    marginBottom: 6,
+    marginBottom: 7,
   },
+
   percentText: {
     color: "white",
     fontSize: 18,
     fontWeight: "900",
   },
+
   cardTitle: {
-    color: "#0F172A",
+    color: CARD_TITLE,
     fontSize: 19,
     fontWeight: "900",
     textAlign: "center",
   },
+
   cardDescription: {
     marginTop: 4,
-    color: "#64748B",
+    color: CARD_SUBTITLE,
     fontSize: 12,
     fontWeight: "700",
     textAlign: "center",
   },
+
   emptyBox: {
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: 28,
   },
+
   emptyEmoji: {
     fontSize: 62,
     marginBottom: 10,
   },
+
   emptyTitle: {
-    color: "white",
+    color: CARD_TITLE,
     fontSize: 26,
     fontWeight: "900",
     textAlign: "center",
   },
+
   emptyText: {
-    color: "#E0F2FE",
+    color: CARD_SUBTITLE,
     fontSize: 15,
     fontWeight: "700",
     textAlign: "center",
     marginTop: 8,
     lineHeight: 22,
   },
+
   bigCreateBtn: {
     marginTop: 20,
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    backgroundColor: "#0F172A",
+    backgroundColor: HEADER_BG,
     paddingHorizontal: 22,
     paddingVertical: 14,
     borderRadius: 18,
   },
+
   bigCreateText: {
     color: "white",
     fontWeight: "900",
     fontSize: 16,
   },
+
   modalBackdrop: {
     flex: 1,
     backgroundColor: "rgba(15,23,42,0.55)",
@@ -648,80 +688,97 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     padding: 18,
   },
+
   modalCard: {
     width: "100%",
     maxWidth: 560,
     maxHeight: "92%",
     backgroundColor: "white",
-    borderRadius: 28,
+    borderRadius: 24,
     padding: 20,
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
   },
+
   modalTitle: {
     fontSize: 25,
     fontWeight: "900",
-    color: "#0F172A",
+    color: CARD_TITLE,
   },
+
   modalSubtitle: {
     marginTop: 4,
-    color: "#64748B",
+    color: CARD_SUBTITLE,
     fontWeight: "700",
     lineHeight: 20,
   },
+
   label: {
     marginTop: 16,
     marginBottom: 7,
-    color: "#0F172A",
+    color: CARD_TITLE,
     fontWeight: "900",
   },
+
   input: {
-    borderWidth: 2,
-    borderColor: "#CBD5E1",
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
     borderRadius: 16,
     paddingHorizontal: 14,
     paddingVertical: 12,
     fontWeight: "800",
-    color: "#0F172A",
+    color: CARD_TITLE,
     backgroundColor: "#F8FAFC",
   },
+
   textArea: {
     minHeight: 76,
     textAlignVertical: "top",
   },
+
   iconGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
     gap: 8,
   },
+
   iconChoice: {
     width: "31%",
     minHeight: 72,
     borderRadius: 16,
-    backgroundColor: "#F1F5F9",
+    backgroundColor: "#F8FAFC",
     alignItems: "center",
     justifyContent: "center",
-    borderWidth: 2,
-    borderColor: "#E2E8F0",
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
   },
+
   iconChoiceActive: {
-    backgroundColor: "#DBEAFE",
-    borderColor: "#2563EB",
+    backgroundColor: TEXT_BG,
+    borderColor: HEADER_ICON_BG,
+    borderWidth: 2,
   },
+
   iconEmoji: {
     fontSize: 24,
   },
+
   iconLabel: {
     fontSize: 11,
     marginTop: 4,
     fontWeight: "900",
-    color: "#64748B",
+    color: CARD_SUBTITLE,
   },
+
   iconLabelActive: {
-    color: "#1D4ED8",
+    color: HEADER_BG,
   },
+
   colorRow: {
     flexDirection: "row",
     gap: 10,
   },
+
   colorDot: {
     width: 34,
     height: 34,
@@ -729,34 +786,40 @@ const styles = StyleSheet.create({
     borderWidth: 3,
     borderColor: "white",
   },
+
   colorDotActive: {
-    borderColor: "#0F172A",
+    borderColor: HEADER_BG,
     transform: [{ scale: 1.12 }],
   },
+
   modalActions: {
     flexDirection: "row",
     justifyContent: "flex-end",
     gap: 10,
     marginTop: 22,
   },
+
   cancelBtn: {
     paddingHorizontal: 18,
     paddingVertical: 13,
     borderRadius: 16,
     backgroundColor: "#E2E8F0",
   },
+
   cancelText: {
     color: "#334155",
     fontWeight: "900",
   },
+
   saveBtn: {
     minWidth: 110,
     paddingHorizontal: 18,
     paddingVertical: 13,
     borderRadius: 16,
-    backgroundColor: "#2563EB",
+    backgroundColor: HEADER_BG,
     alignItems: "center",
   },
+
   saveText: {
     color: "white",
     fontWeight: "900",

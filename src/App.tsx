@@ -38,6 +38,18 @@ const GestionResultatsProgressivite = React.lazy(() => import("./GestionResultat
 const GestionPoints = React.lazy(() => import("./GestionPoints")) as React.LazyExoticComponent<React.ComponentType<any>>;
 const Association = React.lazy(() => import("./Association")) as React.LazyExoticComponent<React.ComponentType<any>>;
 
+const PersonnalisationBalises = React.lazy(
+  () => import("./GestionResultats/Progressivite/GestionPoints/Personnalisation/PersonnalisationBalises")
+) as React.LazyExoticComponent<React.ComponentType<any>>;
+
+const PersonnalisationParcoursTermines = React.lazy(
+  () => import("./GestionResultats/Progressivite/GestionPoints/Personnalisation/PersonnalisationParcoursTermines")
+) as React.LazyExoticComponent<React.ComponentType<any>>;
+
+const PersonnalisationTentatives = React.lazy(
+  () => import("./GestionResultats/Progressivite/GestionPoints/Personnalisation/PersonnalisationTentatives")
+) as React.LazyExoticComponent<React.ComponentType<any>>;
+
 const AccueilEleve = React.lazy(() => import("./AccueilEleve"));
 const ClassementEleve = React.lazy(() => import("./SessionEleve/ClassementEleve"));
 const EcrireResultat = React.lazy(() => import("./EcrireResultat")) as React.LazyExoticComponent<React.ComponentType<any>>;
@@ -85,6 +97,9 @@ type PageType =
   | "GestionResultatsProgressivite"
   | "GestionPoints"
   | "Association"
+  | "personnalisationBalises"
+  | "personnalisationParcoursTermines"
+  | "personnalisationTentatives"
   | "EcrireResultat"
   | "EcrireCodeBaliseEleve"
   | "Jeudeserreurs"
@@ -221,6 +236,9 @@ const normalizePage = (value: string | null | undefined): PageType => {
     case "gestionresultatsprogressivite": return "GestionResultatsProgressivite";
     case "gestionpoints": return "GestionPoints";
     case "association": return "Association";
+    case "personnalisationbalises": return "personnalisationBalises";
+    case "personnalisationparcourstermines": return "personnalisationParcoursTermines";
+    case "personnalisationtentatives": return "personnalisationTentatives";
     case "ecrireresultat": return "EcrireResultat";
     case "ecrirecodebaliseeleve": return "EcrireCodeBaliseEleve";
     case "jeudeserreurs": return "Jeudeserreurs";
@@ -280,8 +298,11 @@ const PROF_EXTRA_PAGES = new Set<PageType>([
   "GestionResultatsTentatives",
   "GestionResultatsProgressivite",
   "GestionPoints",
-  "PartageParcours",
   "Association",
+  "personnalisationBalises",
+  "personnalisationParcoursTermines",
+  "personnalisationTentatives",
+  "PartageParcours",
   "configurationPersonnalisee",
   "gestionResultatsTentatives_parcours",
   "NouveauMotDePasse",
@@ -308,6 +329,9 @@ const pageToTabId = (p: PageType) => {
     case "GestionResultatsTentatives":
     case "GestionResultatsProgressivite":
     case "gestionResultatsTentatives_parcours":
+    case "personnalisationBalises":
+    case "personnalisationParcoursTermines":
+    case "personnalisationTentatives":
     case "GestionResultats":
       return "gestionResultats";
 
@@ -496,30 +520,43 @@ export default function App() {
   );
 
   const handleDeconnexion = React.useCallback(async () => {
-    try {
-      await supabase.auth.signOut({ scope: "local" as any });
-    } catch (e) {
-      console.warn("supabase.auth.signOut error:", (e as any)?.message ?? e);
-    }
+  try {
+    await supabase.auth.signOut({ scope: "local" as any });
+  } catch (e) {
+    console.warn("supabase.auth.signOut error:", (e as any)?.message ?? e);
+  }
 
-    await storage.multiRemove([
-      LS_LAST_MODE,
-      LS_LAST_PAGE_PROF,
-      LS_LAST_PAGE_ELEVE,
-      LS_ELEVE_CACHE,
-    ]);
+  await storage.multiRemove([
+    LS_LAST_MODE,
+    LS_LAST_PAGE_PROF,
+    LS_LAST_PAGE_ELEVE,
+    LS_ELEVE_CACHE,
 
-    setProfesseur(null);
-    setEleve(null);
-    setSelectedGroup(null);
-    setParcoursId(null);
-    setModeConnexion("accueil");
-    setPage("accueil");
-    setRecoveryErrorMessage("");
-    clearRecoveryFlag();
+    "derniereConnexionMode",
+    "dernierePage",
+    "dernierePageEleve",
+    "eleveCache",
 
-    await storage.set(LS_LAST_MODE, "accueil");
-  }, []);
+    "lastMode",
+    "lastPageEleve",
+    "studentCache",
+    "eleveConnecte",
+    "parcoursActif",
+  ]);
+
+  setProfesseur(null);
+  setEleve(null);
+  setSelectedGroup(null);
+  setParcoursId(null);
+  setParcoursActif(null);
+  setParcoursGlobaux([]);
+  setModeConnexion("accueil");
+  setPage("accueil");
+  setRecoveryErrorMessage("");
+  clearRecoveryFlag();
+
+  await storage.set(LS_LAST_MODE, "accueil");
+}, []);
 
   const handleSelectGroupForStudents = (group: SelectedGroup) => {
     setSelectedGroup(group);
@@ -986,6 +1023,24 @@ export default function App() {
                     <GestionPoints setPage={goStr} professeur={professeur} />
                   )}
 
+                  {page === "personnalisationBalises" && (
+  <PersonnalisationBalises setPage={goStr} professeur={professeur} />
+)}
+
+                 {page === "personnalisationParcoursTermines" && (
+  <PersonnalisationParcoursTermines
+    setPage={goStr}
+    professeur={professeur}
+  />
+)}
+
+{page === "personnalisationTentatives" && (
+  <PersonnalisationTentatives
+    setPage={goStr}
+    professeur={professeur}
+  />
+)}
+
                   {page === "PartageParcours" && (
                     <PartageParcours setPage={goStr} professeur={professeur} />
                   )}
@@ -1035,12 +1090,13 @@ export default function App() {
                   )}
 
                   {page === "EcrireCodeBaliseEleve" && (
-                    <EcrireCodeBaliseEleve
-                      setPage={goStr}
-                      eleveConnecte={eleve}
-                      parcoursActif={parcoursActif}
-                    />
-                  )}
+  <EcrireCodeBaliseEleve
+    setPage={goStr}
+    eleveConnecte={eleve}
+    parcoursActif={parcoursActif}
+    handleDeconnexion={handleDeconnexion}
+  />
+)}
 
                   {page === "Jeudeserreurs" && (
                     <Jeudeserreurs

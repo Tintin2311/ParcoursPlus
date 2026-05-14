@@ -55,6 +55,8 @@ type StatRow = {
   total_balises?: number | null;
   tentatives_count?: number | null;
   parcours_termine?: boolean | null;
+  updated_at?: string | null;
+  created_at?: string | null;
 };
 
 type Props = {
@@ -68,7 +70,6 @@ const C_TEXT = "#0B2540";
 const C_MUTED = "#57708A";
 const C_GOLD = "#FBBF24";
 const C_BLUE = "#1F75B8";
-const C_BLUE_DARK = "#0F4C75";
 const C_GREEN = "#22C55E";
 const C_ORANGE = "#F97316";
 const C_RED = "#EF4444";
@@ -78,15 +79,12 @@ const getDisplayName = (row: any) =>
 
 const normalizeAssoc = (value: any): string[] => {
   if (!value) return [];
-
   if (Array.isArray(value)) {
     return value.map((v) => String(v).trim()).filter(Boolean);
   }
-
   if (typeof value === "string") {
     const raw = value.trim();
     if (!raw) return [];
-
     if (raw.startsWith("{") && raw.endsWith("}")) {
       return raw
         .slice(1, -1)
@@ -94,19 +92,14 @@ const normalizeAssoc = (value: any): string[] => {
         .map((v) => v.trim().replace(/^"(.*)"$/, "$1"))
         .filter(Boolean);
     }
-
     try {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
         return parsed.map((v) => String(v).trim()).filter(Boolean);
       }
-    } catch {
-      // ignore
-    }
-
+    } catch {}
     return [raw];
   }
-
   return [];
 };
 
@@ -122,15 +115,142 @@ const isStatCompleted = (row: StatRow) => {
   const bestScore = Number(row.best_score ?? 0);
   const lastScore = Number(row.last_score ?? 0);
   const totalBalises = Number(row.total_balises ?? 0);
-
   return (
     row.parcours_termine === true ||
     (totalBalises > 0 && (bestScore >= totalBalises || lastScore >= totalBalises))
   );
 };
 
-const formatPoints = (value: number) =>
-  Math.round(value || 0).toLocaleString("fr-FR");
+const formatDateMs = (value?: string | null) => {
+  if (!value) return 0;
+  const t = new Date(value).getTime();
+  return Number.isFinite(t) ? t : 0;
+};
+
+// ─────────────────────────────────────────────
+// ActionCard — style carte de jeu
+// ─────────────────────────────────────────────
+
+function ActionCard({
+  icon,
+  title,
+  subtitle,
+  onPress,
+  locked = false,
+  disabled = false,
+  isActive = false,
+}: {
+  icon: React.ComponentProps<typeof Feather>["name"];
+  title: string;
+  subtitle: string;
+  onPress: () => void;
+  locked?: boolean;
+  disabled?: boolean;
+  isActive?: boolean;
+}) {
+  const borderColors: readonly [string, string, string, string, string] = isActive
+    ? ["#5ab0ff", "#1a6ab8", "#0a4a88", "#1a6ab8", "#5ab0ff"]
+    : ["#8aafc8", "#4a6e8a", "#2a4e6a", "#4a7090", "#7aaac8"];
+
+  const innerColors: readonly [string, string, string] = isActive
+    ? ["#d4eeff", "#b0d8f8", "#88c0f0"]
+    : ["#c8dff2", "#9ec4de", "#7aaac8"];
+
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={disabled}
+      style={[
+        styles.actionOuter,
+        disabled && !locked && styles.actionOuterDisabled,
+      ]}
+    >
+      {/* Bordure extérieure dégradée */}
+      <LinearGradient
+        colors={borderColors}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 0, y: 1 }}
+        style={styles.cardBorder}
+      >
+        {/* Fond intérieur */}
+        <LinearGradient
+          colors={innerColors}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.cardInner}
+        >
+          {/* Badge cadenas — coin haut-droit */}
+          {locked && (
+            <View style={styles.lockBadge}>
+              <Feather name="lock" size={13} color="#c0d8f0" />
+            </View>
+          )}
+
+          {/* Corps de la carte */}
+          <View style={styles.cardBody}>
+            <View
+              style={[
+                styles.cardIconWrap,
+                { opacity: locked ? 0.5 : 0.82 },
+              ]}
+            >
+              <Feather name={icon} size={38} color="#3a6a8a" />
+            </View>
+
+            <Text
+              numberOfLines={1}
+              style={[
+                styles.cardTitle,
+                isActive && styles.cardTitleActive,
+              ]}
+            >
+              {title}
+            </Text>
+
+            <Text
+              numberOfLines={2}
+              style={[
+                styles.cardSub,
+                isActive && styles.cardSubActive,
+              ]}
+            >
+              {subtitle}
+            </Text>
+          </View>
+
+          {/* Footer */}
+          {locked ? (
+            <LinearGradient
+              colors={["#1a3a5c", "#0d2a45"]}
+              style={styles.cardFooter}
+            >
+              <Feather name="lock" size={12} color="#8ab0d0" />
+              <Text style={styles.cardFooterText}>BLOQUÉ</Text>
+            </LinearGradient>
+          ) : (
+            <LinearGradient
+              colors={["#0a3a78", "#062a60"]}
+              style={[styles.cardFooter, styles.cardFooterActive]}
+            >
+              <View style={styles.diamondBadge}>
+                <Feather
+                  name="navigation"
+                  size={9}
+                  color="#a0d8ff"
+                  style={{ transform: [{ rotate: "-45deg" }] }}
+                />
+              </View>
+            </LinearGradient>
+          )}
+        </LinearGradient>
+      </LinearGradient>
+    </Pressable>
+  );
+}
+
+// ─────────────────────────────────────────────
+// AccueilEleve
+// ─────────────────────────────────────────────
 
 const AccueilEleve: React.FC<Props> = ({
   setPage,
@@ -139,12 +259,12 @@ const AccueilEleve: React.FC<Props> = ({
   setParcoursActif,
 }) => {
   const { width, height } = useWindowDimensions();
-
   const isLandscape = width > height;
   const isLargeScreen = width >= 768;
   const isSmall = width < 420;
 
-  const backgroundImage = isLandscape || isLargeScreen ? BG_PAYSAGE : BG_MOBILE;
+  const backgroundImage =
+    isLandscape || isLargeScreen ? BG_PAYSAGE : BG_MOBILE;
 
   const studentId = eleveConnecte?.id ?? eleveConnecte?.uuid ?? null;
   const groupId = eleveConnecte?.group_id ?? null;
@@ -169,33 +289,39 @@ const AccueilEleve: React.FC<Props> = ({
   React.useEffect(() => {
     const loadHome = async () => {
       setLoading(true);
-
       try {
         if (!studentId) return;
 
-        const [{ data: statsData }, { data: parcoursData }] = await Promise.all([
-          supabase
-            .from("eleve_parcours_stats")
-            .select(
-              "parcours_id,best_points,last_points,best_score,last_score,total_balises,tentatives_count,parcours_termine"
-            )
-            .eq("student_id", studentId),
-          supabase
-            .from("parcours")
-            .select("*")
-            .order("ordre", { ascending: true, nullsFirst: false })
-            .order("created_at", { ascending: true }),
-        ]);
+        const [{ data: statsData }, { data: parcoursData }] =
+          await Promise.all([
+            supabase
+              .from("eleve_parcours_stats")
+              .select(
+                "parcours_id,best_points,last_points,best_score,last_score,total_balises,tentatives_count,parcours_termine,updated_at,created_at"
+              )
+              .eq("student_id", studentId),
+            supabase
+              .from("parcours")
+              .select("*")
+              .order("ordre", { ascending: true, nullsFirst: false })
+              .order("created_at", { ascending: true }),
+          ]);
 
         const stats = ((statsData as StatRow[]) || []).filter(Boolean);
-        const allParcours = ((parcoursData as ParcoursRow[]) || []).filter(Boolean);
+        const allParcours = (
+          (parcoursData as ParcoursRow[]) || []
+        ).filter(Boolean);
 
         const visibleParcours = groupId
-          ? allParcours.filter((p) => isParcoursVisibleForGroup(p, groupId))
+          ? allParcours.filter((p) =>
+              isParcoursVisibleForGroup(p, groupId)
+            )
           : allParcours;
 
         const visibleIds = new Set(visibleParcours.map((p) => String(p.id)));
-        const visibleStats = stats.filter((s) => visibleIds.has(String(s.parcours_id)));
+        const visibleStats = stats.filter((s) =>
+          visibleIds.has(String(s.parcours_id))
+        );
 
         const totalPts = visibleStats.reduce((sum, row) => {
           return sum + Number(row.best_points ?? row.last_points ?? 0);
@@ -203,27 +329,34 @@ const AccueilEleve: React.FC<Props> = ({
 
         const completed = visibleStats.filter(isStatCompleted).length;
 
-        const startedNotDoneStats = visibleStats.filter((row) => {
-          const bestScore = Number(row.best_score ?? 0);
-          const lastScore = Number(row.last_score ?? 0);
-          const tentatives = Number(row.tentatives_count ?? 0);
+        const startedNotDoneStats = visibleStats
+          .filter((row) => {
+            const bestScore = Number(row.best_score ?? 0);
+            const lastScore = Number(row.last_score ?? 0);
+            const tentatives = Number(row.tentatives_count ?? 0);
+            return (
+              !isStatCompleted(row) &&
+              (tentatives > 0 || bestScore > 0 || lastScore > 0)
+            );
+          })
+          .sort((a, b) => {
+            const dateB = formatDateMs(b.updated_at ?? b.created_at);
+            const dateA = formatDateMs(a.updated_at ?? a.created_at);
+            return dateB - dateA;
+          });
 
-          return (
-            !isStatCompleted(row) &&
-            (tentatives > 0 || bestScore > 0 || lastScore > 0)
-          );
-        });
-
-        const firstContinue = startedNotDoneStats[0]
+        const lastContinue = startedNotDoneStats[0]
           ? visibleParcours.find(
-              (p) => String(p.id) === String(startedNotDoneStats[0].parcours_id)
+              (p) =>
+                String(p.id) ===
+                String(startedNotDoneStats[0].parcours_id)
             ) ?? null
           : null;
 
         setScore(totalPts);
         setTotalParcours(visibleParcours.length);
         setCompletedParcours(completed);
-        setContinueParcours(firstContinue);
+        setContinueParcours(lastContinue);
       } finally {
         setLoading(false);
       }
@@ -236,11 +369,12 @@ const AccueilEleve: React.FC<Props> = ({
   const currentXp = score % 500;
   const xpProgress = totalParcours > 0 ? (currentXp / 500) * 100 : 0;
   const globalProgress =
-    totalParcours > 0 ? Math.round((completedParcours / totalParcours) * 100) : 0;
+    totalParcours > 0
+      ? Math.round((completedParcours / totalParcours) * 100)
+      : 0;
 
   const onLogout = async () => {
     if (loggingOut) return;
-
     try {
       setLoggingOut(true);
       await handleDeconnexion();
@@ -251,18 +385,18 @@ const AccueilEleve: React.FC<Props> = ({
   };
 
   const openContinueParcours = () => {
-    if (continueParcours) {
-      setParcoursActif?.(continueParcours);
-      setPage("EcrireCodeBaliseEleve");
-      return;
-    }
-
-    setPage("EcrireResultat");
+    if (!continueParcours) return;
+    setParcoursActif?.(continueParcours);
+    setPage("EcrireCodeBaliseEleve");
   };
 
   return (
     <SafeAreaView style={styles.safe}>
-      <ImageBackground source={{ uri: backgroundImage }} style={styles.bg} resizeMode="cover">
+      <ImageBackground
+        source={{ uri: backgroundImage }}
+        style={styles.bg}
+        resizeMode="cover"
+      >
         <LinearGradient
           colors={[
             "rgba(5,18,30,0.50)",
@@ -273,6 +407,7 @@ const AccueilEleve: React.FC<Props> = ({
           locations={[0, 0.24, 0.62, 1]}
           style={styles.container}
         >
+          {/* ── Top bar ── */}
           <View style={styles.topBar}>
             <View style={styles.nameCard}>
               <Text numberOfLines={1} style={styles.nameText}>
@@ -295,7 +430,13 @@ const AccueilEleve: React.FC<Props> = ({
               isLargeScreen && styles.scrollContentLarge,
             ]}
           >
-            <View style={[styles.levelPanel, isSmall && styles.levelPanelSmall]}>
+            {/* ── Panneau niveau / XP ── */}
+            <View
+              style={[
+                styles.levelPanel,
+                isSmall && styles.levelPanelSmall,
+              ]}
+            >
               <View style={styles.levelBadge}>
                 <Text style={styles.levelSmall}>NIVEAU</Text>
                 <Text style={styles.levelNumber}>{level}</Text>
@@ -307,7 +448,9 @@ const AccueilEleve: React.FC<Props> = ({
                   {loading ? (
                     <ActivityIndicator color="#FFFFFF" size="small" />
                   ) : (
-                    <Text style={styles.levelValue}>{currentXp}/500 pts</Text>
+                    <Text style={styles.levelValue}>
+                      {currentXp}/500 pts
+                    </Text>
                   )}
                 </View>
 
@@ -315,61 +458,84 @@ const AccueilEleve: React.FC<Props> = ({
                   <View
                     style={[
                       styles.xpFill,
-                      { width: `${Math.max(3, Math.min(100, xpProgress))}%` as any },
+                      {
+                        width: `${Math.max(
+                          3,
+                          Math.min(100, xpProgress)
+                        )}%` as any,
+                      },
                     ]}
                   />
                 </View>
 
                 <View style={styles.progressMetaRow}>
-                  <Text numberOfLines={1} style={styles.progressMetaText}>
-                    Parcours terminés : {completedParcours}/{totalParcours}
+                  <Text
+                    numberOfLines={1}
+                    style={styles.progressMetaText}
+                  >
+                    Parcours terminés : {completedParcours}/
+                    {totalParcours}
                   </Text>
-                  <Text style={styles.progressMetaText}>{globalProgress}%</Text>
+                  <Text style={styles.progressMetaText}>
+                    {globalProgress}%
+                  </Text>
                 </View>
               </View>
             </View>
 
+            {/* ── Grille des 4 cartes ── */}
             <View style={styles.actionsGrid}>
               <View style={styles.actionsRow}>
+                {/* PARCOURS EN COURS */}
                 <ActionCard
                   icon="map"
                   title="PARCOURS EN COURS"
                   subtitle={
-                    continueParcours ? getDisplayName(continueParcours) : "Aucun"
+                    continueParcours
+                      ? getDisplayName(continueParcours)
+                      : "Aucun parcours en cours"
                   }
-                  accent={continueParcours ? C_ORANGE : C_BLUE}
+                  isActive
+                  disabled={!continueParcours}
                   onPress={openContinueParcours}
                 />
 
+                {/* DUEL */}
                 <ActionCard
                   icon="crosshair"
                   title="DUEL"
                   subtitle="Bientôt disponible"
-                  accent={C_RED}
-                  onPress={() => setPage("AccueilEleve")}
+                  locked
+                  disabled
+                  onPress={() => {}}
                 />
               </View>
 
               <View style={styles.actionsRow}>
+                {/* INVENTAIRE */}
                 <ActionCard
                   icon="briefcase"
                   title="INVENTAIRE"
                   subtitle="Bientôt disponible"
-                  accent="#8B5CF6"
-                  onPress={() => setPage("AccueilEleve")}
+                  locked
+                  disabled
+                  onPress={() => {}}
                 />
 
+                {/* TOURNOIS */}
                 <ActionCard
                   icon="award"
                   title="TOURNOIS"
-                  subtitle="Classement"
-                  accent={C_GREEN}
-                  onPress={() => setPage("ClassementEleve")}
+                  subtitle="Bientôt disponible"
+                  locked
+                  disabled
+                  onPress={() => {}}
                 />
               </View>
             </View>
           </ScrollView>
 
+          {/* ── Modal déconnexion ── */}
           <Modal transparent visible={confirmVisible} animationType="fade">
             <View style={styles.modalBg}>
               <View style={styles.modalBox}>
@@ -408,44 +574,11 @@ const AccueilEleve: React.FC<Props> = ({
   );
 };
 
-function ActionCard({
-  icon,
-  title,
-  subtitle,
-  accent,
-  onPress,
-}: {
-  icon: React.ComponentProps<typeof Feather>["name"];
-  title: string;
-  subtitle: string;
-  accent: string;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable onPress={onPress} style={styles.actionOuter}>
-      <LinearGradient
-        colors={["rgba(255,255,255,0.96)", "rgba(224,244,255,0.88)"]}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
-        style={styles.actionCard}
-      >
-        <View style={[styles.actionIcon, { backgroundColor: `${accent}22` }]}>
-          <Feather name={icon} size={22} color={accent} />
-        </View>
-
-        <Text numberOfLines={1} style={styles.actionTitle}>
-          {title}
-        </Text>
-
-        <Text numberOfLines={2} style={styles.actionSubtitle}>
-          {subtitle}
-        </Text>
-      </LinearGradient>
-    </Pressable>
-  );
-}
-
 export default AccueilEleve;
+
+// ─────────────────────────────────────────────
+// Styles
+// ─────────────────────────────────────────────
 
 const styles = StyleSheet.create({
   safe: {
@@ -461,6 +594,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
 
+  // ── Top bar ──────────────────────────────
   topBar: {
     flexDirection: "row",
     alignItems: "center",
@@ -502,6 +636,7 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255,255,255,0.32)",
   },
 
+  // ── Scroll ───────────────────────────────
   scrollContent: {
     paddingHorizontal: 16,
     paddingTop: 14,
@@ -514,6 +649,7 @@ const styles = StyleSheet.create({
     alignSelf: "center",
   },
 
+  // ── Panneau niveau ────────────────────────
   levelPanel: {
     minHeight: 98,
     borderRadius: 24,
@@ -613,6 +749,7 @@ const styles = StyleSheet.create({
     fontWeight: "800",
   },
 
+  // ── Grille des cartes ─────────────────────
   actionsGrid: {
     gap: 12,
   },
@@ -624,51 +761,128 @@ const styles = StyleSheet.create({
 
   actionOuter: {
     flex: 1,
-    borderRadius: 22,
     shadowColor: "#000",
-    shadowOpacity: 0.18,
-    shadowRadius: 14,
+    shadowOpacity: 0.22,
+    shadowRadius: 16,
     shadowOffset: { width: 0, height: 8 },
-    elevation: 4,
+    elevation: 6,
   },
 
-  actionCard: {
-    minHeight: 112,
-    borderRadius: 22,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.58)",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 12,
+  actionOuterDisabled: {
+    opacity: 0.7,
+  },
+
+  // ── Carte jeu ─────────────────────────────
+  cardBorder: {
+    borderRadius: 14,
+    padding: 2,
     overflow: "hidden",
   },
 
-  actionIcon: {
-    width: 44,
-    height: 44,
-    borderRadius: 17,
+  cardInner: {
+    borderRadius: 12,
+    overflow: "hidden",
+    minHeight: 162,
+    flexDirection: "column",
+  },
+
+  cardBody: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 10,
+    paddingTop: 16,
+    paddingBottom: 8,
+  },
+
+  cardIconWrap: {
+    width: 62,
+    height: 62,
     alignItems: "center",
     justifyContent: "center",
     marginBottom: 8,
   },
 
-  actionTitle: {
-    color: C_TEXT,
-    fontSize: 13,
+  cardTitle: {
+    color: "#1a3a5c",
+    fontSize: 12,
     fontWeight: "900",
     textAlign: "center",
-    letterSpacing: 0.2,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
   },
 
-  actionSubtitle: {
-    color: C_MUTED,
+  cardTitleActive: {
+    color: "#0a2a50",
+  },
+
+  cardSub: {
+    color: "#4a6a8a",
     fontSize: 11,
-    fontWeight: "800",
+    fontWeight: "600",
     textAlign: "center",
-    marginTop: 4,
+    marginTop: 3,
     lineHeight: 15,
   },
 
+  cardSubActive: {
+    color: "#2a6aaa",
+    fontWeight: "700",
+  },
+
+  cardFooter: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingVertical: 8,
+    borderTopWidth: 1.5,
+    borderTopColor: "#4a7090",
+  },
+
+  cardFooterActive: {
+    borderTopColor: "#3a8ada",
+    paddingVertical: 10,
+  },
+
+  cardFooterText: {
+    color: "#8ab0d0",
+    fontWeight: "900",
+    fontSize: 12,
+    letterSpacing: 1.5,
+    textTransform: "uppercase",
+  },
+
+  // Badge cadenas — coin haut-droit
+  lockBadge: {
+    position: "absolute",
+    top: 8,
+    right: 8,
+    zIndex: 10,
+    width: 30,
+    height: 30,
+    borderRadius: 6,
+    backgroundColor: "rgba(26,48,80,0.85)",
+    borderWidth: 1,
+    borderColor: "#4a7090",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  // Badge diamant — carte active
+  diamondBadge: {
+    width: 22,
+    height: 22,
+    borderRadius: 4,
+    backgroundColor: "#1a6ad8",
+    borderWidth: 1.5,
+    borderColor: "#5ab0ff",
+    alignItems: "center",
+    justifyContent: "center",
+    transform: [{ rotate: "45deg" }],
+  },
+
+  // ── Modal ────────────────────────────────
   modalBg: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.58)",

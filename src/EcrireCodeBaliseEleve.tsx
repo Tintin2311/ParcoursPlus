@@ -58,11 +58,14 @@ type RpcStudentRow = {
   group_id?: string | null;
 };
 
+type ParcoursFormatType = "code" | "poincon" | "qrcode" | "tableau";
+
 type ParcoursActif = {
   id?: string;
   nom?: string | null;
   name?: string | null;
   balises_ordre?: any;
+  format_type?: ParcoursFormatType | null;
   user_id?: string | null;
   professeur_id?: string | null;
   [key: string]: any;
@@ -80,11 +83,36 @@ type BaliseRow = {
   [key: string]: any;
 };
 
+type PoinconCell = boolean[][];
+
+type PoinconFormat = {
+  rows: number;
+  cols: number;
+  cells: PoinconCell;
+};
+
+type BaliseFormatRow = {
+  id?: string;
+  balise_id: string;
+  format_type: ParcoursFormatType;
+  payload?: any;
+};
+
+type PoinconDebugRow = {
+  id?: string;
+  balise_id?: string;
+  user_id?: string | null;
+  format_type?: string;
+  payload?: any;
+};
+
 type BaliseAffichee = BaliseRow & {
   ordre: number;
   instanceKey: string;
   originalBaliseId: string;
   tokenSource: string;
+  poinconFormat?: PoinconFormat | null;
+  poinconFormatMissing?: boolean;
 };
 
 type Props = {
@@ -97,13 +125,9 @@ type Props = {
 const BG_GAME =
   "https://aswhubzprehjnunbpkwc.supabase.co/storage/v1/object/public/background/AccueilElevePaysage.png";
 
-const C_BG = "#EAF6FF";
-const C_BG_2 = "#F8FCFF";
-const C_CARD = "#FFFFFF";
 const C_TEXT = "#12304A";
 const C_MUTED = "#5D7288";
 const C_BORDER = "rgba(31,91,134,0.14)";
-const C_BLUE = "#1F75B8";
 const C_BLUE_DARK = "#1F5B86";
 const C_GOLD = "#F59E0B";
 const C_GREEN = "#16A34A";
@@ -156,6 +180,176 @@ const parseJsonObject = (value: any): any => {
   return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
 };
 
+const emptyPoincon = (rows: number, cols: number): PoinconCell =>
+  Array.from({ length: rows }, () => Array.from({ length: cols }, () => false));
+
+const DEFAULT_POINCON_FORMAT: PoinconFormat = {
+  rows: 4,
+  cols: 4,
+  cells: emptyPoincon(4, 4),
+};
+
+const isActiveCellValue = (value: any) =>
+  value === true || value === "true" || value === 1 || value === "1";
+
+const normalizePoinconPayload = (payload: any): PoinconFormat | null => {
+  const p = parseJsonObject(payload);
+
+  const rowsRaw = Number(p.rows ?? p.lignes ?? p.height ?? p.size ?? 4);
+  const colsRaw = Number(p.cols ?? p.columns ?? p.colonnes ?? p.width ?? p.size ?? 4);
+
+  if (!Number.isFinite(rowsRaw) || !Number.isFinite(colsRaw)) return null;
+
+  const rows = Math.max(2, Math.min(8, Math.floor(rowsRaw || 4)));
+  const cols = Math.max(2, Math.min(8, Math.floor(colsRaw || 4)));
+  const cells = emptyPoincon(rows, cols);
+
+  const mark = (r: number, c: number) => {
+    if (
+      Number.isInteger(r) &&
+      Number.isInteger(c) &&
+      r >= 0 &&
+      r < rows &&
+      c >= 0 &&
+      c < cols
+    ) {
+      cells[r][c] = true;
+      return true;
+    }
+    return false;
+  };
+
+  let hasAnyTrue = false;
+
+  const dots =
+    p.dots && typeof p.dots === "object" && !Array.isArray(p.dots)
+      ? p.dots
+      : null;
+
+  if (dots) {
+    Object.entries(dots).forEach(([key, value]) => {
+      if (!isActiveCellValue(value)) return;
+
+      const [rRaw, cRaw] = String(key).split("-");
+      const r = Number(rRaw);
+      const c = Number(cRaw);
+
+      if (mark(r, c)) hasAnyTrue = true;
+    });
+  }
+
+  const rawCells = p.cells ?? p.grille ?? p.grid ?? p.matrix;
+
+  if (Array.isArray(rawCells)) {
+    rawCells.forEach((row: any, r: number) => {
+      if (!Array.isArray(row)) return;
+
+      row.forEach((value: any, c: number) => {
+        if (isActiveCellValue(value)) {
+          if (mark(r, c)) hasAnyTrue = true;
+        }
+      });
+    });
+  }
+
+  const positions = p.positions ?? p.points ?? p.activeCells;
+
+  if (Array.isArray(positions)) {
+    positions.forEach((pos: any) => {
+      const r = Number(pos?.row ?? pos?.r ?? pos?.ligne);
+      const c = Number(pos?.col ?? pos?.c ?? pos?.colonne);
+      if (mark(r, c)) hasAnyTrue = true;
+    });
+  }
+
+  if (!hasAnyTrue) {
+    console.warn("⚠️ Poinçon Supabase lu mais aucune case noire trouvée :", p);
+  }
+
+  return { rows, cols, cells };
+};
+
+const matrixSignature = (matrix: PoinconCell): string => {
+  return matrix.map((row) => row.map((cell) => (cell ? "1" : "0")).join("")).join("/");
+};
+
+const rotatePoincon90 = (matrix: PoinconCell): PoinconCell => {
+  const rows = matrix.length;
+  const cols = matrix[0]?.length ?? 0;
+
+  return Array.from({ length: cols }, (_, r) =>
+    Array.from({ length: rows }, (_, c) => !!matrix[rows - 1 - c]?.[r])
+  );
+};
+
+const transposePoincon = (matrix: PoinconCell): PoinconCell => {
+  const rows = matrix.length;
+  const cols = matrix[0]?.length ?? 0;
+
+  return Array.from({ length: cols }, (_, r) =>
+    Array.from({ length: rows }, (_, c) => !!matrix[c]?.[r])
+  );
+};
+
+const flipPoinconHorizontal = (matrix: PoinconCell): PoinconCell => {
+  return matrix.map((row) => [...row].reverse());
+};
+
+const flipPoinconVertical = (matrix: PoinconCell): PoinconCell => {
+  return [...matrix].reverse().map((row) => [...row]);
+};
+
+const samePoincon = (a: PoinconCell, b: PoinconCell): boolean => {
+  if (a.length !== b.length) return false;
+  if ((a[0]?.length ?? 0) !== (b[0]?.length ?? 0)) return false;
+
+  return a.every((row, r) => row.every((cell, c) => !!cell === !!b[r]?.[c]));
+};
+
+const uniqueMatrices = (items: PoinconCell[]) => {
+  const seen = new Set<string>();
+  const out: PoinconCell[] = [];
+
+  items.forEach((matrix) => {
+    const signature = matrixSignature(matrix);
+    if (seen.has(signature)) return;
+    seen.add(signature);
+    out.push(matrix);
+  });
+
+  return out;
+};
+
+const buildPoinconVariants = (expected: PoinconCell): PoinconCell[] => {
+  const bases: PoinconCell[] = [];
+
+  let current = expected;
+  for (let i = 0; i < 4; i += 1) {
+    bases.push(current);
+    current = rotatePoincon90(current);
+  }
+
+  const transposed = transposePoincon(expected);
+  current = transposed;
+  for (let i = 0; i < 4; i += 1) {
+    bases.push(current);
+    current = rotatePoincon90(current);
+  }
+
+  const withMirrors = bases.flatMap((matrix) => [
+    matrix,
+    flipPoinconHorizontal(matrix),
+    flipPoinconVertical(matrix),
+  ]);
+
+  return uniqueMatrices(withMirrors);
+};
+
+const poinconMatchesInAnyRotation = (student: PoinconCell, expected: PoinconCell): boolean => {
+  const variants = buildPoinconVariants(expected);
+  return variants.some((variant) => samePoincon(student, variant));
+};
+
 const parseAssignments = (value: any): Record<string, number> => {
   const obj = parseJsonObject(value);
   const out: Record<string, number> = {};
@@ -192,10 +386,7 @@ const extractTokens = (value: any): string[] => {
         .filter(Boolean);
     }
 
-    if (
-      (raw.startsWith("[") && raw.endsWith("]")) ||
-      (raw.startsWith("{") && raw.endsWith("}"))
-    ) {
+    if ((raw.startsWith("[") && raw.endsWith("]")) || (raw.startsWith("{") && raw.endsWith("}"))) {
       try {
         const parsed = JSON.parse(raw);
         return extractTokens(parsed);
@@ -215,12 +406,7 @@ const extractTokens = (value: any): string[] => {
   }
 
   if (typeof value === "object") {
-    const candidate =
-      value.balise_id ??
-      value.id ??
-      value.value ??
-      value.numero_balise ??
-      value.code;
+    const candidate = value.balise_id ?? value.id ?? value.value ?? value.numero_balise ?? value.code;
 
     if (candidate != null) return [String(candidate).trim()].filter(Boolean);
     if (Array.isArray(value.items)) return extractTokens(value.items);
@@ -231,10 +417,7 @@ const extractTokens = (value: any): string[] => {
   return [];
 };
 
-const orderBalisesFromTokens = (
-  tokens: string[],
-  balises: BaliseRow[]
-): BaliseAffichee[] => {
+const orderBalisesFromTokens = (tokens: string[], balises: BaliseRow[]): BaliseAffichee[] => {
   const byId = new Map<string, BaliseRow>();
   const byNumero = new Map<string, BaliseRow>();
   const byCode = new Map<string, BaliseRow>();
@@ -273,7 +456,11 @@ const orderBalisesFromTokens = (
       originalBaliseId,
       instanceKey,
       tokenSource: t,
+      // Les balises gelées disparaissent du parcours élève.
+      // Les balises restantes sont renumérotées proprement côté affichage.
       ordre: results.length + 1,
+      poinconFormat: null,
+      poinconFormatMissing: false,
     });
   });
 
@@ -308,22 +495,6 @@ const normalizeValidatedIdsForOccurrences = (
   });
 
   return normalized;
-};
-
-const formatConditionLabel = (
-  row:
-    | ParcoursBaremeTentativeRow
-    | {
-        condition_type: "=" | "≥" | "≤" | "entre";
-        attempts_value: number | null;
-        attempts_min: number | null;
-        attempts_max: number | null;
-      }
-) => {
-  if (row.condition_type === "entre") {
-    return `${row.attempts_min ?? "?"} à ${row.attempts_max ?? "?"}`;
-  }
-  return `${row.condition_type} ${row.attempts_value ?? "?"}`;
 };
 
 const getModesFromRow = (row: any) => {
@@ -426,8 +597,7 @@ const mergeConfigWithBestSupabaseRow = async (
   );
 
   const tentativePageMode =
-    bestRow?.tentative_page_mode === "personnalise" ||
-    bestRow?.tentativePageMode === "personnalise"
+    bestRow?.tentative_page_mode === "personnalise" || bestRow?.tentativePageMode === "personnalise"
       ? "personnalise"
       : "general";
 
@@ -481,6 +651,83 @@ const loadStatParcoursTermine = async (
   return data?.parcours_termine === true;
 };
 
+const normalizeRpcPoinconRows = (data: any): BaliseFormatRow[] => {
+  const rows = Array.isArray(data) ? data : [];
+
+  return rows
+    .map((row: PoinconDebugRow) => ({
+      id: row?.id ? String(row.id) : undefined,
+      balise_id: String(row?.balise_id ?? "").trim(),
+      format_type: String(row?.format_type ?? "poincon").trim().toLowerCase() as ParcoursFormatType,
+      payload: row?.payload && typeof row.payload === "object" ? row.payload : {},
+    }))
+    .filter((row) => !!row.balise_id && row.format_type === "poincon");
+};
+
+const loadPoinconFormatsForBalises = async (ids: string[]): Promise<BaliseFormatRow[]> => {
+  if (!ids.length) return [];
+
+  const cleanIds = Array.from(
+    new Set(ids.map((id) => String(id ?? "").trim()).filter(Boolean))
+  );
+
+  const rpcNames = [
+    "get_poincon_formats_by_balise_ids",
+    "debug_get_poincon_formats_by_balise_ids",
+  ];
+
+  for (const rpcName of rpcNames) {
+    try {
+      const { data, error } = await supabase.rpc(rpcName, {
+        p_balise_ids: cleanIds,
+      });
+
+      if (error) {
+        console.warn(`❌ RPC ${rpcName} impossible:`, error);
+        continue;
+      }
+
+      const normalized = normalizeRpcPoinconRows(data);
+
+      console.log(`🧩 RPC ${rpcName} résultat`, {
+        idsDemandes: cleanIds,
+        lignesBrutes: data,
+        lignesNormalisees: normalized,
+      });
+
+      if (normalized.length > 0) return normalized;
+    } catch (e) {
+      console.warn(`❌ RPC ${rpcName} exception:`, e);
+    }
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from("balise_formats")
+      .select("id, balise_id, user_id, format_type, payload")
+      .in("balise_id", cleanIds)
+      .eq("format_type", "poincon");
+
+    if (error) {
+      console.warn("❌ Lecture directe balise_formats impossible:", error);
+      return [];
+    }
+
+    const normalized = normalizeRpcPoinconRows(data);
+
+    console.log("🧩 Lecture directe balise_formats résultat", {
+      idsDemandes: cleanIds,
+      lignesBrutes: data,
+      lignesNormalisees: normalized,
+    });
+
+    return normalized;
+  } catch (e) {
+    console.warn("❌ Lecture directe balise_formats exception:", e);
+    return [];
+  }
+};
+
 const EcrireCodeBaliseEleve: React.FC<Props> = ({
   setPage,
   eleveConnecte,
@@ -490,6 +737,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   const { width, height } = useWindowDimensions();
 
   const scrollRef = useRef<ScrollView | null>(null);
+  const poinconListRef = useRef<FlatList<BaliseAffichee> | null>(null);
   const inputRefs = useRef<Record<string, TextInput | null>>({});
   const rowYRefs = useRef<Record<string, number>>({});
   const rowHeightRefs = useRef<Record<string, number>>({});
@@ -506,9 +754,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   const [loggingOut, setLoggingOut] = useState(false);
 
   const [studentId, setStudentId] = useState<string | null>(eleveConnecte?.id ?? null);
-  const [studentGroupId, setStudentGroupId] = useState<string | null>(
-    eleveConnecte?.group_id ?? null
-  );
+  const [studentGroupId, setStudentGroupId] = useState<string | null>(eleveConnecte?.group_id ?? null);
 
   const [balises, setBalises] = useState<BaliseAffichee[]>([]);
   const [activeBaliseKey, setActiveBaliseKey] = useState<string | null>(null);
@@ -517,10 +763,9 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   const [completionAttemptNumber, setCompletionAttemptNumber] = useState<number | null>(null);
 
   const [codesSaisis, setCodesSaisis] = useState<Record<string, string>>({});
+  const [poinconsSaisis, setPoinconsSaisis] = useState<Record<string, PoinconCell>>({});
   const [resultats, setResultats] = useState<Record<string, boolean | null>>({});
-  const [inputSelections, setInputSelections] = useState<
-    Record<string, { start: number; end: number }>
-  >({});
+  const [inputSelections, setInputSelections] = useState<Record<string, { start: number; end: number }>>({});
 
   const [savedScore, setSavedScore] = useState(0);
   const [tentativesCount, setTentativesCount] = useState(0);
@@ -528,9 +773,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   const [lastPointsGain, setLastPointsGain] = useState(0);
   const [parcoursTermineDb, setParcoursTermineDb] = useState(false);
 
-  const [pointsConfig, setPointsConfig] = useState<ParcoursPointsConfig>(
-    getDefaultPointsConfig()
-  );
+  const [pointsConfig, setPointsConfig] = useState<ParcoursPointsConfig>(getDefaultPointsConfig());
   const [tentativeBaremeRows, setTentativeBaremeRows] = useState<ParcoursBaremeTentativeRow[]>([]);
   const [resolvedTentativePage, setResolvedTentativePage] = useState<number | null>(null);
   const [resolvedTentativeGroupId, setResolvedTentativeGroupId] = useState<string | null>(null);
@@ -538,12 +781,20 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   const [supportParcoursId, setSupportParcoursId] = useState<string | null>(null);
 
   const [scoreModalVisible, setScoreModalVisible] = useState(false);
+  const [activePoinconIndex, setActivePoinconIndex] = useState(0);
 
   const parcoursNom = useMemo(() => getDisplayName(parcoursActif), [parcoursActif]);
   const validatedSet = useMemo(() => new Set(validatedBaliseIds), [validatedBaliseIds]);
 
   const isCompleted = balises.length > 0 && validatedBaliseIds.length >= balises.length;
   const isCompletedEffective = isCompleted || parcoursTermineDb;
+
+  useEffect(() => {
+    setActivePoinconIndex((prev) => {
+      if (!balises.length) return 0;
+      return Math.min(prev, balises.length - 1);
+    });
+  }, [balises.length]);
 
   const isCompact = width < 430;
   const boxSize = isCompact ? 36 : 42;
@@ -558,6 +809,86 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     const total = width - horizontalPadding - scoreWidth - gap * 2;
     return Math.max(92, Math.floor(total / 2));
   }, [width]);
+
+  const isPoinconParcours = useMemo(
+    () => balises.length > 0 && balises.every((b) => !!b.poinconFormat),
+    [balises]
+  );
+
+  useEffect(() => {
+    if (!isPoinconParcours) return;
+    const nextBalise = balises[activePoinconIndex];
+    if (nextBalise?.instanceKey) {
+      setActiveBaliseKey(nextBalise.instanceKey);
+    }
+  }, [activePoinconIndex, balises, isPoinconParcours]);
+
+  const poinconCardWidth = useMemo(() => {
+    const horizontalPadding = 28;
+    return Math.max(280, width - horizontalPadding);
+  }, [width]);
+
+  const activePoinconBalise = isPoinconParcours ? balises[activePoinconIndex] : null;
+  const canGoPrevPoincon = activePoinconIndex > 0;
+  const canGoNextPoincon = activePoinconIndex < balises.length - 1;
+
+  const goToPoinconIndex = useCallback(
+    (index: number, animated = true) => {
+      if (!balises.length) return;
+
+      const next = Math.max(0, Math.min(balises.length - 1, index));
+      const nextBalise = balises[next];
+
+      setActivePoinconIndex(next);
+      if (nextBalise?.instanceKey) setActiveBaliseKey(nextBalise.instanceKey);
+
+      requestAnimationFrame(() => {
+        poinconListRef.current?.scrollToIndex?.({ index: next, animated });
+      });
+    },
+    [balises]
+  );
+
+  const goPrevPoincon = useCallback(() => {
+    goToPoinconIndex(activePoinconIndex - 1, true);
+  }, [activePoinconIndex, goToPoinconIndex]);
+
+  const goNextPoincon = useCallback(() => {
+    goToPoinconIndex(activePoinconIndex + 1, true);
+  }, [activePoinconIndex, goToPoinconIndex]);
+
+  const handlePoinconMomentumEnd = useCallback(
+    (event: any) => {
+      const x = event?.nativeEvent?.contentOffset?.x ?? 0;
+      const next = Math.max(0, Math.min(balises.length - 1, Math.round(x / Math.max(1, poinconCardWidth))));
+      const nextBalise = balises[next];
+
+      setActivePoinconIndex(next);
+      if (nextBalise?.instanceKey) setActiveBaliseKey(nextBalise.instanceKey);
+    },
+    [balises, poinconCardWidth]
+  );
+
+  const poinconCardMinHeight = useMemo(() => {
+    const reservedTop = Platform.OS === "web" ? 186 : 176;
+    const reservedBottom = 118;
+    return Math.max(270, height - reservedTop - reservedBottom);
+  }, [height]);
+
+  const getPoinconBigCellSize = useCallback(
+    (format: PoinconFormat) => {
+      const rows = Math.max(2, format.rows || 4);
+      const cols = Math.max(2, format.cols || 4);
+      const gridGap = width < 430 ? 7 : 10;
+      const cardRatio = width < 430 ? 1 : 0.72;
+      const maxGridWidth = Math.max(190, poinconCardWidth * cardRatio - 34);
+      const maxGridHeight = Math.max(220, poinconCardMinHeight - (width < 430 ? 86 : 108));
+      const byWidth = Math.floor((maxGridWidth - gridGap * (cols - 1)) / cols);
+      const byHeight = Math.floor((maxGridHeight - gridGap * (rows - 1)) / rows);
+      return Math.max(44, Math.min(width < 430 ? 86 : 96, byWidth, byHeight));
+    },
+    [poinconCardMinHeight, poinconCardWidth, width]
+  );
 
   const setInputRef = useCallback((baliseKey: string, ref: TextInput | null) => {
     inputRefs.current[baliseKey] = ref;
@@ -616,10 +947,18 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   const focusBalise = useCallback(
     (balise: BaliseAffichee, forceSelectAll = false, shouldScroll = false) => {
       const key = balise.instanceKey;
+
+      setActiveBaliseKey(key);
+
+      if (balise.poinconFormat) {
+        if (shouldScroll) scrollBaliseIntoComfortZone(key, true);
+        Keyboard.dismiss();
+        return;
+      }
+
       const expectedLength = getExpectedLength(balise);
       const currentValue = codesSaisis[key] ?? "";
 
-      setActiveBaliseKey(key);
       setSelectionForBalise(key, currentValue, expectedLength, forceSelectAll);
 
       if (shouldScroll) {
@@ -656,34 +995,47 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   }, []);
 
   const handleLogout = useCallback(async () => {
-    if (loggingOut) return;
+  if (loggingOut) return;
 
+  try {
+    setLoggingOut(true);
+    Keyboard.dismiss();
+
+    // 1) Fermer la modal tout de suite
+    setConfirmLogoutVisible(false);
+
+    // 2) Nettoyage local complet côté élève
+    await AsyncStorage.multiRemove([
+      "derniereConnexionMode",
+      "dernierePageEleve",
+      "eleveCache",
+
+      "LS_LAST_MODE",
+      "LS_LAST_PAGE_ELEVE",
+      "LS_ELEVE_CACHE",
+
+      "lastMode",
+      "lastPageEleve",
+      "studentCache",
+      "eleveConnecte",
+      "parcoursActif",
+    ]).catch(() => null);
+
+    // 3) Nettoyage parent, sans bloquer la déconnexion si erreur
     try {
-      setLoggingOut(true);
-
       if (handleDeconnexion) {
         await handleDeconnexion();
-      } else {
-        await supabase.auth.signOut().catch(() => null);
-
-        await AsyncStorage.multiRemove([
-          "LS_LAST_PAGE_ELEVE",
-          "LS_ELEVE_CACHE",
-          "LS_LAST_MODE",
-          "lastPageEleve",
-          "eleveCache",
-          "lastMode",
-        ]).catch(() => null);
-
-        setPage("ParcoursPlus");
       }
-
-      Keyboard.dismiss();
-      setConfirmLogoutVisible(false);
-    } finally {
-      setLoggingOut(false);
+    } catch (e) {
+      console.warn("Déconnexion parent incomplète :", e);
     }
-  }, [handleDeconnexion, loggingOut, setPage]);
+
+    // 4) Ne pas laisser l’élève sur une page élève
+    setPage("accueil");
+  } finally {
+    setLoggingOut(false);
+  }
+}, [handleDeconnexion, loggingOut, setPage]);
 
   const resolveStudent = useCallback(async () => {
     let nextStudentId = eleveConnecte?.id ?? null;
@@ -735,10 +1087,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       resolvedParcoursId?: string,
       orderedBalises: BaliseAffichee[] = []
     ) => {
-      const baseResolvedConfig = await loadResolvedTentativeConfig(
-        resolvedGroupId,
-        resolvedParcoursId
-      );
+      const baseResolvedConfig = await loadResolvedTentativeConfig(resolvedGroupId, resolvedParcoursId);
 
       const fixedPointsConfig = await mergeConfigWithBestSupabaseRow(
         resolvedGroupId,
@@ -775,8 +1124,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         ...progressRaw,
         validatedIds: normalizedValidatedIds,
         validatedCount: normalizedValidatedIds.length,
-        parcoursTermine:
-          orderedBalises.length > 0 && normalizedValidatedIds.length >= orderedBalises.length,
+        parcoursTermine: orderedBalises.length > 0 && normalizedValidatedIds.length >= orderedBalises.length,
       };
 
       const [attempts, dbTermine] = await Promise.all([
@@ -804,12 +1152,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         isTermine: effectiveTermine,
       });
 
-      if (
-        resolvedStudentId &&
-        resolvedParcoursId &&
-        effectiveTermine &&
-        correctedTotal !== progressRaw.totalPoints
-      ) {
+      if (resolvedStudentId && resolvedParcoursId && effectiveTermine && correctedTotal !== progressRaw.totalPoints) {
         await supabase
           .from("eleve_parcours_stats")
           .update({
@@ -859,6 +1202,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     setResolvedProfesseurId(null);
     setSupportParcoursId(null);
     setCodesSaisis({});
+    setPoinconsSaisis({});
     setResultats({});
     setInputSelections({});
     inputRefs.current = {};
@@ -887,43 +1231,54 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
 
       if (parcoursError) throw parcoursError;
 
-      const parcoursDb =
-        (((parcoursData as ParcoursActif[] | null) ?? [])[0] as ParcoursActif | undefined) ??
-        parcoursActif;
+      const parcoursDb = (((parcoursData as ParcoursActif[] | null) ?? [])[0] as ParcoursActif | undefined) ?? parcoursActif;
 
       const rawBalisesOrdre = parcoursDb?.balises_ordre ?? parcoursActif?.balises_ordre ?? null;
       const tokens = extractTokens(rawBalisesOrdre);
+
+      const ownerId = String(
+        parcoursDb?.user_id ??
+          parcoursDb?.professeur_id ??
+          parcoursDb?.teacher_id ??
+          parcoursActif?.user_id ??
+          parcoursActif?.professeur_id ??
+          parcoursActif?.teacher_id ??
+          eleveConnecte?.teacher_id ??
+          ""
+      ).trim() || null;
 
       let orderedBalises: BaliseAffichee[] = [];
 
       if (tokens.length) {
         const uuidTokens = Array.from(new Set(tokens.filter(isUuidLike)));
-        const numeroTokens = Array.from(
-          new Set(tokens.filter(isIntegerLike).map((t) => Number(t)))
-        );
-        const codeTokensRaw = Array.from(
-          new Set(tokens.filter((t) => !isUuidLike(t) && !isIntegerLike(t)))
-        );
+        const numeroTokens = Array.from(new Set(tokens.filter(isIntegerLike).map((t) => Number(t))));
+        const codeTokensRaw = Array.from(new Set(tokens.filter((t) => !isUuidLike(t) && !isIntegerLike(t))));
 
         const fetchedBalises: BaliseRow[] = [];
 
         if (uuidTokens.length) {
-          const { data, error } = await supabase.from("balises").select("*").in("id", uuidTokens);
+          let query = supabase.from("balises").select("*").in("id", uuidTokens);
+          if (ownerId) query = query.eq("user_id", ownerId);
+
+          const { data, error } = await query;
           if (error) throw error;
           fetchedBalises.push(...(((data as BaliseRow[]) || []).filter(Boolean)));
         }
 
         if (numeroTokens.length) {
-          const { data, error } = await supabase
-            .from("balises")
-            .select("*")
-            .in("numero_balise", numeroTokens);
+          let query = supabase.from("balises").select("*").in("numero_balise", numeroTokens);
+          if (ownerId) query = query.eq("user_id", ownerId);
+
+          const { data, error } = await query;
           if (error) throw error;
           fetchedBalises.push(...(((data as BaliseRow[]) || []).filter(Boolean)));
         }
 
         if (codeTokensRaw.length) {
-          const { data, error } = await supabase.from("balises").select("*");
+          let query = supabase.from("balises").select("*");
+          if (ownerId) query = query.eq("user_id", ownerId);
+
+          const { data, error } = await query;
           if (error) throw error;
 
           const allBalises = ((data as BaliseRow[]) || []).filter(Boolean);
@@ -944,15 +1299,109 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         orderedBalises = orderBalisesFromTokens(tokens, Array.from(uniqBalisesMap.values()));
       }
 
+      const parcoursFormatType = String(
+        parcoursDb?.format_type ?? parcoursActif?.format_type ?? ""
+      )
+        .trim()
+        .toLowerCase();
+
+      if (orderedBalises.length) {
+        const ids = Array.from(new Set(orderedBalises.map((b) => b.originalBaliseId)));
+
+        let formatsDataFinal: BaliseFormatRow[] = await loadPoinconFormatsForBalises(ids);
+
+        const formatsByBaliseId = new Map<string, PoinconFormat>();
+
+        formatsDataFinal.forEach((format) => {
+          const normalized = normalizePoinconPayload(format.payload);
+          if (normalized) {
+            formatsByBaliseId.set(String(format.balise_id), normalized);
+          }
+        });
+
+        console.log("🧩 FORMATS POINÇON CHARGÉS PAR RPC", {
+          baliseIdsDuParcours: ids,
+          formatsTrouves: formatsDataFinal.map((f) => ({
+            id: f.id,
+            balise_id: f.balise_id,
+            format_type: f.format_type,
+            payload: f.payload,
+          })),
+          poinconsRetenus: Array.from(formatsByBaliseId.keys()),
+        });
+
+        const normalizeIdKey = (value: any) => String(value ?? "").trim().toLowerCase();
+
+        const formatsByCleanBaliseId = new Map<string, PoinconFormat>();
+        formatsByBaliseId.forEach((format, baliseId) => {
+          formatsByCleanBaliseId.set(normalizeIdKey(baliseId), format);
+        });
+
+        const poinconFormatsInOrder = formatsDataFinal
+          .filter((format) => String(format.format_type).trim().toLowerCase() === "poincon")
+          .map((format) => normalizePoinconPayload(format.payload))
+          .filter(Boolean) as PoinconFormat[];
+
+        orderedBalises = orderedBalises.map((b, index) => {
+          const directKey = String(b.originalBaliseId);
+          const cleanKey = normalizeIdKey(b.originalBaliseId);
+
+          let savedPoinconFormat =
+            formatsByBaliseId.get(directKey) ??
+            formatsByCleanBaliseId.get(cleanKey) ??
+            null;
+
+          // Secours contrôlé : si Supabase renvoie exactement autant de poinçons
+          // que de balises dans ce parcours, on associe par ordre.
+          // Cela évite que l'élève soit bloqué si les ids sont bien chargés mais mal recollés.
+          if (!savedPoinconFormat && poinconFormatsInOrder.length === orderedBalises.length) {
+            savedPoinconFormat = poinconFormatsInOrder[index] ?? null;
+          }
+
+          const shouldUsePoincon = parcoursFormatType === "poincon" || !!savedPoinconFormat;
+
+          return {
+            ...b,
+            poinconFormat: shouldUsePoincon
+              ? savedPoinconFormat ?? DEFAULT_POINCON_FORMAT
+              : null,
+            poinconFormatMissing: shouldUsePoincon && !savedPoinconFormat,
+          };
+        });
+
+        const missingPoincons = orderedBalises.filter(
+          (b) => parcoursFormatType === "poincon" && !formatsByBaliseId.has(b.originalBaliseId)
+        );
+
+        if (missingPoincons.length > 0) {
+          console.warn(
+            "❌ ERREUR POINÇON : certaines balises du parcours n'ont aucun format poinçon Supabase après double requête.",
+            missingPoincons.map((b) => ({
+              instanceKey: b.instanceKey,
+              originalBaliseId: b.originalBaliseId,
+              numero: b.numero_balise,
+              code: b.code,
+            }))
+          );
+        }
+
+        console.log("🧩 FORMAT PARCOURS ELEVE", {
+          parcoursId: parcoursActif?.id,
+          format_type_db: parcoursDb?.format_type,
+          format_type_actif: parcoursActif?.format_type,
+          parcoursFormatType,
+          balisesCount: orderedBalises.length,
+          poinconsCount: orderedBalises.filter((b) => !!b.poinconFormat).length,
+        });
+      }
+
       setBalises(orderedBalises);
       setActiveBaliseKey(orderedBalises[0]?.instanceKey ?? null);
+      // Mode normal : l'élève saisit lui-même le poinçon.
+      // On vide uniquement les anciennes saisies locales pour éviter de garder le mode test/triche.
+      setPoinconsSaisis({});
 
-      await loadAttemptsAndConfig(
-        resolved.studentId,
-        resolved.groupId,
-        parcoursActif.id,
-        orderedBalises
-      );
+      await loadAttemptsAndConfig(resolved.studentId, resolved.groupId, parcoursActif.id, orderedBalises);
     } catch (err: any) {
       console.error("Erreur EcrireCodeBaliseEleve:", err);
       setScreenError(err?.message || "Impossible de charger les données du parcours.");
@@ -1010,10 +1459,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       setActiveBaliseKey(key);
       setCodesSaisis((prev) => ({ ...prev, [key]: nextValue }));
       setResultats((prev) => ({ ...prev, [key]: null }));
-      setInputSelections((prev) => ({
-        ...prev,
-        [key]: { start: nextCursor, end: nextCursor },
-      }));
+      setInputSelections((prev) => ({ ...prev, [key]: { start: nextCursor, end: nextCursor } }));
 
       if (nextValue.length < expectedLength) {
         autoFocusLockRef.current = null;
@@ -1070,21 +1516,30 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
 
       const breakdown = computeGainBreakdown(nextResults);
 
+      const codesForSave = { ...codesSaisis };
+
+      balises.forEach((balise) => {
+        if (!balise.poinconFormat) return;
+        const key = balise.instanceKey;
+        const matrix = poinconsSaisis[key];
+        if (matrix) {
+          codesForSave[key] = JSON.stringify(matrix);
+        }
+      });
+
       const result = await saveTentativeWithStats({
         studentId,
         parcoursId: parcoursActif.id,
         balises,
         validatedIds: validatedBaliseIds,
-        codesSaisis,
+        codesSaisis: codesForSave,
         nextResults,
         pointsConfig,
         breakdown,
         currentDisplayedTotal: savedPointsTotal,
       });
 
-      const nextValidatedIds = Array.from(
-        new Set([...validatedBaliseIds, ...result.newlyValidatedIds])
-      );
+      const nextValidatedIds = Array.from(new Set([...validatedBaliseIds, ...result.newlyValidatedIds]));
 
       const nextCompletionAttemptNumber =
         breakdown.willComplete && completionAttemptNumber == null
@@ -1106,17 +1561,11 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
 
       const nextProgress = {
         ...nextProgressRaw,
-        validatedIds: normalizedNextProgressIds.length
-          ? normalizedNextProgressIds
-          : nextValidatedIds,
-        validatedCount: normalizedNextProgressIds.length
-          ? normalizedNextProgressIds.length
-          : nextValidatedIds.length,
+        validatedIds: normalizedNextProgressIds.length ? normalizedNextProgressIds : nextValidatedIds,
+        validatedCount: normalizedNextProgressIds.length ? normalizedNextProgressIds.length : nextValidatedIds.length,
         parcoursTermine:
           balises.length > 0 &&
-          (normalizedNextProgressIds.length
-            ? normalizedNextProgressIds.length
-            : nextValidatedIds.length) >= balises.length,
+          (normalizedNextProgressIds.length ? normalizedNextProgressIds.length : nextValidatedIds.length) >= balises.length,
       };
 
       const dbTermine = await loadStatParcoursTermine(studentId, parcoursActif.id);
@@ -1128,8 +1577,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       const recomputedScore = computeCurrentDisplayedScore({
         balises,
         validatedIds: nextProgress.validatedIds,
-        completionAttemptNumber:
-          nextProgress.completionAttemptNumber ?? nextCompletionAttemptNumber,
+        completionAttemptNumber: nextProgress.completionAttemptNumber ?? nextCompletionAttemptNumber,
         pointsConfig,
         tentativeBaremeRows,
       });
@@ -1172,12 +1620,18 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       setTentativesCount(nextProgress.tentativesCount || result.nextTentativesCount);
       setSavedPointsTotal(correctedTotal);
       setLastPointsGain(breakdown.totalGain);
-      setCompletionAttemptNumber(
-        nextProgress.completionAttemptNumber ?? nextCompletionAttemptNumber
-      );
+      setCompletionAttemptNumber(nextProgress.completionAttemptNumber ?? nextCompletionAttemptNumber);
       setParcoursTermineDb(effectiveTermine);
 
       setCodesSaisis((prev) => {
+        const next = { ...prev };
+        result.newlyValidatedIds.forEach((id) => {
+          delete next[id];
+        });
+        return next;
+      });
+
+      setPoinconsSaisis((prev) => {
         const next = { ...prev };
         result.newlyValidatedIds.forEach((id) => {
           delete next[id];
@@ -1208,6 +1662,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       balises,
       validatedBaliseIds,
       codesSaisis,
+      poinconsSaisis,
       pointsConfig,
       savedPointsTotal,
       completionAttemptNumber,
@@ -1216,25 +1671,8 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     ]
   );
 
-  const handleVerifierTout = useCallback(async () => {
+  const runVerifierTout = useCallback(async () => {
     try {
-      if (!balises.length) return;
-
-      if (isCompleted) {
-        Alert.alert("Parcours terminé", "Ce parcours est déjà entièrement validé.");
-        return;
-      }
-
-      const hasAnyInput = balises.some((balise) => {
-        const key = balise.instanceKey;
-        return !validatedSet.has(key) && !!sanitize(codesSaisis[key]);
-      });
-
-      if (!hasAnyInput) {
-        Alert.alert("Aucune saisie", "Entre au moins un code avant de vérifier.");
-        return;
-      }
-
       Keyboard.dismiss();
       setSaving(true);
 
@@ -1248,16 +1686,58 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
           return;
         }
 
+        if (balise.poinconFormat) {
+          if (balise.poinconFormatMissing) {
+            console.warn("❌ Vérification impossible : format poinçon Supabase manquant", {
+              balise: balise.ordre,
+              key,
+              originalBaliseId: balise.originalBaliseId,
+              numero: balise.numero_balise,
+              code: balise.code,
+            });
+            nextResults[key] = false;
+            return;
+          }
+
+          const saisi =
+            poinconsSaisis[key] ??
+            emptyPoincon(balise.poinconFormat.rows, balise.poinconFormat.cols);
+
+          const attendu = balise.poinconFormat.cells;
+
+          const variants = buildPoinconVariants(attendu);
+          const match = variants.some((variant) => samePoincon(saisi, variant));
+
+          console.log("🔎 Vérification poinçon", {
+            balise: balise.ordre,
+            key,
+            originalBaliseId: balise.originalBaliseId,
+            numero: balise.numero_balise,
+            rows: balise.poinconFormat.rows,
+            cols: balise.poinconFormat.cols,
+            eleve: matrixSignature(saisi),
+            supabase: matrixSignature(attendu),
+            variantesAcceptees: variants.map(matrixSignature),
+            match,
+          });
+
+          nextResults[key] = match;
+          return;
+        }
+
         const saisi = sanitize(codesSaisis[key]);
         const attendu = sanitize(balise.code ?? "");
-
-        nextResults[key] = !!saisi && saisi === attendu;
+        nextResults[key] = !!saisi && !!attendu && saisi === attendu;
       });
 
       setResultats(nextResults);
 
-      const { breakdown, nextSavedPointsTotal, nextValidatedCount, nextTentativesCount } =
-        await saveTentativeAndStats(nextResults);
+      const {
+        breakdown,
+        nextSavedPointsTotal,
+        nextValidatedCount,
+        nextTentativesCount,
+      } = await saveTentativeAndStats(nextResults);
 
       const lines = [
         `Balises nouvellement validées : ${breakdown.newlyValidatedCount}`,
@@ -1276,7 +1756,72 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     } finally {
       setSaving(false);
     }
-  }, [balises, validatedSet, codesSaisis, isCompleted, saveTentativeAndStats]);
+  }, [
+    balises,
+    validatedSet,
+    codesSaisis,
+    poinconsSaisis,
+    saveTentativeAndStats,
+  ]);
+
+  const handleVerifierTout = useCallback(async () => {
+    if (!balises.length) return;
+    if (saving) return;
+
+    if (isCompleted) {
+      Alert.alert("Parcours terminé", "Ce parcours est déjà entièrement validé.");
+      return;
+    }
+
+    const missingInput = balises.some((balise) => {
+      const key = balise.instanceKey;
+      if (validatedSet.has(key)) return false;
+
+      if (balise.poinconFormat) {
+        const current = poinconsSaisis[key];
+        return !current?.some((row) => row.some(Boolean));
+      }
+
+      const expectedLength = getExpectedLength(balise);
+      return sanitize(codesSaisis[key]).length < expectedLength;
+    });
+
+    if (missingInput) {
+      const message = "Vous n'avez pas rempli tous les codes des balises.";
+      if (Platform.OS === "web") window.alert(message);
+      else Alert.alert("Attention", message);
+      return;
+    }
+
+    const message =
+      "Voulez-vous vérifier toutes les balises ?\n\nCette action enregistrera une tentative.";
+
+    if (Platform.OS === "web") {
+      const confirmed = window.confirm(message);
+      if (!confirmed) return;
+      await runVerifierTout();
+      return;
+    }
+
+    Alert.alert("Confirmation", message, [
+      { text: "Annuler", style: "cancel" },
+      {
+        text: "Valider",
+        onPress: () => {
+          runVerifierTout();
+        },
+      },
+    ]);
+  }, [
+    balises,
+    validatedSet,
+    codesSaisis,
+    poinconsSaisis,
+    isCompleted,
+    saving,
+    runVerifierTout,
+    getExpectedLength,
+  ]);
 
   const renderCodeBoxes = useCallback(
     (item: BaliseAffichee, baliseIndex: number) => {
@@ -1305,12 +1850,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
             selectTextOnFocus={typedValue.length >= expectedLength}
             onFocus={() => {
               setActiveBaliseKey(key);
-              setSelectionForBalise(
-                key,
-                typedValue,
-                expectedLength,
-                typedValue.length >= expectedLength
-              );
+              setSelectionForBalise(key, typedValue, expectedLength, typedValue.length >= expectedLength);
             }}
             onChangeText={(text) => handleCodeChange(item, baliseIndex, text)}
             onSubmitEditing={() => focusNextBalise(baliseIndex)}
@@ -1376,6 +1916,76 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     ]
   );
 
+  const renderPoinconInput = useCallback(
+    (item: BaliseAffichee) => {
+      const key = item.instanceKey;
+      const format = item.poinconFormat;
+      if (!format) return null;
+
+      const alreadyValidated = validatedSet.has(key);
+      const result = resultats[key];
+      const isActive = activeBaliseKey === key;
+
+      const current = poinconsSaisis[key] ?? emptyPoincon(format.rows, format.cols);
+      const cellSize = isCompact ? 32 : 38;
+
+      return (
+        <Pressable
+          onPress={() => {
+            if (!alreadyValidated) {
+              setActiveBaliseKey(key);
+              Keyboard.dismiss();
+            }
+          }}
+          style={[
+            styles.poinconStudentWrap,
+            isActive && styles.poinconStudentWrapActive,
+            result === true && styles.poinconStudentWrapOk,
+            result === false && styles.poinconStudentWrapKo,
+          ]}
+        >
+          {current.map((row, r) => (
+            <View key={`${key}_row_${r}`} style={styles.poinconStudentRow}>
+              {row.map((active, c) => (
+                <TouchableOpacity
+                  key={`${key}_cell_${r}_${c}`}
+                  activeOpacity={0.85}
+                  disabled={alreadyValidated}
+                  onPress={() => {
+                    setActiveBaliseKey(key);
+                    setResultats((prev) => ({ ...prev, [key]: null }));
+                    setPoinconsSaisis((prev) => {
+                      const base = prev[key] ?? emptyPoincon(format.rows, format.cols);
+                      const next = base.map((line) => [...line]);
+                      next[r][c] = !next[r][c];
+                      return { ...prev, [key]: next };
+                    });
+                  }}
+                  style={[
+                    styles.poinconStudentCell,
+                    {
+                      width: cellSize,
+                      height: cellSize,
+                      borderRadius: Math.max(9, Math.floor(cellSize / 3.2)),
+                    },
+                    active && styles.poinconStudentCellActive,
+                    result === true && styles.poinconStudentCellOk,
+                    result === false && styles.poinconStudentCellKo,
+                    alreadyValidated && styles.poinconStudentCellValidated,
+                  ]}
+                >
+                  {active && <View style={styles.poinconDot} />}
+                  {alreadyValidated && <Text style={styles.poinconCheck}>✓</Text>}
+                </TouchableOpacity>
+              ))}
+            </View>
+          ))}
+        </Pressable>
+      );
+    },
+    [activeBaliseKey, isCompact, poinconsSaisis, resultats, validatedSet]
+  );
+
   const renderBalise = useCallback(
     ({ item, index }: { item: BaliseAffichee; index: number }) => {
       const key = item.instanceKey;
@@ -1418,9 +2028,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
               <Text style={[styles.baliseNumberLabel, isActive && styles.baliseNumberLabelActive]}>
                 BALISE
               </Text>
-              <Text style={[styles.baliseNumber, isActive && styles.baliseNumberActive]}>
-                {item.ordre}
-              </Text>
+              <Text style={[styles.baliseNumber, isActive && styles.baliseNumberActive]}>{item.ordre}</Text>
               {pointsConfig.modes.balises && (
                 <Text style={[styles.pointsLeftText, isActive && styles.pointsLeftTextActive]}>
                   {formatPointsLabel(displayBalisePoints)}
@@ -1429,7 +2037,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
             </LinearGradient>
 
             <View style={styles.baliseInputZone}>
-              {renderCodeBoxes(item, index)}
+              {item.poinconFormat ? renderPoinconInput(item) : renderCodeBoxes(item, index)}
 
               {(alreadyValidated || result === false) && (
                 <View style={styles.baliseMetaRow}>
@@ -1447,7 +2055,141 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         </View>
       );
     },
-    [activeBaliseKey, focusBalise, pointsConfig, renderCodeBoxes, resultats, validatedSet]
+    [activeBaliseKey, focusBalise, pointsConfig, renderCodeBoxes, renderPoinconInput, resultats, validatedSet]
+  );
+
+  const renderBigPoinconBalise = useCallback(
+    ({ item, index }: { item: BaliseAffichee; index: number }) => {
+      const key = item.instanceKey;
+      const format = item.poinconFormat ?? DEFAULT_POINCON_FORMAT;
+      const alreadyValidated = validatedSet.has(key);
+      const result = alreadyValidated ? true : resultats[key];
+      const isActive = activeBaliseKey === key;
+      const current = poinconsSaisis[key] ?? emptyPoincon(format.rows, format.cols);
+      const cellSize = getPoinconBigCellSize(format);
+      const isMissingSupabaseAnswer = !!item.poinconFormatMissing;
+      const gridGap = width < 430 ? 7 : 10;
+
+      const displayBalisePoints = pointsConfig.modes.balises
+        ? Number.isFinite(Number(item.points))
+          ? Number(item.points)
+          : pointsConfig.pointsParBalise
+        : 0;
+
+      const itemCanGoPrev = index > 0;
+      const itemCanGoNext = index < balises.length - 1;
+
+      return (
+        <View style={[styles.bigPoinconCardOuter, { width: poinconCardWidth }]}>
+          <Pressable
+            onPress={() => {
+              if (!alreadyValidated) {
+                setActiveBaliseKey(key);
+                Keyboard.dismiss();
+              }
+            }}
+            style={[
+              styles.bigPoinconCard,
+              { minHeight: poinconCardMinHeight, width: isCompact ? "100%" : "72%" },
+              isActive && styles.bigPoinconCardActive,
+              result === true && styles.bigPoinconCardOk,
+              result === false && styles.bigPoinconCardKo,
+            ]}
+          >
+            <View style={styles.bigPoinconHeader}>
+              {isCompact ? (
+                itemCanGoPrev ? (
+                  <TouchableOpacity
+                    activeOpacity={0.85}
+                    onPress={() => goToPoinconIndex(index - 1, true)}
+                    style={styles.bigPoinconHeaderArrow}
+                  >
+                    <Feather name="chevron-left" size={25} color="#fff" />
+                  </TouchableOpacity>
+                ) : (
+                  <View style={styles.bigPoinconHeaderArrowSpacer} />
+                )
+              ) : null}
+
+              <View style={styles.bigPoinconCenterHead}>
+                <View style={[styles.bigPoinconBadge, isActive && styles.bigPoinconBadgeActive]}>
+                  <Text style={[styles.bigPoinconBadgeLabel, isActive && styles.bigPoinconBadgeLabelActive]}>BALISE</Text>
+                  <Text style={[styles.bigPoinconBadgeNumber, isActive && styles.bigPoinconBadgeNumberActive]}>{item.ordre}</Text>
+                </View>
+
+                {pointsConfig.modes.balises ? (
+                  <Text style={styles.bigPoinconPointsUnder}>+ {formatPointsLabel(displayBalisePoints)}</Text>
+                ) : null}
+              </View>
+
+              {isCompact ? (
+                itemCanGoNext ? (
+                  <TouchableOpacity
+                    activeOpacity={0.85}
+                    onPress={() => goToPoinconIndex(index + 1, true)}
+                    style={styles.bigPoinconHeaderArrow}
+                  >
+                    <Feather name="chevron-right" size={25} color="#fff" />
+                  </TouchableOpacity>
+                ) : (
+                  <View style={styles.bigPoinconHeaderArrowSpacer} />
+                )
+              ) : null}
+            </View>
+            {isMissingSupabaseAnswer ? (
+              <View style={styles.poinconMissingBox}>
+                <Text style={styles.poinconMissingTitle}>Réponse Supabase introuvable</Text>
+                <Text style={styles.poinconMissingText}>
+                  Aucun poinçon n'a été trouvé dans balise_formats pour cette balise.
+                </Text>
+              </View>
+            ) : null}
+
+            <View style={[styles.bigPoinconGridWrap, { gap: gridGap }]}> 
+              {current.map((row, r) => (
+                <View key={`${key}_big_row_${r}`} style={[styles.bigPoinconRow, { gap: gridGap }]}> 
+                  {row.map((active, c) => (
+                    <TouchableOpacity
+                      key={`${key}_big_cell_${r}_${c}`}
+                      activeOpacity={0.82}
+                      disabled={alreadyValidated}
+                      onPress={() => {
+                        setActiveBaliseKey(key);
+                        setResultats((prev) => ({ ...prev, [key]: null }));
+                        setPoinconsSaisis((prev) => {
+                          const base = prev[key] ?? emptyPoincon(format.rows, format.cols);
+                          const next = base.map((line) => [...line]);
+                          next[r][c] = !next[r][c];
+                          return { ...prev, [key]: next };
+                        });
+                      }}
+                      style={[
+                        styles.bigPoinconCell,
+                        { width: cellSize, height: cellSize, borderRadius: Math.max(14, Math.floor(cellSize / 3.1)) },
+                        active && styles.bigPoinconCellActive,
+                        result === true && styles.bigPoinconCellOk,
+                        result === false && styles.bigPoinconCellKo,
+                        alreadyValidated && styles.bigPoinconCellValidated,
+                      ]}
+                    >
+                      {active ? <View style={[styles.bigPoinconDot, { width: cellSize * 0.34, height: cellSize * 0.34 }]} /> : null}
+                      {alreadyValidated ? <Text style={styles.bigPoinconCheck}>✓</Text> : null}
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              ))}
+            </View>
+
+            {(alreadyValidated || result === false) ? (
+              <View style={styles.bigPoinconFooterStatus}>
+                {alreadyValidated ? <Text style={styles.okText}>Validée ✅</Text> : result === false ? <Text style={styles.koText}>Incorrect ❌</Text> : null}
+              </View>
+            ) : null}
+          </Pressable>
+        </View>
+      );
+    },
+    [activeBaliseKey, balises.length, getPoinconBigCellSize, goToPoinconIndex, isCompact, poinconCardMinHeight, poinconCardWidth, poinconsSaisis, pointsConfig, resultats, validatedSet, width]
   );
 
   return (
@@ -1465,50 +2207,31 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         >
           <View>
             <View style={styles.topBar}>
-              <TouchableOpacity
-                activeOpacity={0.9}
-                onPress={() => setPage("EcrireResultat")}
-                style={styles.iconBtn}
-              >
+              <TouchableOpacity activeOpacity={0.9} onPress={() => setPage("EcrireResultat")} style={styles.iconBtn}>
                 <Feather name="arrow-left" size={18} color="#fff" />
               </TouchableOpacity>
 
-              <Text
-                style={styles.pageTitle}
-                numberOfLines={2}
-                adjustsFontSizeToFit
-                minimumFontScale={0.72}
-              >
+              <Text style={styles.pageTitle} numberOfLines={2} adjustsFontSizeToFit minimumFontScale={0.72}>
                 {parcoursNom}
               </Text>
 
-              <TouchableOpacity
-                activeOpacity={0.9}
-                onPress={() => setConfirmLogoutVisible(true)}
-                style={styles.logoutBtn}
-              >
+              <TouchableOpacity activeOpacity={0.9} onPress={() => setConfirmLogoutVisible(true)} style={styles.logoutBtn}>
                 <Feather name="log-out" size={19} color="#fff" />
               </TouchableOpacity>
             </View>
 
             <View style={styles.stickyStatsBar}>
-              <View style={[styles.statBox, { width: statCardWidth }]}>
-                <Text style={styles.statValue}>
-                  {savedScore}/{balises.length}
-                </Text>
+              <View style={[styles.statBox, { width: statCardWidth }]}> 
+                <Text style={styles.statValue}>{savedScore}/{balises.length}</Text>
                 <Text style={styles.statLabel}>Balises trouvées</Text>
               </View>
 
-              <View style={[styles.statBox, { width: statCardWidth }]}>
+              <View style={[styles.statBox, { width: statCardWidth }]}> 
                 <Text style={styles.statValue}>{tentativesCount}</Text>
                 <Text style={styles.statLabel}>Tentatives</Text>
               </View>
 
-              <TouchableOpacity
-                activeOpacity={0.9}
-                onPress={() => setScoreModalVisible(true)}
-                style={styles.bigScorePillTop2}
-              >
+              <TouchableOpacity activeOpacity={0.9} onPress={() => setScoreModalVisible(true)} style={styles.bigScorePillTop2}>
                 <Text style={styles.bigScoreValue}>{formatPoints(savedPointsTotal)}</Text>
                 <Text style={styles.bigScoreLabel}>{formatPointUnit(savedPointsTotal)}</Text>
               </TouchableOpacity>
@@ -1521,9 +2244,10 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
             keyboardShouldPersistTaps="handled"
             keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "none"}
             nestedScrollEnabled
+            scrollEnabled={!isPoinconParcours}
             scrollEventThrottle={16}
             showsVerticalScrollIndicator={false}
-            directionalLockEnabled={false}
+            directionalLockEnabled={true}
             canCancelContentTouches={true}
             onLayout={(event) => {
               scrollViewHeightRef.current = event.nativeEvent.layout.height;
@@ -1547,17 +2271,79 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
               <View style={styles.stateCard}>
                 <Feather name="map" size={42} color={C_GOLD} />
                 <Text style={styles.stateTitle}>Aucun parcours sélectionné</Text>
-                <Text style={styles.stateText}>
-                  Reviens à la liste des parcours puis choisis-en un.
-                </Text>
+                <Text style={styles.stateText}>Reviens à la liste des parcours puis choisis-en un.</Text>
               </View>
             ) : balises.length === 0 ? (
               <View style={styles.stateCard}>
                 <Feather name="map-pin" size={42} color={C_GOLD} />
                 <Text style={styles.stateTitle}>Aucune balise trouvée</Text>
-                <Text style={styles.stateText}>
-                  Ce parcours ne contient aucune balise active à afficher.
-                </Text>
+                <Text style={styles.stateText}>Ce parcours ne contient aucune balise active à afficher.</Text>
+              </View>
+            ) : isPoinconParcours && activePoinconBalise ? (
+              <View style={[styles.poinconSingleZone, { paddingHorizontal: isCompact ? 0 : 62 }]}> 
+                {!isCompact && canGoPrevPoincon ? (
+                  <TouchableOpacity
+                    activeOpacity={0.85}
+                    onPress={() => goToPoinconIndex(activePoinconIndex - 1, true)}
+                    style={[styles.poinconArrow, styles.poinconArrowLeft]}
+                  >
+                    <Feather name="chevron-left" size={28} color="#fff" />
+                  </TouchableOpacity>
+                ) : null}
+
+                <FlatList
+                  ref={poinconListRef}
+                  data={balises}
+                  keyExtractor={(item) => item.instanceKey}
+                  horizontal
+                  pagingEnabled
+                  scrollEnabled
+                  showsHorizontalScrollIndicator={false}
+                  directionalLockEnabled
+                  bounces={false}
+                  decelerationRate="fast"
+                  snapToInterval={poinconCardWidth}
+                  snapToAlignment="center"
+                  disableIntervalMomentum
+                  getItemLayout={(_, index) => ({ length: poinconCardWidth, offset: poinconCardWidth * index, index })}
+                  initialScrollIndex={activePoinconIndex}
+                  onMomentumScrollEnd={handlePoinconMomentumEnd}
+                  onScroll={(event) => {
+                    const x = event?.nativeEvent?.contentOffset?.x ?? 0;
+                    const next = Math.max(
+                      0,
+                      Math.min(
+                        balises.length - 1,
+                        Math.round(x / Math.max(1, poinconCardWidth))
+                      )
+                    );
+
+                    if (next !== activePoinconIndex) {
+                      setActivePoinconIndex(next);
+                      const nextBalise = balises[next];
+                      if (nextBalise?.instanceKey) setActiveBaliseKey(nextBalise.instanceKey);
+                    }
+                  }}
+                  scrollEventThrottle={16}
+                  onScrollToIndexFailed={(info) => {
+                    setTimeout(() => {
+                      poinconListRef.current?.scrollToIndex?.({ index: info.index, animated: false });
+                    }, 80);
+                  }}
+                  renderItem={({ item, index }) => renderBigPoinconBalise({ item, index })}
+                  style={[styles.poinconHorizontalList, { width: poinconCardWidth }]}
+                  contentContainerStyle={styles.poinconHorizontalContent}
+                />
+
+                {!isCompact && canGoNextPoincon ? (
+                  <TouchableOpacity
+                    activeOpacity={0.85}
+                    onPress={() => goToPoinconIndex(activePoinconIndex + 1, true)}
+                    style={[styles.poinconArrow, styles.poinconArrowRight]}
+                  >
+                    <Feather name="chevron-right" size={28} color="#fff" />
+                  </TouchableOpacity>
+                ) : null}
               </View>
             ) : (
               <FlatList
@@ -1604,45 +2390,27 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
             <View style={styles.modalBg}>
               <View style={styles.logoutModalBox}>
                 <Text style={styles.logoutModalTitle}>Déconnexion</Text>
-                <Text style={styles.logoutModalText}>
-                  Souhaites-tu vraiment te déconnecter ?
-                </Text>
+                <Text style={styles.logoutModalText}>Souhaites-tu vraiment te déconnecter ?</Text>
 
                 <View style={styles.modalActions}>
-                  <Pressable
-                    style={styles.cancelBtn}
-                    onPress={() => setConfirmLogoutVisible(false)}
-                  >
+                  <Pressable style={styles.cancelBtn} onPress={() => setConfirmLogoutVisible(false)}>
                     <Text style={styles.cancelText}>Annuler</Text>
                   </Pressable>
 
                   <Pressable style={styles.confirmLogoutBtn} onPress={handleLogout}>
-                    {loggingOut ? (
-                      <ActivityIndicator color="#fff" />
-                    ) : (
-                      <Text style={styles.confirmText}>Déconnexion</Text>
-                    )}
+                    {loggingOut ? <ActivityIndicator color="#fff" /> : <Text style={styles.confirmText}>Déconnexion</Text>}
                   </Pressable>
                 </View>
               </View>
             </View>
           </Modal>
 
-          <Modal
-            visible={scoreModalVisible}
-            transparent
-            animationType="fade"
-            onRequestClose={() => setScoreModalVisible(false)}
-          >
+          <Modal visible={scoreModalVisible} transparent animationType="fade" onRequestClose={() => setScoreModalVisible(false)}>
             <View style={styles.modalBackdrop}>
               <View style={styles.modalCard}>
                 <View style={styles.modalHeader}>
                   <Text style={styles.modalTitle}>Détail des points</Text>
-                  <TouchableOpacity
-                    activeOpacity={0.9}
-                    onPress={() => setScoreModalVisible(false)}
-                    style={styles.modalCloseBtn}
-                  >
+                  <TouchableOpacity activeOpacity={0.9} onPress={() => setScoreModalVisible(false)} style={styles.modalCloseBtn}>
                     <Feather name="x" size={18} color="#fff" />
                   </TouchableOpacity>
                 </View>
@@ -1662,29 +2430,19 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
 
                     <View style={styles.scoreTrBlue}>
                       <Text style={[styles.scoreTdName, { flex: 1.5 }]}>Balises</Text>
-                      <Text style={[styles.scoreTdValue, { flex: 1 }]}>
-                        {formatPointsLabel(liveScore.balisesPoints)}
-                      </Text>
-                      <Text style={[styles.scoreTdStatus, { flex: 1 }]}>
-                        {validatedBaliseIds.length}/{balises.length}
-                      </Text>
+                      <Text style={[styles.scoreTdValue, { flex: 1 }]}>{formatPointsLabel(liveScore.balisesPoints)}</Text>
+                      <Text style={[styles.scoreTdStatus, { flex: 1 }]}>{validatedBaliseIds.length}/{balises.length}</Text>
                     </View>
 
                     <View style={styles.scoreTrGreen}>
                       <Text style={[styles.scoreTdName, { flex: 1.5 }]}>Parcours terminé</Text>
-                      <Text style={[styles.scoreTdValue, { flex: 1 }]}>
-                        {formatPointsLabel(liveScore.parcoursPoints)}
-                      </Text>
-                      <Text style={[styles.scoreTdStatus, { flex: 1 }]}>
-                        {isCompletedEffective ? "Terminé" : "En cours"}
-                      </Text>
+                      <Text style={[styles.scoreTdValue, { flex: 1 }]}>{formatPointsLabel(liveScore.parcoursPoints)}</Text>
+                      <Text style={[styles.scoreTdStatus, { flex: 1 }]}>{isCompletedEffective ? "Terminé" : "En cours"}</Text>
                     </View>
 
                     <View style={styles.scoreTrGold}>
                       <Text style={[styles.scoreTdName, { flex: 1.5 }]}>Tentatives</Text>
-                      <Text style={[styles.scoreTdValue, { flex: 1 }]}>
-                        {formatPointsLabel(liveScore.tentativesPoints)}
-                      </Text>
+                      <Text style={[styles.scoreTdValue, { flex: 1 }]}>{formatPointsLabel(liveScore.tentativesPoints)}</Text>
                       <Text style={[styles.scoreTdStatus, { flex: 1 }]}>{tentativesCount}</Text>
                     </View>
                   </View>
@@ -1970,6 +2728,263 @@ const styles = StyleSheet.create({
   },
   codeBoxTextKo: {
     color: "#7F1D1D",
+  },
+
+  poinconStudentWrap: {
+    gap: 6,
+    paddingVertical: 6,
+    paddingHorizontal: 6,
+    borderRadius: 16,
+    borderWidth: 2,
+    borderColor: "rgba(31,91,134,0.12)",
+    backgroundColor: "rgba(255,255,255,0.42)",
+  },
+  poinconStudentWrapActive: {
+    borderColor: "#38BDF8",
+    backgroundColor: "rgba(224,242,254,0.75)",
+  },
+  poinconStudentWrapOk: {
+    borderColor: "rgba(22,163,74,0.70)",
+    backgroundColor: "rgba(220,252,231,0.78)",
+  },
+  poinconStudentWrapKo: {
+    borderColor: "rgba(220,38,38,0.70)",
+    backgroundColor: "rgba(254,226,226,0.78)",
+  },
+  poinconStudentRow: {
+    flexDirection: "row",
+    gap: 6,
+  },
+  poinconStudentCell: {
+    backgroundColor: "rgba(255,255,255,0.96)",
+    borderWidth: 2,
+    borderColor: "rgba(31,91,134,0.28)",
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: "#000",
+    shadowOpacity: 0.07,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 1,
+  },
+  poinconStudentCellActive: {
+    backgroundColor: "#E0F2FE",
+    borderColor: "#38BDF8",
+  },
+  poinconStudentCellOk: {
+    backgroundColor: "#DCFCE7",
+    borderColor: "rgba(22,163,74,0.70)",
+  },
+  poinconStudentCellKo: {
+    backgroundColor: "#FEE2E2",
+    borderColor: "rgba(220,38,38,0.70)",
+  },
+  poinconStudentCellValidated: {
+    backgroundColor: "#DCFCE7",
+    borderColor: "rgba(22,163,74,0.70)",
+  },
+  poinconDot: {
+    width: 11,
+    height: 11,
+    borderRadius: 999,
+    backgroundColor: "#111827",
+  },
+  poinconCheck: {
+    position: "absolute",
+    color: "#14532D",
+    fontSize: 18,
+    fontWeight: "900",
+  },
+
+  poinconSingleZone: {
+    width: "100%",
+    alignItems: "center",
+    justifyContent: "flex-start",
+    position: "relative",
+  },
+  poinconHorizontalList: {
+    flexGrow: 0,
+    overflow: "visible",
+  },
+  poinconHorizontalContent: {
+    alignItems: "flex-start",
+  },
+  poinconArrow: {
+    position: "absolute",
+    top: "50%",
+    marginTop: -28,
+    width: 48,
+    height: 56,
+    borderRadius: 18,
+    backgroundColor: "rgba(31,91,134,0.86)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.45)",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 20,
+    shadowColor: "#000",
+    shadowOpacity: 0.24,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 5 },
+    elevation: 6,
+  },
+  poinconArrowLeft: { left: 4 },
+  poinconArrowRight: { right: 4 },
+  poinconArrowDisabled: { opacity: 0.22 },
+  bigPoinconCardOuter: {
+    flexShrink: 0,
+    width: "100%",
+    alignItems: "center",
+    justifyContent: "flex-start",
+  },
+  bigPoinconCard: {
+    width: "100%",
+    maxWidth: 560,
+    backgroundColor: "rgba(255,255,255,0.95)",
+    borderWidth: 2,
+    borderColor: "rgba(56,189,248,0.62)",
+    borderRadius: 26,
+    paddingHorizontal: 14,
+    paddingTop: 12,
+    paddingBottom: 10,
+    shadowColor: "#000",
+    shadowOpacity: 0.18,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 6,
+  },
+  bigPoinconCardActive: {
+    borderColor: "#38BDF8",
+    shadowColor: "#38BDF8",
+    shadowOpacity: 0.34,
+  },
+  bigPoinconCardOk: {
+    borderColor: "rgba(22,163,74,0.78)",
+    backgroundColor: "rgba(236,253,245,0.96)",
+  },
+  bigPoinconCardKo: {
+    borderColor: "rgba(220,38,38,0.78)",
+    backgroundColor: "rgba(254,242,242,0.96)",
+  },
+  bigPoinconHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    marginBottom: 4,
+  },
+  bigPoinconHeaderArrow: {
+    width: 46,
+    height: 48,
+    borderRadius: 17,
+    backgroundColor: "rgba(31,91,134,0.86)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.45)",
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: "#000",
+    shadowOpacity: 0.18,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 5,
+  },
+  bigPoinconHeaderArrowSpacer: {
+    width: 46,
+    height: 48,
+  },
+  bigPoinconCenterHead: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  bigPoinconBadge: {
+    width: 70,
+    minHeight: 64,
+    borderRadius: 18,
+    backgroundColor: "#E0F2FE",
+    borderWidth: 1,
+    borderColor: "rgba(31,91,134,0.16)",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 6,
+  },
+  bigPoinconBadgeActive: { backgroundColor: C_BLUE_DARK, borderColor: "#38BDF8" },
+  bigPoinconBadgeLabel: { color: C_MUTED, fontSize: 10, fontWeight: "900", letterSpacing: 0.4 },
+  bigPoinconBadgeLabelActive: { color: "rgba(255,255,255,0.86)" },
+  bigPoinconBadgeNumber: { color: C_BLUE_DARK, fontSize: 24, fontWeight: "900", lineHeight: 28 },
+  bigPoinconBadgeNumberActive: { color: "#fff" },
+  bigPoinconTitleWrap: { display: "none" },
+  bigPoinconTitle: { color: C_TEXT, fontSize: 17, fontWeight: "900" },
+  bigPoinconSubtitle: { color: C_MUTED, fontSize: 11, lineHeight: 15, fontWeight: "800", marginTop: 2 },
+  bigPoinconPointsPill: {
+    minWidth: 48,
+    borderRadius: 999,
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+    backgroundColor: "#FEF3C7",
+    borderWidth: 1,
+    borderColor: "rgba(245,158,11,0.28)",
+    alignItems: "center",
+  },
+  bigPoinconPointsText: { color: "#92400E", fontSize: 11, fontWeight: "900" },
+  bigPoinconPointsUnder: {
+    marginTop: 4,
+    color: "#92400E",
+    fontSize: 12,
+    fontWeight: "900",
+    textAlign: "center",
+  },
+  bigPoinconGridWrap: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    alignSelf: "center",
+    paddingTop: 2,
+    paddingBottom: 2,
+  },
+  bigPoinconRow: { flexDirection: "row" },
+  bigPoinconCell: {
+    backgroundColor: "rgba(255,255,255,0.96)",
+    borderWidth: 2,
+    borderColor: "rgba(31,91,134,0.26)",
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: "#000",
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 2,
+  },
+  bigPoinconCellActive: { backgroundColor: "#DBEAFE", borderColor: "#1D4ED8" },
+  bigPoinconCellOk: { backgroundColor: "#DCFCE7", borderColor: "rgba(22,163,74,0.72)" },
+  bigPoinconCellKo: { backgroundColor: "#FEE2E2", borderColor: "rgba(220,38,38,0.72)" },
+  bigPoinconCellValidated: { backgroundColor: "#DCFCE7", borderColor: "rgba(22,163,74,0.72)" },
+  bigPoinconDot: { borderRadius: 999, backgroundColor: "#111827" },
+  bigPoinconCheck: { position: "absolute", color: "#14532D", fontSize: 28, fontWeight: "900" },
+  bigPoinconFooterStatus: { marginTop: 12, minHeight: 20, alignItems: "center" },
+  poinconMissingBox: {
+    marginTop: 8,
+    marginBottom: 6,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(220,38,38,0.35)",
+    backgroundColor: "rgba(254,226,226,0.85)",
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+  },
+  poinconMissingTitle: {
+    color: "#7F1D1D",
+    fontSize: 12,
+    fontWeight: "900",
+    textAlign: "center",
+  },
+  poinconMissingText: {
+    marginTop: 3,
+    color: "#991B1B",
+    fontSize: 11,
+    lineHeight: 15,
+    fontWeight: "700",
+    textAlign: "center",
   },
 
   baliseMetaRow: {
