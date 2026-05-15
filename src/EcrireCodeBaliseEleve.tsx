@@ -880,9 +880,12 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   );
 
   const poinconCardMinHeight = useMemo(() => {
-    const compactHeader = isPoinconParcours ? (isCompact ? 106 : 112) : 176;
-    const verifySpace = isPoinconParcours ? 76 : 118;
-    return Math.max(isCompact ? 330 : 370, height - compactHeader - verifySpace);
+    const compactHeader = isPoinconParcours ? (isCompact ? 102 : 112) : 176;
+    const verifyButtonSpace = isPoinconParcours ? 66 : 118;
+    const browserSafetySpace = Platform.OS === "web" ? 78 : 28;
+    const available = height - compactHeader - verifyButtonSpace - browserSafetySpace;
+
+    return Math.max(isCompact ? 270 : 320, available);
   }, [height, isCompact, isPoinconParcours]);
 
   const getPoinconBigCellSize = useCallback(
@@ -892,10 +895,10 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       const gridGap = width < 430 ? 6 : 9;
       const cardRatio = width < 430 ? 0.98 : 0.72;
       const maxGridWidth = Math.max(190, poinconCardWidth * cardRatio - 30);
-      const maxGridHeight = Math.max(210, poinconCardMinHeight - (width < 430 ? 74 : 92));
+      const maxGridHeight = Math.max(170, poinconCardMinHeight - (width < 430 ? 68 : 88));
       const byWidth = Math.floor((maxGridWidth - gridGap * (cols - 1)) / cols);
       const byHeight = Math.floor((maxGridHeight - gridGap * (rows - 1)) / rows);
-      return Math.max(38, Math.min(width < 430 ? 82 : 94, byWidth, byHeight));
+      return Math.max(30, Math.min(width < 430 ? 72 : 88, byWidth, byHeight));
     },
     [poinconCardMinHeight, poinconCardWidth, width]
   );
@@ -2248,7 +2251,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
           <ScrollView
             ref={scrollRef}
             style={[styles.mainScroll, webScrollStyle]}
-            contentContainerStyle={{ padding: isPoinconParcours ? 8 : 12, paddingBottom: bottomScrollSpace }}
+            contentContainerStyle={{ padding: isPoinconParcours ? 6 : 12, paddingBottom: bottomScrollSpace }}
             keyboardShouldPersistTaps="handled"
             keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "none"}
             nestedScrollEnabled
@@ -2938,9 +2941,9 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: "rgba(56,189,248,0.62)",
     borderRadius: 22,
-    paddingHorizontal: 10,
-    paddingTop: 8,
-    paddingBottom: 8,
+    paddingHorizontal: 8,
+    paddingTop: 7,
+    paddingBottom: 7,
     shadowColor: "#000",
     shadowOpacity: 0.18,
     shadowRadius: 16,
@@ -3153,13 +3156,13 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   verifyBelowPoinconWrap: {
-    marginTop: 12,
+    marginTop: 8,
     paddingHorizontal: 8,
     alignSelf: "center",
   },
   verifyAllBtnBelowPoincon: {
-    minHeight: 46,
-    borderRadius: 17,
+    minHeight: 44,
+    borderRadius: 16,
     alignSelf: "stretch",
   },
   verifyAllBtnDone: {
