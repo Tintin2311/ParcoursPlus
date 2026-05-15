@@ -1,4 +1,3 @@
-// src/EcrireCodeBaliseEleve.tsx
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
@@ -133,6 +132,32 @@ const C_GOLD = "#F59E0B";
 const C_GREEN = "#16A34A";
 const C_RED = "#DC2626";
 const C_RED_FLASH = "#FF1F1F";
+
+const webScrollStyle =
+  Platform.OS === "web"
+    ? ({
+        overflowY: "auto",
+        overflowX: "hidden",
+        touchAction: "pan-y",
+        WebkitOverflowScrolling: "touch",
+        overscrollBehaviorY: "contain",
+        height: "100%",
+      } as any)
+    : null;
+
+const webPanYStyle =
+  Platform.OS === "web"
+    ? ({
+        touchAction: "pan-y",
+      } as any)
+    : null;
+
+const webPanXStyle =
+  Platform.OS === "web"
+    ? ({
+        touchAction: "pan-x",
+      } as any)
+    : null;
 
 const formatPointUnit = (value: number | string | null | undefined) => {
   const n = Number(value ?? 0);
@@ -345,11 +370,6 @@ const buildPoinconVariants = (expected: PoinconCell): PoinconCell[] => {
   return uniqueMatrices(withMirrors);
 };
 
-const poinconMatchesInAnyRotation = (student: PoinconCell, expected: PoinconCell): boolean => {
-  const variants = buildPoinconVariants(expected);
-  return variants.some((variant) => samePoincon(student, variant));
-};
-
 const parseAssignments = (value: any): Record<string, number> => {
   const obj = parseJsonObject(value);
   const out: Record<string, number> = {};
@@ -456,8 +476,6 @@ const orderBalisesFromTokens = (tokens: string[], balises: BaliseRow[]): BaliseA
       originalBaliseId,
       instanceKey,
       tokenSource: t,
-      // Les balises gelées disparaissent du parcours élève.
-      // Les balises restantes sont renumérotées proprement côté affichage.
       ordre: results.length + 1,
       poinconFormat: null,
       poinconFormatMissing: false,
@@ -800,20 +818,20 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   const boxSize = isCompact ? 36 : 42;
   const boxGap = isCompact ? 5 : 7;
 
-  const bottomScrollSpace = Math.max(360, Math.floor(height * 0.42));
-
-  const statCardWidth = useMemo(() => {
-    const gap = 8;
-    const scoreWidth = width < 430 ? 86 : 96;
-    const horizontalPadding = 24;
-    const total = width - horizontalPadding - scoreWidth - gap * 2;
-    return Math.max(92, Math.floor(total / 2));
-  }, [width]);
-
   const isPoinconParcours = useMemo(
     () => balises.length > 0 && balises.every((b) => !!b.poinconFormat),
     [balises]
   );
+
+  const bottomScrollSpace = isPoinconParcours ? 86 : Math.max(360, Math.floor(height * 0.42));
+
+  const statCardWidth = useMemo(() => {
+    const gap = isPoinconParcours ? 5 : 8;
+    const scoreWidth = isPoinconParcours ? 68 : width < 430 ? 86 : 96;
+    const horizontalPadding = isPoinconParcours ? 18 : 24;
+    const total = width - horizontalPadding - scoreWidth - gap * 2;
+    return Math.max(isPoinconParcours ? 76 : 92, Math.floor(total / 2));
+  }, [isPoinconParcours, width]);
 
   useEffect(() => {
     if (!isPoinconParcours) return;
@@ -824,9 +842,9 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   }, [activePoinconIndex, balises, isPoinconParcours]);
 
   const poinconCardWidth = useMemo(() => {
-    const horizontalPadding = 28;
+    const horizontalPadding = isCompact ? 18 : 28;
     return Math.max(280, width - horizontalPadding);
-  }, [width]);
+  }, [isCompact, width]);
 
   const activePoinconBalise = isPoinconParcours ? balises[activePoinconIndex] : null;
   const canGoPrevPoincon = activePoinconIndex > 0;
@@ -849,14 +867,6 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     [balises]
   );
 
-  const goPrevPoincon = useCallback(() => {
-    goToPoinconIndex(activePoinconIndex - 1, true);
-  }, [activePoinconIndex, goToPoinconIndex]);
-
-  const goNextPoincon = useCallback(() => {
-    goToPoinconIndex(activePoinconIndex + 1, true);
-  }, [activePoinconIndex, goToPoinconIndex]);
-
   const handlePoinconMomentumEnd = useCallback(
     (event: any) => {
       const x = event?.nativeEvent?.contentOffset?.x ?? 0;
@@ -870,22 +880,22 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   );
 
   const poinconCardMinHeight = useMemo(() => {
-    const reservedTop = Platform.OS === "web" ? 186 : 176;
-    const reservedBottom = 118;
-    return Math.max(270, height - reservedTop - reservedBottom);
-  }, [height]);
+    const compactHeader = isPoinconParcours ? (isCompact ? 106 : 112) : 176;
+    const verifySpace = isPoinconParcours ? 76 : 118;
+    return Math.max(isCompact ? 360 : 390, height - compactHeader - verifySpace);
+  }, [height, isCompact, isPoinconParcours]);
 
   const getPoinconBigCellSize = useCallback(
     (format: PoinconFormat) => {
       const rows = Math.max(2, format.rows || 4);
       const cols = Math.max(2, format.cols || 4);
-      const gridGap = width < 430 ? 7 : 10;
-      const cardRatio = width < 430 ? 1 : 0.72;
-      const maxGridWidth = Math.max(190, poinconCardWidth * cardRatio - 34);
-      const maxGridHeight = Math.max(220, poinconCardMinHeight - (width < 430 ? 86 : 108));
+      const gridGap = width < 430 ? 6 : 9;
+      const cardRatio = width < 430 ? 0.98 : 0.72;
+      const maxGridWidth = Math.max(190, poinconCardWidth * cardRatio - 30);
+      const maxGridHeight = Math.max(210, poinconCardMinHeight - (width < 430 ? 74 : 92));
       const byWidth = Math.floor((maxGridWidth - gridGap * (cols - 1)) / cols);
       const byHeight = Math.floor((maxGridHeight - gridGap * (rows - 1)) / rows);
-      return Math.max(44, Math.min(width < 430 ? 86 : 96, byWidth, byHeight));
+      return Math.max(38, Math.min(width < 430 ? 82 : 94, byWidth, byHeight));
     },
     [poinconCardMinHeight, poinconCardWidth, width]
   );
@@ -995,47 +1005,40 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   }, []);
 
   const handleLogout = useCallback(async () => {
-  if (loggingOut) return;
+    if (loggingOut) return;
 
-  try {
-    setLoggingOut(true);
-    Keyboard.dismiss();
-
-    // 1) Fermer la modal tout de suite
-    setConfirmLogoutVisible(false);
-
-    // 2) Nettoyage local complet côté élève
-    await AsyncStorage.multiRemove([
-      "derniereConnexionMode",
-      "dernierePageEleve",
-      "eleveCache",
-
-      "LS_LAST_MODE",
-      "LS_LAST_PAGE_ELEVE",
-      "LS_ELEVE_CACHE",
-
-      "lastMode",
-      "lastPageEleve",
-      "studentCache",
-      "eleveConnecte",
-      "parcoursActif",
-    ]).catch(() => null);
-
-    // 3) Nettoyage parent, sans bloquer la déconnexion si erreur
     try {
-      if (handleDeconnexion) {
-        await handleDeconnexion();
-      }
-    } catch (e) {
-      console.warn("Déconnexion parent incomplète :", e);
-    }
+      setLoggingOut(true);
+      Keyboard.dismiss();
+      setConfirmLogoutVisible(false);
 
-    // 4) Ne pas laisser l’élève sur une page élève
-    setPage("accueil");
-  } finally {
-    setLoggingOut(false);
-  }
-}, [handleDeconnexion, loggingOut, setPage]);
+      await AsyncStorage.multiRemove([
+        "derniereConnexionMode",
+        "dernierePageEleve",
+        "eleveCache",
+        "LS_LAST_MODE",
+        "LS_LAST_PAGE_ELEVE",
+        "LS_ELEVE_CACHE",
+        "lastMode",
+        "lastPageEleve",
+        "studentCache",
+        "eleveConnecte",
+        "parcoursActif",
+      ]).catch(() => null);
+
+      try {
+        if (handleDeconnexion) {
+          await handleDeconnexion();
+        }
+      } catch (e) {
+        console.warn("Déconnexion parent incomplète :", e);
+      }
+
+      setPage("accueil");
+    } finally {
+      setLoggingOut(false);
+    }
+  }, [handleDeconnexion, loggingOut, setPage]);
 
   const resolveStudent = useCallback(async () => {
     let nextStudentId = eleveConnecte?.id ?? null;
@@ -1351,9 +1354,6 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
             formatsByCleanBaliseId.get(cleanKey) ??
             null;
 
-          // Secours contrôlé : si Supabase renvoie exactement autant de poinçons
-          // que de balises dans ce parcours, on associe par ordre.
-          // Cela évite que l'élève soit bloqué si les ids sont bien chargés mais mal recollés.
           if (!savedPoinconFormat && poinconFormatsInOrder.length === orderedBalises.length) {
             savedPoinconFormat = poinconFormatsInOrder[index] ?? null;
           }
@@ -1397,8 +1397,6 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
 
       setBalises(orderedBalises);
       setActiveBaliseKey(orderedBalises[0]?.instanceKey ?? null);
-      // Mode normal : l'élève saisit lui-même le poinçon.
-      // On vide uniquement les anciennes saisies locales pour éviter de garder le mode test/triche.
       setPoinconsSaisis({});
 
       await loadAttemptsAndConfig(resolved.studentId, resolved.groupId, parcoursActif.id, orderedBalises);
@@ -1409,7 +1407,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     } finally {
       setLoading(false);
     }
-  }, [loadAttemptsAndConfig, parcoursActif, resetProgress, resolveStudent]);
+  }, [loadAttemptsAndConfig, parcoursActif, resetProgress, resolveStudent, eleveConnecte?.teacher_id]);
 
   useEffect(() => {
     loadAll();
@@ -1839,7 +1837,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
           onPress={() => {
             if (!alreadyValidated) focusBalise(item, true, false);
           }}
-          style={[styles.codeBoxesWrap, { gap: boxGap }]}
+          style={[styles.codeBoxesWrap, { gap: boxGap }, webPanYStyle]}
         >
           <TextInput
             ref={(ref) => setInputRef(key, ref)}
@@ -2007,6 +2005,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
           }}
           style={[
             styles.baliseLine,
+            webPanYStyle,
             isActive && styles.baliseLineActive,
             result === true && styles.baliseLineOk,
             result === false && styles.baliseLineKo,
@@ -2017,7 +2016,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
             onPress={() => {
               if (!alreadyValidated) focusBalise(item, true, false);
             }}
-            style={styles.baliseLineTouchable}
+            style={[styles.baliseLineTouchable, webPanYStyle]}
           >
             <LinearGradient
               colors={isActive ? ["#0F5E8C", "#38BDF8"] : ["#E0F2FE", "#FFFFFF"]}
@@ -2068,7 +2067,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       const current = poinconsSaisis[key] ?? emptyPoincon(format.rows, format.cols);
       const cellSize = getPoinconBigCellSize(format);
       const isMissingSupabaseAnswer = !!item.poinconFormatMissing;
-      const gridGap = width < 430 ? 7 : 10;
+      const gridGap = width < 430 ? 6 : 9;
 
       const displayBalisePoints = pointsConfig.modes.balises
         ? Number.isFinite(Number(item.points))
@@ -2080,7 +2079,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       const itemCanGoNext = index < balises.length - 1;
 
       return (
-        <View style={[styles.bigPoinconCardOuter, { width: poinconCardWidth }]}>
+        <View style={[styles.bigPoinconCardOuter, { width: poinconCardWidth }, webPanXStyle]}>
           <Pressable
             onPress={() => {
               if (!alreadyValidated) {
@@ -2104,7 +2103,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
                     onPress={() => goToPoinconIndex(index - 1, true)}
                     style={styles.bigPoinconHeaderArrow}
                   >
-                    <Feather name="chevron-left" size={25} color="#fff" />
+                    <Feather name="chevron-left" size={23} color="#fff" />
                   </TouchableOpacity>
                 ) : (
                   <View style={styles.bigPoinconHeaderArrowSpacer} />
@@ -2129,13 +2128,14 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
                     onPress={() => goToPoinconIndex(index + 1, true)}
                     style={styles.bigPoinconHeaderArrow}
                   >
-                    <Feather name="chevron-right" size={25} color="#fff" />
+                    <Feather name="chevron-right" size={23} color="#fff" />
                   </TouchableOpacity>
                 ) : (
                   <View style={styles.bigPoinconHeaderArrowSpacer} />
                 )
               ) : null}
             </View>
+
             {isMissingSupabaseAnswer ? (
               <View style={styles.poinconMissingBox}>
                 <Text style={styles.poinconMissingTitle}>Réponse Supabase introuvable</Text>
@@ -2165,7 +2165,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
                       }}
                       style={[
                         styles.bigPoinconCell,
-                        { width: cellSize, height: cellSize, borderRadius: Math.max(14, Math.floor(cellSize / 3.1)) },
+                        { width: cellSize, height: cellSize, borderRadius: Math.max(13, Math.floor(cellSize / 3.1)) },
                         active && styles.bigPoinconCellActive,
                         result === true && styles.bigPoinconCellOk,
                         result === false && styles.bigPoinconCellKo,
@@ -2205,46 +2205,54 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
           locations={[0, 0.25, 0.6, 1]}
           style={styles.container}
         >
-          <View>
-            <View style={styles.topBar}>
-              <TouchableOpacity activeOpacity={0.9} onPress={() => setPage("EcrireResultat")} style={styles.iconBtn}>
-                <Feather name="arrow-left" size={18} color="#fff" />
+          <View style={styles.headerZone}>
+            <View style={[styles.topBar, isPoinconParcours && styles.topBarCompact]}>
+              <TouchableOpacity activeOpacity={0.9} onPress={() => setPage("EcrireResultat")} style={[styles.iconBtn, isPoinconParcours && styles.iconBtnCompact]}>
+                <Feather name="arrow-left" size={isPoinconParcours ? 16 : 18} color="#fff" />
               </TouchableOpacity>
 
-              <Text style={styles.pageTitle} numberOfLines={2} adjustsFontSizeToFit minimumFontScale={0.72}>
+              <Text
+                style={[styles.pageTitle, isPoinconParcours && styles.pageTitleCompact]}
+                numberOfLines={isPoinconParcours ? 1 : 2}
+                adjustsFontSizeToFit
+                minimumFontScale={0.72}
+              >
                 {parcoursNom}
               </Text>
 
-              <TouchableOpacity activeOpacity={0.9} onPress={() => setConfirmLogoutVisible(true)} style={styles.logoutBtn}>
-                <Feather name="log-out" size={19} color="#fff" />
+              <TouchableOpacity activeOpacity={0.9} onPress={() => setConfirmLogoutVisible(true)} style={[styles.logoutBtn, isPoinconParcours && styles.logoutBtnCompact]}>
+                <Feather name="log-out" size={isPoinconParcours ? 17 : 19} color="#fff" />
               </TouchableOpacity>
             </View>
 
-            <View style={styles.stickyStatsBar}>
-              <View style={[styles.statBox, { width: statCardWidth }]}> 
-                <Text style={styles.statValue}>{savedScore}/{balises.length}</Text>
-                <Text style={styles.statLabel}>Balises trouvées</Text>
+            <View style={[styles.stickyStatsBar, isPoinconParcours && styles.stickyStatsBarCompact]}>
+              <View style={[styles.statBox, isPoinconParcours && styles.statBoxCompact, { width: statCardWidth }]}> 
+                <Text style={[styles.statValue, isPoinconParcours && styles.statValueCompact]}>{savedScore}/{balises.length}</Text>
+                <Text style={[styles.statLabel, isPoinconParcours && styles.statLabelCompact]}>
+                  {isPoinconParcours ? "Trouvées" : "Balises trouvées"}
+                </Text>
               </View>
 
-              <View style={[styles.statBox, { width: statCardWidth }]}> 
-                <Text style={styles.statValue}>{tentativesCount}</Text>
-                <Text style={styles.statLabel}>Tentatives</Text>
+              <View style={[styles.statBox, isPoinconParcours && styles.statBoxCompact, { width: statCardWidth }]}> 
+                <Text style={[styles.statValue, isPoinconParcours && styles.statValueCompact]}>{tentativesCount}</Text>
+                <Text style={[styles.statLabel, isPoinconParcours && styles.statLabelCompact]}>Tentatives</Text>
               </View>
 
-              <TouchableOpacity activeOpacity={0.9} onPress={() => setScoreModalVisible(true)} style={styles.bigScorePillTop2}>
-                <Text style={styles.bigScoreValue}>{formatPoints(savedPointsTotal)}</Text>
-                <Text style={styles.bigScoreLabel}>{formatPointUnit(savedPointsTotal)}</Text>
+              <TouchableOpacity activeOpacity={0.9} onPress={() => setScoreModalVisible(true)} style={[styles.bigScorePillTop2, isPoinconParcours && styles.bigScorePillTop2Compact]}>
+                <Text style={[styles.bigScoreValue, isPoinconParcours && styles.bigScoreValueCompact]}>{formatPoints(savedPointsTotal)}</Text>
+                <Text style={[styles.bigScoreLabel, isPoinconParcours && styles.bigScoreLabelCompact]}>{formatPointUnit(savedPointsTotal)}</Text>
               </TouchableOpacity>
             </View>
           </View>
 
           <ScrollView
             ref={scrollRef}
-            contentContainerStyle={{ padding: 12, paddingBottom: bottomScrollSpace }}
+            style={[styles.mainScroll, webScrollStyle]}
+            contentContainerStyle={{ padding: isPoinconParcours ? 8 : 12, paddingBottom: bottomScrollSpace }}
             keyboardShouldPersistTaps="handled"
             keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "none"}
             nestedScrollEnabled
-            scrollEnabled={!isPoinconParcours}
+            scrollEnabled
             scrollEventThrottle={16}
             showsVerticalScrollIndicator={false}
             directionalLockEnabled={true}
@@ -2280,7 +2288,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
                 <Text style={styles.stateText}>Ce parcours ne contient aucune balise active à afficher.</Text>
               </View>
             ) : isPoinconParcours && activePoinconBalise ? (
-              <View style={[styles.poinconSingleZone, { paddingHorizontal: isCompact ? 0 : 62 }]}> 
+              <View style={[styles.poinconSingleZone, { paddingHorizontal: isCompact ? 0 : 62 }, webPanXStyle]}> 
                 {!isCompact && canGoPrevPoincon ? (
                   <TouchableOpacity
                     activeOpacity={0.85}
@@ -2331,8 +2339,8 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
                     }, 80);
                   }}
                   renderItem={({ item, index }) => renderBigPoinconBalise({ item, index })}
-                  style={[styles.poinconHorizontalList, { width: poinconCardWidth }]}
-                  contentContainerStyle={styles.poinconHorizontalContent}
+                  style={[styles.poinconHorizontalList, { width: poinconCardWidth }, webPanXStyle]}
+                  contentContainerStyle={[styles.poinconHorizontalContent, webPanXStyle]}
                 />
 
                 {!isCompact && canGoNextPoincon ? (
@@ -2346,23 +2354,24 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
                 ) : null}
               </View>
             ) : (
-              <FlatList
-                data={balises}
-                keyExtractor={(item) => item.instanceKey}
-                renderItem={renderBalise}
-                scrollEnabled={false}
-                keyboardShouldPersistTaps="always"
-                ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
-              />
+              <View style={webPanYStyle}>
+                {balises.map((item, index) => (
+                  <View key={item.instanceKey} style={webPanYStyle}>
+                    {renderBalise({ item, index })}
+                    {index < balises.length - 1 && <View style={{ height: 10 }} />}
+                  </View>
+                ))}
+              </View>
             )}
           </ScrollView>
 
           {!loading && !screenError && !!balises.length && (
-            <View style={styles.bottomBar}>
+            <View style={[styles.bottomBar, isPoinconParcours && styles.bottomBarCompact]}>
               <TouchableOpacity
                 activeOpacity={0.9}
                 style={[
                   styles.verifyAllBtn,
+                  isPoinconParcours && styles.verifyAllBtnCompact,
                   (saving || isCompleted) && { opacity: 0.7 },
                   isCompleted && styles.verifyAllBtnDone,
                 ]}
@@ -2373,13 +2382,13 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
                   <ActivityIndicator color="#fff" />
                 ) : isCompleted ? (
                   <>
-                    <Feather name="award" size={18} color="#fff" />
-                    <Text style={styles.verifyAllBtnText}>Parcours terminé</Text>
+                    <Feather name="award" size={17} color="#fff" />
+                    <Text style={[styles.verifyAllBtnText, isPoinconParcours && styles.verifyAllBtnTextCompact]}>Parcours terminé</Text>
                   </>
                 ) : (
                   <>
-                    <Feather name="check-square" size={18} color="#fff" />
-                    <Text style={styles.verifyAllBtnText}>Tout vérifier</Text>
+                    <Feather name="check-square" size={17} color="#fff" />
+                    <Text style={[styles.verifyAllBtnText, isPoinconParcours && styles.verifyAllBtnTextCompact]}>Tout vérifier</Text>
                   </>
                 )}
               </TouchableOpacity>
@@ -2461,7 +2470,9 @@ export default EcrireCodeBaliseEleve;
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: "#061827" },
   bg: { flex: 1 },
-  container: { flex: 1 },
+  container: { flex: 1, overflow: "hidden" },
+  mainScroll: { flex: 1 },
+  headerZone: { zIndex: 20 },
 
   topBar: {
     flexDirection: "row",
@@ -2474,6 +2485,12 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: "rgba(255,255,255,0.18)",
   },
+  topBarCompact: {
+    gap: 8,
+    paddingHorizontal: 10,
+    paddingTop: Platform.OS === "android" ? 8 : 5,
+    paddingBottom: 6,
+  },
   iconBtn: {
     width: 40,
     height: 40,
@@ -2483,6 +2500,11 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.16)",
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.28)",
+  },
+  iconBtnCompact: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
   },
   logoutBtn: {
     width: 42,
@@ -2499,6 +2521,12 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 4 },
     elevation: 5,
   },
+  logoutBtnCompact: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
   pageTitle: {
     flex: 1,
     color: "#FFFFFF",
@@ -2507,6 +2535,10 @@ const styles = StyleSheet.create({
     fontWeight: "900",
     textAlign: "center",
     letterSpacing: 0.2,
+  },
+  pageTitleCompact: {
+    fontSize: 14,
+    lineHeight: 17,
   },
 
   stickyStatsBar: {
@@ -2520,6 +2552,11 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: "rgba(255,255,255,0.14)",
     zIndex: 20,
+  },
+  stickyStatsBarCompact: {
+    gap: 5,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
   },
   statBox: {
     backgroundColor: "rgba(255,255,255,0.92)",
@@ -2536,11 +2573,21 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 5 },
     elevation: 3,
   },
+  statBoxCompact: {
+    minHeight: 38,
+    borderRadius: 13,
+    paddingVertical: 4,
+    paddingHorizontal: 4,
+  },
   statValue: {
     color: C_BLUE_DARK,
     fontSize: 15,
     fontWeight: "900",
     textAlign: "center",
+  },
+  statValueCompact: {
+    fontSize: 12,
+    lineHeight: 14,
   },
   statLabel: {
     color: C_MUTED,
@@ -2548,6 +2595,11 @@ const styles = StyleSheet.create({
     marginTop: 4,
     fontWeight: "800",
     textAlign: "center",
+  },
+  statLabelCompact: {
+    fontSize: 8,
+    lineHeight: 9,
+    marginTop: 1,
   },
   bigScorePillTop2: {
     width: 86,
@@ -2565,17 +2617,32 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 5 },
     elevation: 4,
   },
+  bigScorePillTop2Compact: {
+    width: 68,
+    height: 38,
+    borderRadius: 13,
+    paddingHorizontal: 6,
+    borderWidth: 1,
+  },
   bigScoreValue: {
     color: "#78350F",
     fontSize: 14,
     fontWeight: "900",
     lineHeight: 17,
   },
+  bigScoreValueCompact: {
+    fontSize: 12,
+    lineHeight: 14,
+  },
   bigScoreLabel: {
     color: "#92400E",
     fontSize: 10,
     fontWeight: "900",
     lineHeight: 12,
+  },
+  bigScoreLabelCompact: {
+    fontSize: 8,
+    lineHeight: 9,
   },
 
   baliseLine: {
@@ -2830,7 +2897,6 @@ const styles = StyleSheet.create({
   },
   poinconArrowLeft: { left: 4 },
   poinconArrowRight: { right: 4 },
-  poinconArrowDisabled: { opacity: 0.22 },
   bigPoinconCardOuter: {
     flexShrink: 0,
     width: "100%",
@@ -2843,10 +2909,10 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.95)",
     borderWidth: 2,
     borderColor: "rgba(56,189,248,0.62)",
-    borderRadius: 26,
-    paddingHorizontal: 14,
-    paddingTop: 12,
-    paddingBottom: 10,
+    borderRadius: 22,
+    paddingHorizontal: 10,
+    paddingTop: 8,
+    paddingBottom: 8,
     shadowColor: "#000",
     shadowOpacity: 0.18,
     shadowRadius: 16,
@@ -2870,13 +2936,13 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    gap: 10,
-    marginBottom: 4,
+    gap: 8,
+    marginBottom: 2,
   },
   bigPoinconHeaderArrow: {
-    width: 46,
-    height: 48,
-    borderRadius: 17,
+    width: 40,
+    height: 42,
+    borderRadius: 15,
     backgroundColor: "rgba(31,91,134,0.86)",
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.45)",
@@ -2889,8 +2955,8 @@ const styles = StyleSheet.create({
     elevation: 5,
   },
   bigPoinconHeaderArrowSpacer: {
-    width: 46,
-    height: 48,
+    width: 40,
+    height: 42,
   },
   bigPoinconCenterHead: {
     flex: 1,
@@ -2898,39 +2964,25 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   bigPoinconBadge: {
-    width: 70,
-    minHeight: 64,
-    borderRadius: 18,
+    width: 62,
+    minHeight: 52,
+    borderRadius: 16,
     backgroundColor: "#E0F2FE",
     borderWidth: 1,
     borderColor: "rgba(31,91,134,0.16)",
     alignItems: "center",
     justifyContent: "center",
-    paddingVertical: 6,
+    paddingVertical: 4,
   },
   bigPoinconBadgeActive: { backgroundColor: C_BLUE_DARK, borderColor: "#38BDF8" },
-  bigPoinconBadgeLabel: { color: C_MUTED, fontSize: 10, fontWeight: "900", letterSpacing: 0.4 },
+  bigPoinconBadgeLabel: { color: C_MUTED, fontSize: 9, fontWeight: "900", letterSpacing: 0.4 },
   bigPoinconBadgeLabelActive: { color: "rgba(255,255,255,0.86)" },
-  bigPoinconBadgeNumber: { color: C_BLUE_DARK, fontSize: 24, fontWeight: "900", lineHeight: 28 },
+  bigPoinconBadgeNumber: { color: C_BLUE_DARK, fontSize: 21, fontWeight: "900", lineHeight: 24 },
   bigPoinconBadgeNumberActive: { color: "#fff" },
-  bigPoinconTitleWrap: { display: "none" },
-  bigPoinconTitle: { color: C_TEXT, fontSize: 17, fontWeight: "900" },
-  bigPoinconSubtitle: { color: C_MUTED, fontSize: 11, lineHeight: 15, fontWeight: "800", marginTop: 2 },
-  bigPoinconPointsPill: {
-    minWidth: 48,
-    borderRadius: 999,
-    paddingHorizontal: 9,
-    paddingVertical: 6,
-    backgroundColor: "#FEF3C7",
-    borderWidth: 1,
-    borderColor: "rgba(245,158,11,0.28)",
-    alignItems: "center",
-  },
-  bigPoinconPointsText: { color: "#92400E", fontSize: 11, fontWeight: "900" },
   bigPoinconPointsUnder: {
-    marginTop: 4,
+    marginTop: 2,
     color: "#92400E",
-    fontSize: 12,
+    fontSize: 10,
     fontWeight: "900",
     textAlign: "center",
   },
@@ -2939,8 +2991,8 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     alignSelf: "center",
-    paddingTop: 2,
-    paddingBottom: 2,
+    paddingTop: 0,
+    paddingBottom: 0,
   },
   bigPoinconRow: { flexDirection: "row" },
   bigPoinconCell: {
@@ -2961,28 +3013,28 @@ const styles = StyleSheet.create({
   bigPoinconCellValidated: { backgroundColor: "#DCFCE7", borderColor: "rgba(22,163,74,0.72)" },
   bigPoinconDot: { borderRadius: 999, backgroundColor: "#111827" },
   bigPoinconCheck: { position: "absolute", color: "#14532D", fontSize: 28, fontWeight: "900" },
-  bigPoinconFooterStatus: { marginTop: 12, minHeight: 20, alignItems: "center" },
+  bigPoinconFooterStatus: { marginTop: 6, minHeight: 18, alignItems: "center" },
   poinconMissingBox: {
-    marginTop: 8,
-    marginBottom: 6,
+    marginTop: 6,
+    marginBottom: 4,
     borderRadius: 14,
     borderWidth: 1,
     borderColor: "rgba(220,38,38,0.35)",
     backgroundColor: "rgba(254,226,226,0.85)",
-    paddingVertical: 8,
-    paddingHorizontal: 10,
+    paddingVertical: 6,
+    paddingHorizontal: 8,
   },
   poinconMissingTitle: {
     color: "#7F1D1D",
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: "900",
     textAlign: "center",
   },
   poinconMissingText: {
-    marginTop: 3,
+    marginTop: 2,
     color: "#991B1B",
-    fontSize: 11,
-    lineHeight: 15,
+    fontSize: 10,
+    lineHeight: 13,
     fontWeight: "700",
     textAlign: "center",
   },
@@ -3045,6 +3097,11 @@ const styles = StyleSheet.create({
     bottom: 14,
     zIndex: 30,
   },
+  bottomBarCompact: {
+    left: 12,
+    right: 12,
+    bottom: 10,
+  },
   verifyAllBtn: {
     minHeight: 56,
     borderRadius: 20,
@@ -3062,6 +3119,11 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 7 },
     elevation: 6,
   },
+  verifyAllBtnCompact: {
+    minHeight: 46,
+    borderRadius: 17,
+    gap: 8,
+  },
   verifyAllBtnDone: {
     backgroundColor: C_GREEN,
   },
@@ -3069,6 +3131,9 @@ const styles = StyleSheet.create({
     color: "#fff",
     fontWeight: "900",
     fontSize: 15,
+  },
+  verifyAllBtnTextCompact: {
+    fontSize: 14,
   },
 
   modalBg: {
