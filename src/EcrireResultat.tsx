@@ -1,9 +1,7 @@
-// src/EcrireResultat.tsx
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   ActivityIndicator,
-  FlatList,
   ImageBackground,
   Platform,
   SafeAreaView,
@@ -91,9 +89,25 @@ type Props = {
 const C_TEXT = "#0B2540";
 const C_MUTED = "#57708A";
 const C_GOLD = "#FBBF24";
-const C_BLUE = "#1F75B8";
-const C_GREEN = "#22C55E";
-const C_ORANGE = "#F97316";
+
+const webScrollStyle =
+  Platform.OS === "web"
+    ? ({
+        overflowY: "auto",
+        overflowX: "hidden",
+        touchAction: "pan-y",
+        WebkitOverflowScrolling: "touch",
+        overscrollBehaviorY: "contain",
+        height: "100%",
+      } as any)
+    : null;
+
+const webPanYStyle =
+  Platform.OS === "web"
+    ? ({
+        touchAction: "pan-y",
+      } as any)
+    : null;
 
 const getDisplayName = (row: any) =>
   String(row?.nom ?? row?.name ?? "Sans nom");
@@ -568,7 +582,7 @@ const EcrireResultat: React.FC<Props> = ({
           if (isFolder) openFolder(item.id);
           else handleOpenParcours(item as ParcoursRow);
         }}
-        style={styles.nodeOuter}
+        style={[styles.nodeOuter, webPanYStyle]}
       >
         <LinearGradient
           colors={cardColors}
@@ -657,9 +671,12 @@ const EcrireResultat: React.FC<Props> = ({
           )}
 
           <ScrollView
+            style={[styles.scroll, webScrollStyle]}
             contentContainerStyle={styles.scrollContent}
             keyboardShouldPersistTaps="handled"
             showsVerticalScrollIndicator={false}
+            nestedScrollEnabled
+            scrollEventThrottle={16}
           >
             {loading ? (
               <View style={styles.stateCard}>
@@ -694,13 +711,14 @@ const EcrireResultat: React.FC<Props> = ({
                 </Text>
               </View>
             ) : (
-              <FlatList
-                data={visibleNodes}
-                keyExtractor={(item) => `${item.type}-${item.id}`}
-                renderItem={renderNode}
-                scrollEnabled={false}
-                ItemSeparatorComponent={() => <View style={{ height: 12 }} />}
-              />
+              <View style={webPanYStyle}>
+                {visibleNodes.map((item, index) => (
+                  <View key={`${item.type}-${item.id}`}>
+                    {renderNode({ item })}
+                    {index < visibleNodes.length - 1 && <View style={{ height: 12 }} />}
+                  </View>
+                ))}
+              </View>
             )}
           </ScrollView>
 
@@ -716,7 +734,7 @@ export default EcrireResultat;
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: "#061827" },
   bg: { flex: 1 },
-  container: { flex: 1 },
+  container: { flex: 1, overflow: "hidden" },
 
   topBar: {
     flexDirection: "row",
@@ -787,6 +805,10 @@ const styles = StyleSheet.create({
     color: C_TEXT,
     fontSize: 14,
     fontWeight: "800",
+  },
+
+  scroll: {
+    flex: 1,
   },
 
   scrollContent: {
