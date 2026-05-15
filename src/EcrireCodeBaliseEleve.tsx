@@ -823,7 +823,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     [balises]
   );
 
-  const bottomScrollSpace = isPoinconParcours ? 86 : Math.max(360, Math.floor(height * 0.42));
+  const bottomScrollSpace = isPoinconParcours ? 24 : Math.max(360, Math.floor(height * 0.42));
 
   const statCardWidth = useMemo(() => {
     const gap = isPoinconParcours ? 5 : 8;
@@ -882,7 +882,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   const poinconCardMinHeight = useMemo(() => {
     const compactHeader = isPoinconParcours ? (isCompact ? 106 : 112) : 176;
     const verifySpace = isPoinconParcours ? 76 : 118;
-    return Math.max(isCompact ? 360 : 390, height - compactHeader - verifySpace);
+    return Math.max(isCompact ? 330 : 370, height - compactHeader - verifySpace);
   }, [height, isCompact, isPoinconParcours]);
 
   const getPoinconBigCellSize = useCallback(
@@ -2343,6 +2343,34 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
                   contentContainerStyle={[styles.poinconHorizontalContent, webPanXStyle]}
                 />
 
+                <View style={[styles.verifyBelowPoinconWrap, { width: poinconCardWidth }]}> 
+                  <TouchableOpacity
+                    activeOpacity={0.9}
+                    style={[
+                      styles.verifyAllBtn,
+                      styles.verifyAllBtnBelowPoincon,
+                      (saving || isCompleted) && { opacity: 0.7 },
+                      isCompleted && styles.verifyAllBtnDone,
+                    ]}
+                    onPress={handleVerifierTout}
+                    disabled={saving || isCompleted}
+                  >
+                    {saving ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : isCompleted ? (
+                      <>
+                        <Feather name="award" size={17} color="#fff" />
+                        <Text style={[styles.verifyAllBtnText, styles.verifyAllBtnTextCompact]}>Parcours terminé</Text>
+                      </>
+                    ) : (
+                      <>
+                        <Feather name="check-square" size={17} color="#fff" />
+                        <Text style={[styles.verifyAllBtnText, styles.verifyAllBtnTextCompact]}>Tout vérifier</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                </View>
+
                 {!isCompact && canGoNextPoincon ? (
                   <TouchableOpacity
                     activeOpacity={0.85}
@@ -2365,7 +2393,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
             )}
           </ScrollView>
 
-          {!loading && !screenError && !!balises.length && (
+          {!isPoinconParcours && !loading && !screenError && !!balises.length && (
             <View style={[styles.bottomBar, isPoinconParcours && styles.bottomBarCompact]}>
               <TouchableOpacity
                 activeOpacity={0.9}
@@ -3123,6 +3151,16 @@ const styles = StyleSheet.create({
     minHeight: 46,
     borderRadius: 17,
     gap: 8,
+  },
+  verifyBelowPoinconWrap: {
+    marginTop: 12,
+    paddingHorizontal: 8,
+    alignSelf: "center",
+  },
+  verifyAllBtnBelowPoincon: {
+    minHeight: 46,
+    borderRadius: 17,
+    alignSelf: "stretch",
   },
   verifyAllBtnDone: {
     backgroundColor: C_GREEN,
