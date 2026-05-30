@@ -4,19 +4,19 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   ActivityIndicator,
-  FlatList,
   ImageBackground,
   Platform,
   SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
   useWindowDimensions,
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
-import { BarChart2, Trophy } from "lucide-react-native";
+import { BarChart2, Search, Trophy, X } from "lucide-react-native";
 import { Feather } from "@expo/vector-icons";
 import { supabase } from "../supabaseClient";
 import BottomBarEleve from "../ui/BottomBarEleve";
@@ -59,6 +59,15 @@ const C_MUTED = "#57708A";
 const C_GOLD = "#FBBF24";
 const C_BLUE = "#1F75B8";
 
+const WEB_SCROLL_STYLE =
+  Platform.OS === "web"
+    ? ({
+        touchAction: "pan-y",
+        WebkitOverflowScrolling: "touch",
+        overflowY: "auto",
+      } as any)
+    : null;
+
 export default function ClassementEleve({ setPage }: Props) {
   const { width } = useWindowDimensions();
   const isSmall = width < 520;
@@ -71,6 +80,8 @@ export default function ClassementEleve({ setPage }: Props) {
 
   const [modePage, setModePage] = useState<ModePage>("classement");
   const [onglet, setOnglet] = useState<OngletClassement>("classe");
+  const [searchVisible, setSearchVisible] = useState(false);
+  const [searchTerm, setSearchTerm] = useState("");
   const [loading, setLoading] = useState(true);
   const [screenError, setScreenError] = useState<string | null>(null);
 
@@ -176,8 +187,26 @@ export default function ClassementEleve({ setPage }: Props) {
     });
   }, [rows, onglet, currentGroupId, currentNiveau]);
 
-  const podium = filteredRows.slice(0, 3);
-  const remainingRows = filteredRows.slice(3);
+  const normalizedSearch = normalizeSearch(searchTerm);
+  const isSearching = normalizedSearch.length > 0;
+
+  const visibleRows = useMemo(() => {
+    if (!normalizedSearch) return filteredRows;
+
+    return filteredRows.filter((row) => {
+      const searchable = normalizeSearch(`${row.nom} ${row.classe} ${row.niveau}`);
+      return searchable.includes(normalizedSearch);
+    });
+  }, [filteredRows, normalizedSearch]);
+
+  const rowRankMap = useMemo(() => {
+    const ranks = new Map<string, number>();
+    filteredRows.forEach((row, index) => ranks.set(row.id, index + 1));
+    return ranks;
+  }, [filteredRows]);
+
+  const podium = isSearching ? [] : filteredRows.slice(0, 3);
+  const remainingRows = isSearching ? visibleRows : filteredRows.slice(3);
 
   const currentRank = useMemo(() => {
     if (!currentStudentId) return null;
@@ -225,7 +254,7 @@ export default function ClassementEleve({ setPage }: Props) {
     requestAnimationFrame(() => {
       updateMyVisibility();
     });
-  }, [onglet, modePage, filteredRows.length, currentStudentId, updateMyVisibility]);
+  }, [onglet, modePage, visibleRows.length, currentStudentId, updateMyVisibility]);
 
   const registerMyRowLayout = useCallback(
     (absoluteY: number, height: number) => {
@@ -238,6 +267,7 @@ export default function ClassementEleve({ setPage }: Props) {
 
   const showMyFloatingRank =
     modePage === "classement" &&
+    !isSearching &&
     !!currentRow &&
     !!currentRank &&
     !isMyRowVisible;
@@ -266,6 +296,25 @@ export default function ClassementEleve({ setPage }: Props) {
                   : "Classement des élèves"}
               </Text>
             </View>
+
+            {modePage === "classement" && (
+              <TouchableOpacity
+                activeOpacity={0.9}
+                onPress={() => {
+                  setSearchVisible((prev) => {
+                    const next = !prev;
+                    if (!next) setSearchTerm("");
+                    return next;
+                  });
+                }}
+                style={[
+                  styles.topModeBtn,
+                  searchVisible && styles.topModeBtnActive,
+                ]}
+              >
+                <Search size={19} color="#fff" />
+              </TouchableOpacity>
+            )}
 
             <TouchableOpacity
               activeOpacity={0.9}
@@ -298,9 +347,33 @@ export default function ClassementEleve({ setPage }: Props) {
             </View>
           )}
 
+          {modePage === "classement" && searchVisible && (
+            <View style={styles.searchPanel}>
+              <Search size={17} color={C_MUTED} />
+              <TextInput
+                value={searchTerm}
+                onChangeText={setSearchTerm}
+                placeholder="Rechercher un élève"
+                placeholderTextColor="#7C91A5"
+                autoCapitalize="none"
+                autoCorrect={false}
+                style={styles.searchInput}
+              />
+              {!!searchTerm && (
+                <TouchableOpacity
+                  activeOpacity={0.85}
+                  onPress={() => setSearchTerm("")}
+                  style={styles.searchClearBtn}
+                >
+                  <X size={16} color={C_MUTED} />
+                </TouchableOpacity>
+              )}
+            </View>
+          )}
+
           {modePage === "classement" ? (
             <ScrollView
-              style={styles.list}
+              style={[styles.list, WEB_SCROLL_STYLE]}
               contentContainerStyle={[
                 styles.scrollContent,
                 isSmall && { paddingHorizontal: 12 },
@@ -318,52 +391,61 @@ export default function ClassementEleve({ setPage }: Props) {
               }}
             >
               {loading ? (
-                <View style={styles.stateCard}>
+                <View pointerEvents="none" style={styles.stateCard}>
                   <ActivityIndicator size="large" color={C_GOLD} />
                   <Text style={styles.stateTitle}>Chargement...</Text>
                   <Text style={styles.stateText}>Préparation du classement.</Text>
                 </View>
               ) : screenError ? (
-                <View style={styles.stateCard}>
+                <View pointerEvents="none" style={styles.stateCard}>
                   <Feather name="alert-circle" size={42} color={C_GOLD} />
                   <Text style={styles.stateTitle}>Erreur</Text>
                   <Text style={styles.stateText}>{screenError}</Text>
                 </View>
               ) : filteredRows.length === 0 ? (
-                <View style={styles.stateCard}>
+                <View pointerEvents="none" style={styles.stateCard}>
                   <Trophy size={44} color={C_GOLD} />
                   <Text style={styles.stateTitle}>Aucun classement</Text>
                   <Text style={styles.stateText}>
                     Aucun score n’est encore disponible.
                   </Text>
                 </View>
+              ) : visibleRows.length === 0 ? (
+                <View pointerEvents="none" style={styles.stateCard}>
+                  <Search size={44} color={C_GOLD} />
+                  <Text style={styles.stateTitle}>Aucun élève trouvé</Text>
+                  <Text style={styles.stateText}>
+                    Essaie avec un autre prénom ou nom.
+                  </Text>
+                </View>
               ) : (
                 <>
-                  <View
-                    onLayout={(event) => {
-                      podiumYRef.current = event.nativeEvent.layout.y;
-                      requestAnimationFrame(updateMyVisibility);
-                    }}
-                  >
-                    <Podium
-                      rows={podium}
-                      currentStudentId={currentStudentId}
-                      podiumYRef={podiumYRef}
-                      onCurrentLayout={registerMyRowLayout}
-                    />
-                  </View>
+                  {!isSearching && (
+                    <View
+                      pointerEvents="none"
+                      onLayout={(event) => {
+                        podiumYRef.current = event.nativeEvent.layout.y;
+                        requestAnimationFrame(updateMyVisibility);
+                      }}
+                    >
+                      <Podium
+                        rows={podium}
+                        currentStudentId={currentStudentId}
+                        podiumYRef={podiumYRef}
+                        onCurrentLayout={registerMyRowLayout}
+                      />
+                    </View>
+                  )}
 
-                  <FlatList
-                    data={remainingRows}
-                    keyExtractor={(item) => item.id}
-                    scrollEnabled={false}
-                    ItemSeparatorComponent={() => <View style={{ height: 8 }} />}
-                    renderItem={({ item, index }) => {
-                      const rank = index + 4;
+                  <View pointerEvents="none" style={styles.rankingList}>
+                    {remainingRows.map((item, index) => {
+                      const rank = rowRankMap.get(item.id) ?? index + 4;
                       const isCurrent = item.id === currentStudentId;
 
                       return (
                         <View
+                          key={item.id}
+                          style={index > 0 && styles.rankingItemSpacing}
                           onLayout={(event) => {
                             if (isCurrent) {
                               registerMyRowLayout(
@@ -381,18 +463,18 @@ export default function ClassementEleve({ setPage }: Props) {
                           />
                         </View>
                       );
-                    }}
-                  />
+                    })}
+                  </View>
                 </>
               )}
             </ScrollView>
           ) : (
             <ScrollView
-              style={styles.list}
+              style={[styles.list, WEB_SCROLL_STYLE]}
               contentContainerStyle={styles.scrollContent}
               showsVerticalScrollIndicator={false}
             >
-              <View style={styles.stateCard}>
+              <View pointerEvents="none" style={styles.stateCard}>
                 <BarChart2 size={48} color={C_GOLD} />
                 <Text style={styles.stateTitle}>Statistiques individuelles</Text>
                 <Text style={styles.stateText}>En cours de création.</Text>
@@ -610,6 +692,14 @@ function formatPoints(value: number) {
   return Math.round(value || 0).toLocaleString("fr-FR");
 }
 
+function normalizeSearch(value: string) {
+  return value
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+}
+
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: "#061827" },
   bg: { flex: 1 },
@@ -694,10 +784,56 @@ const styles = StyleSheet.create({
   tabText: { color: "#EAF6FF", fontSize: 13, fontWeight: "900" },
   tabTextActive: { color: "#78350F" },
 
+  searchPanel: {
+    marginHorizontal: 14,
+    marginTop: 8,
+    minHeight: 44,
+    borderRadius: 16,
+    backgroundColor: "rgba(255,255,255,0.96)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.62)",
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 12,
+    gap: 8,
+    shadowColor: "#000",
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 5 },
+    elevation: 3,
+  },
+
+  searchInput: {
+    flex: 1,
+    minWidth: 0,
+    color: C_TEXT,
+    fontSize: 15,
+    fontWeight: "800",
+    paddingVertical: 9,
+    outlineStyle: "none" as any,
+  },
+
+  searchClearBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(87,112,138,0.12)",
+  },
+
   scrollContent: {
     paddingHorizontal: 16,
     paddingTop: 10,
     paddingBottom: 22,
+  },
+
+  rankingList: {
+    width: "100%",
+  },
+
+  rankingItemSpacing: {
+    marginTop: 8,
   },
 
   podiumWrap: {
