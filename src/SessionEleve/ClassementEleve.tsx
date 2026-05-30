@@ -300,10 +300,11 @@ export default function ClassementEleve({ setPage }: Props) {
 
           {modePage === "classement" ? (
             <ScrollView
+              style={styles.list}
               contentContainerStyle={[
                 styles.scrollContent,
                 isSmall && { paddingHorizontal: 12 },
-                showMyFloatingRank && { paddingBottom: 98 },
+                showMyFloatingRank && { paddingBottom: 120 },
               ]}
               showsVerticalScrollIndicator={false}
               scrollEventThrottle={16}
@@ -387,6 +388,7 @@ export default function ClassementEleve({ setPage }: Props) {
             </ScrollView>
           ) : (
             <ScrollView
+              style={styles.list}
               contentContainerStyle={styles.scrollContent}
               showsVerticalScrollIndicator={false}
             >
@@ -399,7 +401,7 @@ export default function ClassementEleve({ setPage }: Props) {
           )}
 
           {showMyFloatingRank && currentRow && currentRank && (
-            <View style={styles.myRankFloating}>
+            <View pointerEvents="none" style={styles.myRankFloating}>
               <LinearGradient
                 colors={["#4F8DEB", "#2C6FD0"]}
                 start={{ x: 0, y: 0 }}
@@ -611,7 +613,12 @@ function formatPoints(value: number) {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: "#061827" },
   bg: { flex: 1 },
-  container: { flex: 1, paddingBottom: 96 },
+  container: { flex: 1, minHeight: 0, paddingBottom: 96 },
+
+  list: {
+    flex: 1,
+    minHeight: 0,
+  },
 
   topBar: {
     flexDirection: "row",

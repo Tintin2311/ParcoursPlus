@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   ActivityIndicator,
@@ -19,6 +19,10 @@ import BottomBarEleve from "./ui/BottomBarEleve";
 
 const BG_GAME =
   "https://aswhubzprehjnunbpkwc.supabase.co/storage/v1/object/public/background/AccueilElevePaysage.png";
+
+const LS_ECRIRE_RESULTAT_FOLDER_ID = "ecrireResultat.currentFolderId";
+const LS_ECRIRE_RESULTAT_FOLDER_HISTORY = "ecrireResultat.folderHistory";
+const LS_ECRIRE_RESULTAT_SCROLL_Y = "ecrireResultat.scrollY";
 
 type SetPageFn = (page: any) => void;
 
@@ -85,6 +89,19 @@ type Props = {
   dossiersParcours?: FolderRow[];
   setParcoursActif?: (p: any) => void;
 };
+
+type EcrireResultatMemoryCache = {
+  resolvedEleve: EleveConnecte | null;
+  classeNom: string | null;
+  parcoursData: ParcoursRow[];
+  foldersData: FolderRow[];
+  parcoursStats: Record<string, ParcoursStatRow>;
+  currentFolderId: string | null;
+  folderHistory: (string | null)[];
+  scrollY: number;
+};
+
+let ecrireResultatMemoryCache: EcrireResultatMemoryCache | null = null;
 
 const C_TEXT = "#0B2540";
 const C_MUTED = "#57708A";
@@ -227,17 +244,35 @@ const EcrireResultat: React.FC<Props> = ({
   dossiersParcours = [],
   setParcoursActif,
 }) => {
-  const [loading, setLoading] = useState(true);
+  const initialCache = ecrireResultatMemoryCache;
+  const initialScrollY = initialCache?.scrollY ?? 0;
+  const scrollRef = useRef<ScrollView | null>(null);
+  const scrollYRef = useRef(initialScrollY);
+  const restoreScrollYRef = useRef<number | null>(null);
+  const restoreDoneRef = useRef(false);
+
+  const [loading, setLoading] = useState(!initialCache);
   const [screenError, setScreenError] = useState<string | null>(null);
-  const [resolvedEleve, setResolvedEleve] = useState<EleveConnecte | null>(null);
-  const [classeNom, setClasseNom] = useState<string | null>(null);
-  const [parcoursData, setParcoursData] = useState<ParcoursRow[]>([]);
-  const [foldersData, setFoldersData] = useState<FolderRow[]>([]);
-  const [parcoursStats, setParcoursStats] = useState<Record<string, ParcoursStatRow>>({});
-  const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
-  const [folderHistory, setFolderHistory] = useState<(string | null)[]>([]);
+  const [resolvedEleve, setResolvedEleve] = useState<EleveConnecte | null>(
+    initialCache?.resolvedEleve ?? null
+  );
+  const [classeNom, setClasseNom] = useState<string | null>(initialCache?.classeNom ?? null);
+  const [parcoursData, setParcoursData] = useState<ParcoursRow[]>(
+    initialCache?.parcoursData ?? []
+  );
+  const [foldersData, setFoldersData] = useState<FolderRow[]>(initialCache?.foldersData ?? []);
+  const [parcoursStats, setParcoursStats] = useState<Record<string, ParcoursStatRow>>(
+    initialCache?.parcoursStats ?? {}
+  );
+  const [currentFolderId, setCurrentFolderId] = useState<string | null>(
+    initialCache?.currentFolderId ?? null
+  );
+  const [folderHistory, setFolderHistory] = useState<(string | null)[]>(
+    initialCache?.folderHistory ?? []
+  );
   const [searchVisible, setSearchVisible] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
+  const [isRestoringScroll, setIsRestoringScroll] = useState(false);
 
   const groupId = resolvedEleve?.group_id ?? null;
   const eleveNom = resolvedEleve?.display_name ?? "Élève";
@@ -303,7 +338,7 @@ const EcrireResultat: React.FC<Props> = ({
   const fetchParcoursStats = useCallback(async (resolvedStudentId: string | null) => {
     if (!resolvedStudentId) {
       setParcoursStats({});
-      return;
+      return {};
     }
 
     const { data, error } = await supabase
@@ -315,7 +350,7 @@ const EcrireResultat: React.FC<Props> = ({
 
     if (error) {
       setParcoursStats({});
-      return;
+      return {};
     }
 
     const map: Record<string, ParcoursStatRow> = {};
@@ -324,10 +359,14 @@ const EcrireResultat: React.FC<Props> = ({
     });
 
     setParcoursStats(map);
+    return map;
   }, []);
 
   const fetchData = useCallback(async () => {
-    setLoading(true);
+    const memoryCache = ecrireResultatMemoryCache;
+    const hasMemoryCache = !!memoryCache;
+
+    setLoading(!hasMemoryCache);
     setScreenError(null);
 
     try {
@@ -359,32 +398,80 @@ const EcrireResultat: React.FC<Props> = ({
         nextFolders = data || [];
       }
 
-      setParcoursData(
-        (nextParcours || [])
-          .map((p) => ({
-            ...p,
-            nom: getDisplayName(p),
-            groupes_associes: normalizeAssoc(p.groupes_associes),
-          }))
-          .sort(sortByOrdreThenDate)
-      );
+      const normalizedParcours = (nextParcours || [])
+        .map((p) => ({
+          ...p,
+          nom: getDisplayName(p),
+          groupes_associes: normalizeAssoc(p.groupes_associes),
+        }))
+        .sort(sortByOrdreThenDate);
 
-      setFoldersData(
-        (nextFolders || [])
-          .map((f) => ({
-            ...f,
-            nom: getDisplayName(f),
-            groupes_associes: normalizeAssoc(f.groupes_associes),
-          }))
-          .sort(sortByOrdreThenDate)
-      );
+      const normalizedFolders = (nextFolders || [])
+        .map((f) => ({
+          ...f,
+          nom: getDisplayName(f),
+          groupes_associes: normalizeAssoc(f.groupes_associes),
+        }))
+        .sort(sortByOrdreThenDate);
 
-      await fetchParcoursStats(resolvedStudentId);
+      setParcoursData(normalizedParcours);
+      setFoldersData(normalizedFolders);
 
-      setCurrentFolderId(null);
-      setFolderHistory([]);
+      const nextStats = await fetchParcoursStats(resolvedStudentId);
+
+      const folderExists = (id: string | null) =>
+        id === null || nextFolders.some((folder) => String(folder.id) === String(id));
+
+      let restoredFolderId: string | null = null;
+      let restoredFolderHistory: (string | null)[] = [];
+      let restoredScrollY = 0;
+
+      if (memoryCache) {
+        restoredFolderId = folderExists(memoryCache.currentFolderId)
+          ? memoryCache.currentFolderId
+          : null;
+        restoredFolderHistory = memoryCache.folderHistory.filter(
+          (id) => id === null || (typeof id === "string" && folderExists(id))
+        );
+        restoredScrollY = Math.max(0, Number(memoryCache.scrollY ?? 0) || 0);
+      } else {
+        const savedFolderId = await AsyncStorage.getItem(LS_ECRIRE_RESULTAT_FOLDER_ID);
+        const savedFolderHistoryRaw = await AsyncStorage.getItem(LS_ECRIRE_RESULTAT_FOLDER_HISTORY);
+        const savedScrollYRaw = await AsyncStorage.getItem(LS_ECRIRE_RESULTAT_SCROLL_Y);
+
+        restoredFolderId = savedFolderId && folderExists(savedFolderId) ? savedFolderId : null;
+
+        try {
+          const parsed = savedFolderHistoryRaw ? JSON.parse(savedFolderHistoryRaw) : [];
+          restoredFolderHistory = Array.isArray(parsed)
+            ? parsed.filter((id) => id === null || (typeof id === "string" && folderExists(id)))
+            : [];
+        } catch {
+          restoredFolderHistory = [];
+        }
+
+        restoredScrollY = Math.max(0, Number(savedScrollYRaw ?? 0) || 0);
+      }
+
+      setCurrentFolderId(restoredFolderId);
+      setFolderHistory(restoredFolderHistory);
+      restoreScrollYRef.current = restoredScrollY;
+      if (!hasMemoryCache) {
+        setIsRestoringScroll(restoredScrollY > 0);
+      }
       setSearchTerm("");
       setSearchVisible(false);
+
+      ecrireResultatMemoryCache = {
+        resolvedEleve: eleve ?? null,
+        classeNom: ecrireResultatMemoryCache?.classeNom ?? null,
+        parcoursData: normalizedParcours,
+        foldersData: normalizedFolders,
+        parcoursStats: nextStats,
+        currentFolderId: restoredFolderId,
+        folderHistory: restoredFolderHistory,
+        scrollY: restoredScrollY,
+      };
     } catch (err: any) {
       setScreenError(err?.message || "Impossible de charger les données.");
     } finally {
@@ -395,6 +482,38 @@ const EcrireResultat: React.FC<Props> = ({
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  useEffect(() => {
+    if (!initialCache || initialScrollY <= 0) return;
+
+    requestAnimationFrame(() => {
+      scrollRef.current?.scrollTo({ y: initialScrollY, animated: false });
+    });
+  }, [initialCache, initialScrollY]);
+
+  useEffect(() => {
+    if (loading) return;
+
+    ecrireResultatMemoryCache = {
+      resolvedEleve,
+      classeNom,
+      parcoursData,
+      foldersData,
+      parcoursStats,
+      currentFolderId,
+      folderHistory,
+      scrollY: scrollYRef.current,
+    };
+  }, [
+    loading,
+    resolvedEleve,
+    classeNom,
+    parcoursData,
+    foldersData,
+    parcoursStats,
+    currentFolderId,
+    folderHistory,
+  ]);
 
   const getDirectFolders = useCallback(
     (parentId: string | null) =>
@@ -456,25 +575,49 @@ const EcrireResultat: React.FC<Props> = ({
 
   const openFolder = useCallback(
     (folderId: string) => {
-      setFolderHistory((prev) => [...prev, currentFolderId]);
+      const nextHistory = [...folderHistory, currentFolderId];
+
+      setFolderHistory(nextHistory);
       setCurrentFolderId(folderId);
       setSearchTerm("");
       setSearchVisible(false);
+
+      AsyncStorage.multiSet([
+        [LS_ECRIRE_RESULTAT_FOLDER_ID, folderId],
+        [LS_ECRIRE_RESULTAT_FOLDER_HISTORY, JSON.stringify(nextHistory)],
+        [LS_ECRIRE_RESULTAT_SCROLL_Y, "0"],
+      ]).catch(() => null);
     },
-    [currentFolderId]
+    [currentFolderId, folderHistory]
   );
 
   const goBackFolder = useCallback(() => {
     if (folderHistory.length === 0) {
       setCurrentFolderId(null);
+      setSearchTerm("");
+      setSearchVisible(false);
+
+      AsyncStorage.multiSet([
+        [LS_ECRIRE_RESULTAT_FOLDER_ID, ""],
+        [LS_ECRIRE_RESULTAT_FOLDER_HISTORY, JSON.stringify([])],
+        [LS_ECRIRE_RESULTAT_SCROLL_Y, "0"],
+      ]).catch(() => null);
       return;
     }
 
     const previous = folderHistory[folderHistory.length - 1];
-    setFolderHistory((prev) => prev.slice(0, -1));
+    const nextHistory = folderHistory.slice(0, -1);
+
+    setFolderHistory(nextHistory);
     setCurrentFolderId(previous);
     setSearchTerm("");
     setSearchVisible(false);
+
+    AsyncStorage.multiSet([
+      [LS_ECRIRE_RESULTAT_FOLDER_ID, previous ?? ""],
+      [LS_ECRIRE_RESULTAT_FOLDER_HISTORY, JSON.stringify(nextHistory)],
+      [LS_ECRIRE_RESULTAT_SCROLL_Y, "0"],
+    ]).catch(() => null);
   }, [folderHistory]);
 
   const visibleNodes = useMemo(() => {
@@ -535,6 +678,28 @@ const EcrireResultat: React.FC<Props> = ({
     getDirectParcours,
   ]);
 
+  useEffect(() => {
+    if (loading || !isRestoringScroll || restoreScrollYRef.current === null) return;
+
+    restoreDoneRef.current = false;
+  }, [loading, visibleNodes.length, currentFolderId]);
+
+  const restoreScrollPosition = useCallback(() => {
+    if (loading || !isRestoringScroll || restoreDoneRef.current) return;
+    if (restoreScrollYRef.current === null) return;
+
+    const y = restoreScrollYRef.current;
+    restoreDoneRef.current = true;
+    restoreScrollYRef.current = null;
+
+    requestAnimationFrame(() => {
+      scrollRef.current?.scrollTo({ y, animated: false });
+      requestAnimationFrame(() => {
+        setIsRestoringScroll(false);
+      });
+    });
+  }, [isRestoringScroll, loading]);
+
   const sourceDescription = useMemo(() => {
     if (!resolvedEleve) return "Aucun élève détecté";
     if (!groupId) return `${eleveNom} • Aucune classe trouvée`;
@@ -544,10 +709,37 @@ const EcrireResultat: React.FC<Props> = ({
 
   const handleOpenParcours = useCallback(
     (parcours: ParcoursRow) => {
+      ecrireResultatMemoryCache = {
+        resolvedEleve,
+        classeNom,
+        parcoursData,
+        foldersData,
+        parcoursStats,
+        currentFolderId,
+        folderHistory,
+        scrollY: scrollYRef.current,
+      };
+
+      AsyncStorage.multiSet([
+        [LS_ECRIRE_RESULTAT_FOLDER_ID, currentFolderId ?? ""],
+        [LS_ECRIRE_RESULTAT_FOLDER_HISTORY, JSON.stringify(folderHistory)],
+        [LS_ECRIRE_RESULTAT_SCROLL_Y, String(scrollYRef.current)],
+      ]).catch(() => null);
+
       setParcoursActif?.(parcours);
       setPage("EcrireCodeBaliseEleve");
     },
-    [setParcoursActif, setPage]
+    [
+      resolvedEleve,
+      classeNom,
+      parcoursData,
+      foldersData,
+      parcoursStats,
+      currentFolderId,
+      folderHistory,
+      setParcoursActif,
+      setPage,
+    ]
   );
 
   const renderNode = ({ item }: { item: RenderedNode }) => {
@@ -622,61 +814,70 @@ const EcrireResultat: React.FC<Props> = ({
           locations={[0, 0.22, 0.58, 1]}
           style={styles.container}
         >
-          <View style={styles.topBar}>
-            {currentFolderId && (
+          <View style={(loading || isRestoringScroll) && styles.restoreHidden}>
+            <View style={styles.topBar}>
+              {currentFolderId && (
+                <TouchableOpacity
+                  activeOpacity={0.85}
+                  style={styles.topIconButton}
+                  onPress={goBackFolder}
+                >
+                  <Feather name="arrow-left" size={20} color="#FFFFFF" />
+                </TouchableOpacity>
+              )}
+
+              <View style={styles.topTextWrap}>
+                <Text numberOfLines={1} style={styles.pageTitle}>
+                  {pageTitle}
+                </Text>
+                <Text numberOfLines={1} style={styles.pageSubtitle}>
+                  {sourceDescription}
+                </Text>
+              </View>
+
               <TouchableOpacity
                 activeOpacity={0.85}
-                style={styles.topIconButton}
-                onPress={goBackFolder}
+                style={[styles.topIconButton, searchVisible && styles.topIconButtonActive]}
+                onPress={() => {
+                  setSearchVisible((prev) => !prev);
+                  if (searchVisible) setSearchTerm("");
+                }}
               >
-                <Feather name="arrow-left" size={20} color="#FFFFFF" />
+                <Feather name={searchVisible ? "x" : "search"} size={20} color="#FFFFFF" />
               </TouchableOpacity>
-            )}
-
-            <View style={styles.topTextWrap}>
-              <Text numberOfLines={1} style={styles.pageTitle}>
-                {pageTitle}
-              </Text>
-              <Text numberOfLines={1} style={styles.pageSubtitle}>
-                {sourceDescription}
-              </Text>
             </View>
 
-            <TouchableOpacity
-              activeOpacity={0.85}
-              style={[styles.topIconButton, searchVisible && styles.topIconButtonActive]}
-              onPress={() => {
-                setSearchVisible((prev) => !prev);
-                if (searchVisible) setSearchTerm("");
-              }}
-            >
-              <Feather name={searchVisible ? "x" : "search"} size={20} color="#FFFFFF" />
-            </TouchableOpacity>
+            {searchVisible && (
+              <View style={styles.topSearchWrap}>
+                <View style={styles.searchBox}>
+                  <Feather name="search" size={18} color={C_MUTED} />
+                  <TextInput
+                    value={searchTerm}
+                    onChangeText={setSearchTerm}
+                    placeholder="Rechercher..."
+                    placeholderTextColor="#8AA0B7"
+                    style={styles.searchInput}
+                    autoFocus
+                  />
+                </View>
+              </View>
+            )}
           </View>
 
-          {searchVisible && (
-            <View style={styles.topSearchWrap}>
-              <View style={styles.searchBox}>
-                <Feather name="search" size={18} color={C_MUTED} />
-                <TextInput
-                  value={searchTerm}
-                  onChangeText={setSearchTerm}
-                  placeholder="Rechercher..."
-                  placeholderTextColor="#8AA0B7"
-                  style={styles.searchInput}
-                  autoFocus
-                />
-              </View>
-            </View>
-          )}
-
           <ScrollView
-            style={[styles.scroll, webScrollStyle]}
+            ref={scrollRef}
+            style={[styles.scroll, (loading || isRestoringScroll) && styles.restoreHidden, webScrollStyle]}
+            contentOffset={{ x: 0, y: initialScrollY }}
             contentContainerStyle={styles.scrollContent}
             keyboardShouldPersistTaps="handled"
             showsVerticalScrollIndicator={false}
             nestedScrollEnabled
             scrollEventThrottle={16}
+            onScroll={(event) => {
+              scrollYRef.current = event.nativeEvent.contentOffset.y;
+            }}
+            onContentSizeChange={restoreScrollPosition}
+            onLayout={restoreScrollPosition}
           >
             {loading ? (
               <View style={styles.stateCard}>
@@ -809,6 +1010,10 @@ const styles = StyleSheet.create({
 
   scroll: {
     flex: 1,
+  },
+
+  restoreHidden: {
+    opacity: 0,
   },
 
   scrollContent: {

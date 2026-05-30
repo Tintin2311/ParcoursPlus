@@ -1,5 +1,5 @@
 // src/GestionAssociationsParcours.tsx
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -70,26 +70,27 @@ type AssocStatus =
   | "parcours_off";
 
 /* ======================= Thème ======================= */
-const C_BG = "#F2F5F8";
-const C_HEADER = "#A9C7D6";
-const C_TEXT = "#0f172a";
-const C_SUB = "rgba(15,23,42,0.72)";
-const C_BORDER = "rgba(0,0,0,0.08)";
+const C_BG = "#EDF2F6";
+const C_HEADER = "#1F5B86";
+const C_HEADER_ICON = "#2D6C97";
+const C_TEXT = "#233548";
+const C_SUB = "#6B7E8E";
+const C_BORDER = "#C9D5DF";
 const C_CARD = "#FFFFFF";
-const C_MUTED = "#64748B";
-const C_PANEL_BLUE = "#2F4AA0";
+const C_MUTED = "#6B7E8E";
+const C_PANEL_BLUE = "#1F5B86";
 const BOTTOM_BAR_HEIGHT = 78;
 
-const BLUE_FROM = "#BFDBFE";
-const BLUE_TO = "#7DD3FC";
-const GREEN_FROM = "#A7F3D0";
-const GREEN_TO = "#6EE7B7";
-const ORANGE_FROM = "#FDE68A";
+const BLUE_FROM = "#E7F2FA";
+const BLUE_TO = "#CFE0EC";
+const GREEN_FROM = "#D8F5EA";
+const GREEN_TO = "#A7F3D0";
+const ORANGE_FROM = "#FFE8B5";
 const ORANGE_TO = "#FDBA74";
 const RED_FROM = "#FCA5A5";
 const RED_TO = "#F87171";
-const PURPLE_FROM = "#DDD6FE";
-const PURPLE_TO = "#C4B5FD";
+const PURPLE_FROM = "#F0EAFE";
+const PURPLE_TO = "#DDD6FE";
 
 /* ======================= Modal Info ======================= */
 const INFO_PAGES = [
@@ -196,6 +197,18 @@ function InformationAssociations({
 }
 
 /* ======================= Helpers ======================= */
+const cleanId = (value: any): string | null => {
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  return text.length > 0 ? text : null;
+};
+
+const sameId = (a: any, b: any) => {
+  const aa = cleanId(a);
+  const bb = cleanId(b);
+  return aa !== null && bb !== null && aa === bb;
+};
+
 const normalizeGroupesAssocies = (value: any): string[] => {
   if (!value) return [];
 
@@ -234,6 +247,21 @@ const sameStringArray = (a: string[], b: string[]) => {
   const aa = [...new Set(a)].sort();
   const bb = [...new Set(b)].sort();
   return JSON.stringify(aa) === JSON.stringify(bb);
+};
+
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const isDeadlockLikeError = (err: any) => {
+  const message = String(err?.message ?? err?.details ?? err?.hint ?? "").toLowerCase();
+  const code = String(err?.code ?? "");
+  return code === "40P01" || message.includes("deadlock") || message.includes("sharelock");
+};
+
+const withOrWithoutGroup = (currentValue: any, groupeId: string, shouldAdd: boolean) => {
+  const current = normalizeGroupesAssocies(currentValue);
+  return shouldAdd
+    ? [...new Set([...current, groupeId])]
+    : current.filter((id) => id !== groupeId);
 };
 
 const pastelByStatus = (status: AssocStatus) => {
@@ -284,7 +312,7 @@ const pastelByStatus = (status: AssocStatus) => {
 const getDisplayName = (row: any) => String(row?.nom ?? row?.name ?? "Sans nom");
 
 const getParentFolderId = (folder: FolderRow) =>
-  (folder.parent_folder_id ?? folder.parent_id ?? null) as string | null;
+  cleanId(folder.parent_folder_id ?? folder.parent_id ?? null);
 
 const shortCode = (name?: string | null) => {
   const n = (name || "").trim();
@@ -369,13 +397,12 @@ function GroupPickerModal({
   );
 
   const getChildFolders = useCallback(
-    (folderId: string | null) =>
-      folders.filter((f) => (getParentFolderId(f) ?? null) === folderId),
+    (folderId: string | null) => folders.filter((f) => getParentFolderId(f) === cleanId(folderId)),
     [folders]
   );
 
   const getGroupsInFolder = useCallback(
-    (folderId: string | null) => groups.filter((g) => (g.folder_id ?? null) === folderId),
+    (folderId: string | null) => groups.filter((g) => cleanId(g.folder_id) === cleanId(folderId)),
     [groups]
   );
 
@@ -415,7 +442,7 @@ function GroupPickerModal({
             end={{ x: 1, y: 1 }}
             style={styles.modalOptionAvatar}
           >
-            <Text style={[styles.modalOptionAvatarText, { color: palette.text }]}>
+            <Text style={[styles.modalOptionAvatarText, { color: palette.text }]}> 
               {shortCode(getDisplayName(group))}
             </Text>
           </LinearGradient>
@@ -524,6 +551,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
   const isPhone = winW < 768;
 
   const professeurId: string | null = professeur?.user_id ?? professeur?.id ?? null;
+  const saveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
   const [parcoursData, setParcoursData] = useState<ParcoursRow[]>([]);
   const [groupesData, setGroupesData] = useState<GroupRow[]>([]);
@@ -544,10 +572,28 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
   const [copyStatus, setCopyStatus] = useState<null | "success" | "error" | "warning">(null);
 
   useEffect(() => {
+    return () => {
+      Object.values(saveTimersRef.current).forEach(clearTimeout);
+    };
+  }, []);
+
+  useEffect(() => {
     if (selectedSourceGroup && selectedTargetGroup && selectedSourceGroup === selectedTargetGroup) {
       setSelectedTargetGroup(null);
     }
   }, [selectedSourceGroup, selectedTargetGroup]);
+
+  const markSaving = useCallback((key: string, status: "saving" | "saved" | "error") => {
+    if (saveTimersRef.current[key]) clearTimeout(saveTimersRef.current[key]);
+
+    setSavingStatus((prev) => ({ ...prev, [key]: status }));
+
+    if (status !== "saving") {
+      saveTimersRef.current[key] = setTimeout(() => {
+        setSavingStatus((prev) => ({ ...prev, [key]: null }));
+      }, status === "saved" ? 650 : 1300);
+    }
+  }, []);
 
   const toggleFolder = useCallback((folderId: string) => {
     setExpandedFolders((prev) => {
@@ -559,44 +605,54 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
 
   const getDirectChildFolders = useCallback(
     (folderId: string | null) =>
-      parcoursFoldersData.filter((f) => (getParentFolderId(f) ?? null) === folderId),
+      parcoursFoldersData.filter((f) => getParentFolderId(f) === cleanId(folderId)),
     [parcoursFoldersData]
   );
 
   const getDirectParcours = useCallback(
-    (folderId: string | null) => parcoursData.filter((p) => (p.folder_id ?? null) === folderId),
+    (folderId: string | null) => parcoursData.filter((p) => cleanId(p.folder_id) === cleanId(folderId)),
     [parcoursData]
   );
 
   const getAllNestedParcours = useCallback(
     (folderId: string): ParcoursRow[] => {
-      const direct = parcoursData.filter((p) => p.folder_id === folderId);
-      const children = parcoursFoldersData.filter(
-        (f) => (getParentFolderId(f) ?? null) === folderId
-      );
+      const visited = new Set<string>();
 
-      let result = [...direct];
-      children.forEach((child) => {
-        result = [...result, ...getAllNestedParcours(child.id)];
-      });
+      const gather = (currentFolderId: string): ParcoursRow[] => {
+        if (visited.has(currentFolderId)) return [];
+        visited.add(currentFolderId);
 
-      return result;
+        const direct = parcoursData.filter((p) => sameId(p.folder_id, currentFolderId));
+        const children = parcoursFoldersData.filter((f) => sameId(getParentFolderId(f), currentFolderId));
+
+        return [
+          ...direct,
+          ...children.flatMap((child) => gather(child.id)),
+        ];
+      };
+
+      return gather(folderId);
     },
     [parcoursData, parcoursFoldersData]
   );
 
   const getAllNestedFolders = useCallback(
     (folderId: string): FolderRow[] => {
-      const children = parcoursFoldersData.filter(
-        (f) => (getParentFolderId(f) ?? null) === folderId
-      );
+      const visited = new Set<string>();
 
-      let result = [...children];
-      children.forEach((child) => {
-        result = [...result, ...getAllNestedFolders(child.id)];
-      });
+      const gather = (currentFolderId: string): FolderRow[] => {
+        if (visited.has(currentFolderId)) return [];
+        visited.add(currentFolderId);
 
-      return result;
+        const children = parcoursFoldersData.filter((f) => sameId(getParentFolderId(f), currentFolderId));
+
+        return [
+          ...children,
+          ...children.flatMap((child) => gather(child.id)),
+        ];
+      };
+
+      return gather(folderId);
     },
     [parcoursFoldersData]
   );
@@ -608,29 +664,23 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
       }
 
       const clean = [...new Set(normalizeGroupesAssocies(newGroupesAssocies))];
+      const statusKey = `parcours-${parcoursId}`;
 
-      setSavingStatus((prev) => ({ ...prev, [`parcours-${parcoursId}`]: "saving" }));
+      markSaving(statusKey, "saving");
 
       const { error } = await supabase
         .from("parcours")
         .update({ groupes_associes: clean })
-        .eq("id", parcoursId)
-        .eq("user_id", professeurId);
+        .eq("id", parcoursId);
 
       if (error) {
-        setSavingStatus((prev) => ({ ...prev, [`parcours-${parcoursId}`]: "error" }));
-        setTimeout(() => {
-          setSavingStatus((prev) => ({ ...prev, [`parcours-${parcoursId}`]: null }));
-        }, 1200);
+        markSaving(statusKey, "error");
         throw error;
       }
 
-      setSavingStatus((prev) => ({ ...prev, [`parcours-${parcoursId}`]: "saved" }));
-      setTimeout(() => {
-        setSavingStatus((prev) => ({ ...prev, [`parcours-${parcoursId}`]: null }));
-      }, 700);
+      markSaving(statusKey, "saved");
     },
-    [professeurId]
+    [markSaving, professeurId]
   );
 
   const updateFolderInSupabase = useCallback(
@@ -640,29 +690,65 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
       }
 
       const clean = [...new Set(normalizeGroupesAssocies(newGroupesAssocies))];
+      const statusKey = `dossier-${folderId}`;
 
-      setSavingStatus((prev) => ({ ...prev, [`dossier-${folderId}`]: "saving" }));
+      markSaving(statusKey, "saving");
 
       const { error } = await supabase
         .from("parcours_folders")
         .update({ groupes_associes: clean })
-        .eq("id", folderId)
-        .eq("user_id", professeurId);
+        .eq("id", folderId);
 
       if (error) {
-        setSavingStatus((prev) => ({ ...prev, [`dossier-${folderId}`]: "error" }));
-        setTimeout(() => {
-          setSavingStatus((prev) => ({ ...prev, [`dossier-${folderId}`]: null }));
-        }, 1200);
+        markSaving(statusKey, "error");
         throw error;
       }
 
-      setSavingStatus((prev) => ({ ...prev, [`dossier-${folderId}`]: "saved" }));
-      setTimeout(() => {
-        setSavingStatus((prev) => ({ ...prev, [`dossier-${folderId}`]: null }));
-      }, 700);
+      markSaving(statusKey, "saved");
     },
-    [professeurId]
+    [markSaving, professeurId]
+  );
+
+  const saveManySequentially = useCallback(
+    async <T extends { id: string }>(
+      rows: T[],
+      saveOne: (id: string, groupes: string[]) => Promise<void>
+    ) => {
+      for (const row of rows) {
+        await saveOne(row.id, normalizeGroupesAssocies((row as any).groupes_associes));
+      }
+    },
+    []
+  );
+
+  const saveManyFastBatched = useCallback(
+    async <T extends { id: string }>(
+      rows: T[],
+      saveOne: (id: string, groupes: string[]) => Promise<void>,
+      batchSize = 6
+    ) => {
+      const chunks: T[][] = [];
+
+      for (let i = 0; i < rows.length; i += batchSize) {
+        chunks.push(rows.slice(i, i + batchSize));
+      }
+
+      for (const chunk of chunks) {
+        await Promise.all(
+          chunk.map(async (row) => {
+            try {
+              await saveOne(row.id, normalizeGroupesAssocies((row as any).groupes_associes));
+            } catch (err: any) {
+              if (!isDeadlockLikeError(err)) throw err;
+
+              await wait(250);
+              await saveOne(row.id, normalizeGroupesAssocies((row as any).groupes_associes));
+            }
+          })
+        );
+      }
+    },
+    []
   );
 
   const syncFolderAncestorsForGroup = useCallback(
@@ -671,24 +757,25 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
       groupeId: string,
       updatedParcoursSnapshot: ParcoursRow[]
     ) => {
-      let currentFolderId = startingFolderId ?? null;
+      let currentFolderId = cleanId(startingFolderId);
 
       while (currentFolderId) {
-        const folder = parcoursFoldersData.find((f) => f.id === currentFolderId);
+        const folder = parcoursFoldersData.find((f) => sameId(f.id, currentFolderId));
         if (!folder) break;
 
+        const visited = new Set<string>();
+
         const gather = (fId: string): ParcoursRow[] => {
-          const direct = updatedParcoursSnapshot.filter((p) => p.folder_id === fId);
-          const kids = parcoursFoldersData.filter(
-            (f) => (getParentFolderId(f) ?? null) === fId
-          );
+          if (visited.has(fId)) return [];
+          visited.add(fId);
 
-          let res = [...direct];
-          kids.forEach((k) => {
-            res = [...res, ...gather(k.id)];
-          });
+          const direct = updatedParcoursSnapshot.filter((p) => sameId(p.folder_id, fId));
+          const kids = parcoursFoldersData.filter((f) => sameId(getParentFolderId(f), fId));
 
-          return res;
+          return [
+            ...direct,
+            ...kids.flatMap((k) => gather(k.id)),
+          ];
         };
 
         const nestedParcours = gather(folder.id);
@@ -710,7 +797,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
         if (!sameStringArray(nextAssociations, currentAssociations)) {
           setParcoursFoldersData((prev) =>
             prev.map((f) =>
-              f.id === folder.id ? { ...f, groupes_associes: nextAssociations } : f
+              sameId(f.id, folder.id) ? { ...f, groupes_associes: nextAssociations } : f
             )
           );
 
@@ -767,23 +854,33 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
 
       const parcours = (parcoursRes.data ?? []).map((p) => ({
         ...p,
+        id: String(p.id),
+        folder_id: cleanId(p.folder_id),
         nom: getDisplayName(p),
         groupes_associes: normalizeGroupesAssocies(p.groupes_associes),
       }));
 
       const groupes = (groupsRes.data ?? []).map((g) => ({
         ...g,
+        id: String(g.id),
+        folder_id: cleanId(g.folder_id),
         nom: getDisplayName(g),
       }));
 
       const parcoursFolders = (parcoursFoldersRes.data ?? []).map((f) => ({
         ...f,
+        id: String(f.id),
+        parent_folder_id: cleanId(f.parent_folder_id),
+        parent_id: cleanId(f.parent_id),
         nom: getDisplayName(f),
         groupes_associes: normalizeGroupesAssocies(f.groupes_associes),
       }));
 
       const groupFolders = (groupFoldersRes.data ?? []).map((f) => ({
         ...f,
+        id: String(f.id),
+        parent_folder_id: cleanId(f.parent_folder_id),
+        parent_id: cleanId(f.parent_id),
         nom: getDisplayName(f),
       }));
 
@@ -832,48 +929,60 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
   const handleFolderGroupeAssociation = useCallback(
     async (folder: FolderRow, groupeId: string, isChecked: boolean) => {
       const folderIds = [folder.id, ...getAllNestedFolders(folder.id).map((f) => f.id)];
+      const folderIdSet = new Set(folderIds.map(String));
+
       const parcoursIds = getAllNestedParcours(folder.id).map((p) => p.id);
+      const parcoursIdSet = new Set(parcoursIds.map(String));
+
+      if (parcoursIdSet.size === 0) {
+        Alert.alert(
+          "Aucun parcours trouvé",
+          "Ce dossier ne contient aucun parcours récupéré par l'application. Vérifie que les parcours sont bien rattachés au bon folder_id."
+        );
+        return;
+      }
 
       const updatedFoldersLocal = parcoursFoldersData.map((f) => {
-        if (!folderIds.includes(f.id)) return f;
+        if (!folderIdSet.has(String(f.id))) return f;
+
         const current = normalizeGroupesAssocies(f.groupes_associes);
+        const next = withOrWithoutGroup(current, groupeId, isChecked);
 
         return {
           ...f,
-          groupes_associes: isChecked
-            ? [...new Set([...current, groupeId])]
-            : current.filter((id) => id !== groupeId),
+          groupes_associes: next,
+          __changed: !sameStringArray(current, next),
         };
       });
 
       const updatedParcoursLocal = parcoursData.map((p) => {
-        if (!parcoursIds.includes(p.id)) return p;
+        if (!parcoursIdSet.has(String(p.id))) return p;
+
         const current = normalizeGroupesAssocies(p.groupes_associes);
+        const next = withOrWithoutGroup(current, groupeId, isChecked);
 
         return {
           ...p,
-          groupes_associes: isChecked
-            ? [...new Set([...current, groupeId])]
-            : current.filter((id) => id !== groupeId),
+          groupes_associes: next,
+          __changed: !sameStringArray(current, next),
         };
       });
 
-      setParcoursFoldersData(updatedFoldersLocal);
-      setParcoursData(updatedParcoursLocal);
+      setParcoursFoldersData(updatedFoldersLocal.map(({ __changed, ...f }: any) => f));
+      setParcoursData(updatedParcoursLocal.map(({ __changed, ...p }: any) => p));
 
       try {
-        await Promise.all([
-          ...updatedFoldersLocal
-            .filter((f) => folderIds.includes(f.id))
-            .map((f) => updateFolderInSupabase(f.id, normalizeGroupesAssocies(f.groupes_associes))),
+        const foldersToUpdate = updatedFoldersLocal.filter((f: any) => f.__changed);
+        const parcoursToUpdate = updatedParcoursLocal.filter((p: any) => p.__changed);
 
-          ...updatedParcoursLocal
-            .filter((p) => parcoursIds.includes(p.id))
-            .map((p) => updateParcoursInSupabase(p.id, normalizeGroupesAssocies(p.groupes_associes))),
-        ]);
+        await saveManySequentially(parcoursToUpdate, updateParcoursInSupabase);
+        await saveManySequentially(foldersToUpdate, updateFolderInSupabase);
+        await syncFolderAncestorsForGroup(folder.id, groupeId, updatedParcoursLocal);
       } catch (err: any) {
-        Alert.alert("Erreur", err?.message ?? "Impossible d'enregistrer l'association.");
-        fetchData();
+        Alert.alert(
+          "Erreur d'enregistrement",
+          err?.message ?? "Une partie de l'association n'a pas pu être enregistrée. Réessaie dans quelques secondes."
+        );
       }
     },
     [
@@ -882,6 +991,8 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
       getAllNestedParcours,
       parcoursData,
       parcoursFoldersData,
+      saveManySequentially,
+      syncFolderAncestorsForGroup,
       updateFolderInSupabase,
       updateParcoursInSupabase,
     ]
@@ -890,7 +1001,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
   const handleParcoursGroupeAssociation = useCallback(
     async (parcours: ParcoursRow, groupeId: string) => {
       const updatedParcoursLocal = parcoursData.map((p) => {
-        if (p.id !== parcours.id) return p;
+        if (!sameId(p.id, parcours.id)) return p;
 
         const current = normalizeGroupesAssocies(p.groupes_associes);
 
@@ -904,7 +1015,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
 
       setParcoursData(updatedParcoursLocal);
 
-      const updatedTarget = updatedParcoursLocal.find((p) => p.id === parcours.id);
+      const updatedTarget = updatedParcoursLocal.find((p) => sameId(p.id, parcours.id));
       if (!updatedTarget) return;
 
       try {
@@ -930,7 +1041,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
     const items: RenderedItem[] = [];
 
     const buildTree = (folderId: string, depth: number) => {
-      const folder = parcoursFoldersData.find((f) => f.id === folderId);
+      const folder = parcoursFoldersData.find((f) => sameId(f.id, folderId));
       if (!folder) return;
 
       items.push({
@@ -1034,50 +1145,55 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
 
       const nextParcours = parcoursData.map((p) => {
         const current = normalizeGroupesAssocies(p.groupes_associes);
+        const next = sourceParcoursIds.has(p.id)
+          ? [...new Set([...current, selectedTargetGroup])]
+          : current.filter((id) => id !== selectedTargetGroup);
 
         return {
           ...p,
-          groupes_associes: sourceParcoursIds.has(p.id)
-            ? [...new Set([...current, selectedTargetGroup])]
-            : current.filter((id) => id !== selectedTargetGroup),
+          groupes_associes: next,
+          __changed: !sameStringArray(current, next),
         };
       });
 
       const nextFolders = parcoursFoldersData.map((f) => {
         const current = normalizeGroupesAssocies(f.groupes_associes);
+        const next = sourceFolderIds.has(f.id)
+          ? [...new Set([...current, selectedTargetGroup])]
+          : current.filter((id) => id !== selectedTargetGroup);
 
         return {
           ...f,
-          groupes_associes: sourceFolderIds.has(f.id)
-            ? [...new Set([...current, selectedTargetGroup])]
-            : current.filter((id) => id !== selectedTargetGroup),
+          groupes_associes: next,
+          __changed: !sameStringArray(current, next),
         };
       });
 
-      setParcoursData(nextParcours);
-      setParcoursFoldersData(nextFolders);
+      const parcoursToSave = nextParcours.filter((p: any) => p.__changed);
+      const foldersToSave = nextFolders.filter((f: any) => f.__changed);
 
-      await Promise.all([
-        ...nextParcours.map((p) =>
-          updateParcoursInSupabase(p.id, normalizeGroupesAssocies(p.groupes_associes))
-        ),
-        ...nextFolders.map((f) =>
-          updateFolderInSupabase(f.id, normalizeGroupesAssocies(f.groupes_associes))
-        ),
-      ]);
+      setParcoursData(nextParcours.map(({ __changed, ...p }: any) => p));
+      setParcoursFoldersData(nextFolders.map(({ __changed, ...f }: any) => f));
+
+      await saveManySequentially(parcoursToSave, updateParcoursInSupabase);
+      await saveManySequentially(foldersToSave, updateFolderInSupabase);
 
       setCopyStatus("success");
       setTimeout(() => setCopyStatus(null), 1800);
-    } catch (err) {
+    } catch (err: any) {
       console.error("Erreur copie associations :", err);
       setCopyStatus("error");
-      setTimeout(() => setCopyStatus(null), 1800);
-      fetchData();
+      Alert.alert(
+        "Erreur de copie",
+        err?.message ?? "La copie n'a pas pu être enregistrée. Réessaie dans quelques secondes."
+      );
+      setTimeout(() => setCopyStatus(null), 2200);
     } finally {
       setIsCopying(false);
     }
   }, [
     fetchData,
+    saveManySequentially,
     parcoursData,
     parcoursFoldersData,
     selectedSourceGroup,
@@ -1098,27 +1214,21 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
     !isLoading && !screenError && (parcoursData.length === 0 || groupesData.length === 0);
 
   const getSaveStatePill = (status: "saving" | "saved" | "error" | null | undefined) => {
-    if (!status) return null;
-
-    if (status === "saving") {
-      return (
-        <View style={[styles.savePill, { backgroundColor: "rgba(59,130,246,0.10)" }]}>
-          <ActivityIndicator size="small" color="#2563EB" />
-        </View>
-      );
-    }
-
-    if (status === "saved") {
-      return (
-        <View style={[styles.savePill, { backgroundColor: "rgba(16,185,129,0.12)" }]}>
-          <Feather name="check" size={11} color="#059669" />
-        </View>
-      );
-    }
-
     return (
-      <View style={[styles.savePill, { backgroundColor: "rgba(239,68,68,0.12)" }]}>
-        <Feather name="x" size={11} color="#DC2626" />
+      <View style={styles.savePillSlot}>
+        {!status ? null : status === "saving" ? (
+          <View style={[styles.savePill, { backgroundColor: "rgba(59,130,246,0.10)" }]}>
+            <ActivityIndicator size="small" color="#2563EB" />
+          </View>
+        ) : status === "saved" ? (
+          <View style={[styles.savePill, { backgroundColor: "rgba(16,185,129,0.12)" }]}>
+            <Feather name="check" size={11} color="#059669" />
+          </View>
+        ) : (
+          <View style={[styles.savePill, { backgroundColor: "rgba(239,68,68,0.12)" }]}>
+            <Feather name="x" size={11} color="#DC2626" />
+          </View>
+        )}
       </View>
     );
   };
@@ -1147,7 +1257,8 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
     }
 
     const palette = pastelByStatus(status);
-    const disabled = item.type === "dossier" && getFolderStatus(item, groupeId) === "empty";
+    const currentFolderStatus = item.type === "dossier" ? getFolderStatus(item, groupeId) : null;
+    const disabled = item.type === "dossier" && currentFolderStatus === "empty";
 
     return (
       <View style={styles.associationControlWrap}>
@@ -1156,7 +1267,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
           disabled={disabled}
           onPress={() => {
             if (item.type === "dossier") {
-              handleFolderGroupeAssociation(item, groupeId, getFolderStatus(item, groupeId) !== "full");
+              handleFolderGroupeAssociation(item, groupeId, currentFolderStatus !== "full");
             } else {
               handleParcoursGroupeAssociation(item, groupeId);
             }
@@ -1263,18 +1374,19 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
   };
 
   return (
-    <SafeAreaView style={[styles.root, { backgroundColor: C_BG }]}>
+    <SafeAreaView style={[styles.root, { backgroundColor: C_BG }]}> 
       <View style={styles.header}>
         <TouchableOpacity
           activeOpacity={0.9}
           onPress={() => setPage("gestionParcours")}
-          style={styles.topIconButton}
+          style={styles.backButton}
         >
-          <Feather name="arrow-left" size={20} color={C_TEXT} />
+          <Feather name="arrow-left" size={21} color="#FFFFFF" />
         </TouchableOpacity>
 
         <View style={styles.headerCenter}>
-          <Text style={styles.headerTitle}>Associations classes & parcours</Text>
+          <Text style={styles.headerTitle}>ASSOCIATIONS</Text>
+          <Text style={styles.headerSubtitle}>Classes & parcours</Text>
         </View>
 
         <View style={styles.topActions}>
@@ -1283,11 +1395,11 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
             onPress={() => setShowFilters((v) => !v)}
             style={[styles.topIconButton, showFilters && styles.topIconButtonActive]}
           >
-            <Feather name="search" size={20} color={C_TEXT} />
+            <Feather name="search" size={20} color="#FFFFFF" />
           </TouchableOpacity>
 
           <TouchableOpacity activeOpacity={0.9} onPress={() => setShowInfo(true)} style={styles.topIconButton}>
-            <Feather name="info" size={20} color={C_TEXT} />
+            <Feather name="info" size={20} color="#FFFFFF" />
           </TouchableOpacity>
         </View>
       </View>
@@ -1313,7 +1425,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
                 style={styles.searchInput}
               />
               {!!searchTerm && (
-                <TouchableOpacity activeOpacity={0.9} onPress={() => setSearchTerm("")}>
+                <TouchableOpacity activeOpacity={0.9} onPress={() => setSearchTerm("")}> 
                   <Feather name="x" size={18} color={C_MUTED} />
                 </TouchableOpacity>
               )}
@@ -1508,38 +1620,41 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
 /* ======================= Styles ======================= */
 const styles = StyleSheet.create({
   root: { flex: 1 },
-  header: { backgroundColor: C_HEADER, paddingHorizontal: 14, paddingTop: Platform.select({ ios: 10, android: 10, default: 10 }), paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: "rgba(0,0,0,0.06)", flexDirection: "row", alignItems: "center", gap: 10 },
-  headerCenter: { flex: 1 },
-  headerTitle: { color: C_TEXT, fontSize: 18, fontWeight: "800" },
+  header: { backgroundColor: C_HEADER, paddingHorizontal: 14, paddingTop: Platform.select({ ios: 10, android: 10, default: 10 }), paddingBottom: 10, minHeight: 78, borderBottomWidth: 1, borderBottomColor: "#174B70", flexDirection: "row", alignItems: "center", gap: 10 },
+  headerCenter: { flex: 1, justifyContent: "center" },
+  headerTitle: { color: "#FFFFFF", fontSize: 18, fontWeight: "900", letterSpacing: 0.8 },
+  headerSubtitle: { color: "rgba(255,255,255,0.82)", fontSize: 12, fontWeight: "800", marginTop: 1 },
   topActions: { flexDirection: "row", alignItems: "center", gap: 8 },
-  topIconButton: { width: 40, height: 40, borderRadius: 12, backgroundColor: "rgba(255,255,255,0.45)", alignItems: "center", justifyContent: "center" },
-  topIconButtonActive: { backgroundColor: "rgba(255,255,255,0.82)" },
-  sectionCardCompact: { backgroundColor: C_CARD, borderWidth: 1, borderColor: C_BORDER, borderRadius: 16, padding: 10, marginBottom: 12, shadowColor: "rgba(0,0,0,0.10)", shadowOpacity: 0.14, shadowOffset: { width: 0, height: 4 }, shadowRadius: 8, elevation: 2 },
-  sectionCardTable: { backgroundColor: C_CARD, borderWidth: 1, borderColor: C_BORDER, borderRadius: 16, overflow: "hidden", marginBottom: 12, shadowColor: "rgba(0,0,0,0.10)", shadowOpacity: 0.14, shadowOffset: { width: 0, height: 4 }, shadowRadius: 8, elevation: 2 },
-  searchBox: { flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "#F8FAFC", borderRadius: 13, borderWidth: 1, borderColor: C_BORDER, paddingHorizontal: 12, paddingVertical: 10 },
+  backButton: { width: 40, height: 40, borderRadius: 13, backgroundColor: C_HEADER_ICON, alignItems: "center", justifyContent: "center" },
+  topIconButton: { width: 40, height: 40, borderRadius: 13, backgroundColor: C_HEADER_ICON, alignItems: "center", justifyContent: "center" },
+  topIconButtonActive: { backgroundColor: "#3B7EAC" },
+  sectionCardCompact: { backgroundColor: C_CARD, borderWidth: 1, borderColor: C_BORDER, borderRadius: 18, padding: 10, marginBottom: 12, shadowColor: "#000", shadowOpacity: 0.08, shadowOffset: { width: 0, height: 2 }, shadowRadius: 8, elevation: 2 },
+  sectionCardTable: { backgroundColor: C_CARD, borderWidth: 1, borderColor: C_BORDER, borderRadius: 18, overflow: "hidden", marginBottom: 12, shadowColor: "#000", shadowOpacity: 0.08, shadowOffset: { width: 0, height: 2 }, shadowRadius: 8, elevation: 2 },
+  searchBox: { flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "#F2F8FC", borderRadius: 15, borderWidth: 1, borderColor: "#CFE0EC", paddingHorizontal: 12, paddingVertical: 10 },
   searchInput: { flex: 1, color: C_TEXT, fontSize: 14 },
   selectorRow: { flexDirection: "row", gap: 8, marginBottom: 12 },
-  selectorChip: { flex: 1, minHeight: 40, borderRadius: 999, borderWidth: 1, borderColor: "rgba(59,130,246,0.20)", backgroundColor: "rgba(59,130,246,0.10)", paddingHorizontal: 10, paddingVertical: 8, flexDirection: "row", alignItems: "center", gap: 6 },
-  selectorChipPurple: { borderColor: "rgba(139,92,246,0.20)", backgroundColor: "rgba(139,92,246,0.10)" },
-  selectorValue: { flex: 1, color: "#1D4ED8", fontWeight: "800", fontSize: 12 },
-  copyBarCard: { marginBottom: 12, borderRadius: 14, overflow: "hidden", shadowColor: "rgba(0,0,0,0.10)", shadowOpacity: 0.14, shadowOffset: { width: 0, height: 4 }, shadowRadius: 8, elevation: 2 },
-  copyBarInner: { minHeight: 44, borderRadius: 14, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, paddingHorizontal: 10 },
+  selectorChip: { flex: 1, minHeight: 42, borderRadius: 16, borderWidth: 1, borderColor: "#CFE0EC", backgroundColor: "#F2F8FC", paddingHorizontal: 10, paddingVertical: 8, flexDirection: "row", alignItems: "center", gap: 6 },
+  selectorChipPurple: { borderColor: "#D8CDF2", backgroundColor: "#F4F0FF" },
+  selectorValue: { flex: 1, color: "#1F5B86", fontWeight: "900", fontSize: 12 },
+  copyBarCard: { marginBottom: 12, borderRadius: 18, overflow: "hidden", shadowColor: "#000", shadowOpacity: 0.08, shadowOffset: { width: 0, height: 2 }, shadowRadius: 8, elevation: 2 },
+  copyBarInner: { minHeight: 46, borderRadius: 18, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, paddingHorizontal: 10 },
   copyBarText: { color: "#1F2937", fontWeight: "900", fontSize: 13, flexShrink: 1 },
-  tableHeader: { minHeight: 40, backgroundColor: "#F8FAFC", borderBottomWidth: 1, borderBottomColor: C_BORDER, flexDirection: "row", alignItems: "center", paddingHorizontal: 8 },
-  tableHeaderText: { color: C_MUTED, fontSize: 11, fontWeight: "800", textTransform: "uppercase" },
+  tableHeader: { minHeight: 42, backgroundColor: "#F2F8FC", borderBottomWidth: 1, borderBottomColor: "#CFE0EC", flexDirection: "row", alignItems: "center", paddingHorizontal: 8 },
+  tableHeaderText: { color: "#516B7E", fontSize: 11, fontWeight: "900", textTransform: "uppercase" },
   tableHeaderName: { flex: 1, paddingRight: 6 },
   tableHeaderAssoc: { width: 58, textAlign: "center" },
   tableBody: { paddingBottom: 4 },
-  tableRow: { minHeight: 68, borderBottomWidth: 1, borderBottomColor: "rgba(0,0,0,0.06)", flexDirection: "row", alignItems: "center", paddingHorizontal: 4 },
+  tableRow: { minHeight: 72, borderBottomWidth: 1, borderBottomColor: "rgba(0,0,0,0.06)", flexDirection: "row", alignItems: "center", paddingHorizontal: 4 },
   tableNameCell: { flex: 1, minHeight: 56, flexDirection: "row", alignItems: "center", gap: 8, paddingRight: 4, minWidth: 0 },
   tableAssocCell: { width: 58, alignItems: "center", justifyContent: "center" },
   rowIcon: { width: 28, height: 28, borderRadius: 10, alignItems: "center", justifyContent: "center", flexShrink: 0 },
-  rowTitle: { color: C_TEXT, fontSize: 13, fontWeight: "800" },
+  rowTitle: { color: C_TEXT, fontSize: 13, fontWeight: "900" },
   rowSubtitle: { color: C_MUTED, fontSize: 10, fontWeight: "600", marginTop: 1 },
-  associationControlWrap: { alignItems: "center", justifyContent: "center" },
+  associationControlWrap: { alignItems: "center", justifyContent: "center", width: 48, minHeight: 58 },
   associationButtonCompact: { width: 40, height: 40, borderRadius: 12, borderWidth: 1, alignItems: "center", justifyContent: "center", padding: 4 },
   associationBadgeCompact: { width: 26, height: 26, borderRadius: 9, alignItems: "center", justifyContent: "center" },
-  savePill: { marginTop: 4, borderRadius: 999, width: 16, height: 16, alignItems: "center", justifyContent: "center" },
+  savePillSlot: { marginTop: 3, width: 16, height: 16, alignItems: "center", justifyContent: "center" },
+  savePill: { borderRadius: 999, width: 16, height: 16, alignItems: "center", justifyContent: "center" },
   emptyText: { color: C_SUB, fontSize: 14, textAlign: "center", paddingVertical: 16 },
   stateCard: { backgroundColor: C_CARD, borderWidth: 1, borderColor: C_BORDER, borderRadius: 16, padding: 20, marginBottom: 12, alignItems: "center", shadowColor: "rgba(0,0,0,0.10)", shadowOpacity: 0.16, shadowOffset: { width: 0, height: 4 }, shadowRadius: 8, elevation: 2 },
   stateBadge: { width: 54, height: 54, borderRadius: 16, alignItems: "center", justifyContent: "center", marginBottom: 10 },
@@ -1547,7 +1662,7 @@ const styles = StyleSheet.create({
   stateText: { color: C_SUB, fontSize: 13, lineHeight: 19, textAlign: "center", marginTop: 8 },
   retryBtn: { marginTop: 14, backgroundColor: "#2563EB", borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10 },
   retryBtnText: { color: "#fff", fontWeight: "800", fontSize: 13 },
-  statsPanel: { marginTop: 2, borderRadius: 18, overflow: "hidden", backgroundColor: C_PANEL_BLUE, shadowColor: "rgba(0,0,0,0.18)", shadowOpacity: 0.2, shadowOffset: { width: 0, height: 6 }, shadowRadius: 12, elevation: 3 },
+  statsPanel: { marginTop: 2, borderRadius: 22, overflow: "hidden", backgroundColor: C_PANEL_BLUE, shadowColor: "#000", shadowOpacity: 0.08, shadowOffset: { width: 0, height: 2 }, shadowRadius: 8, elevation: 3 },
   statsPanelHeader: { flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 14, paddingTop: 12, paddingBottom: 8 },
   statsPanelTitle: { color: "#FFFFFF", fontSize: 15, fontWeight: "800" },
   statsGridHorizontal: { flexDirection: "row", paddingHorizontal: 8, paddingBottom: 12, gap: 8 },

@@ -21,7 +21,7 @@ import {
   Pressable,
   ActivityIndicator,
 } from "react-native";
-import { FolderOpen, ChevronLeft, Plus, Trash2 } from "lucide-react-native";
+import { FolderOpen, ChevronLeft, Plus, Trash2, Pencil } from "lucide-react-native";
 import { supabase } from "./supabaseClient";
 
 /* ────────────────────────────────────────────────────────────── */
@@ -44,6 +44,7 @@ type Group = {
   folderId: string | null;
   color: string;
   teacherId: string;
+  niveau?: string | null;
   students: Student[];
 };
 
@@ -67,6 +68,7 @@ type DragItem =
       name: string;
       originFolderId: string | null;
       color: string;
+      niveau?: string | null;
       students: Student[];
     };
 
@@ -104,17 +106,23 @@ type Props = {
   professeur?: Professor;
   setProfesseur?: (p: any) => void;
   setModeConnexion?: (m: any) => void;
+  initialFolderId?: string | null;
+  setLastFolderId?: (folderId: string | null) => void;
   setSelectedGroup?: (g: {
     id: any;
     nom: string;
     eleves: any[];
     color?: string;
+    niveau?: string | null;
+    folderId?: string | null;
   }) => void;
   setSelectedGroupUuid?: (g: {
     id: string;
     nom: string;
     eleves: any[];
     color?: string;
+    niveau?: string | null;
+    folderId?: string | null;
   }) => void;
 };
 
@@ -144,6 +152,11 @@ const DROP_PAD = 28;
 const IS_WEB = Platform.OS === "web";
 
 const trim = (s: string) => s.replace(/\s+/g, " ").trim();
+
+const getLastGestionGroupesFolderId = () => {
+  const value = (globalThis as any).__gestionGroupesLastFolderId;
+  return typeof value === "string" ? value : null;
+};
 
 function isDescendant(
   folders: FolderT[],
@@ -233,21 +246,31 @@ function GroupChipContent({
 }) {
   return (
     <View style={s.groupChipInner}>
-      <View
-        style={[
-          s.groupDot,
-          { backgroundColor: selectedForDelete ? "#fff" : group.color },
-        ]}
-      />
       <View style={s.groupTextWrap}>
         <Text
           style={[s.groupName, selectedForDelete && s.deleteTextStrong]}
-          numberOfLines={1}
+          numberOfLines={2}
         >
           {group.name}
         </Text>
+        {!!group.niveau && (
+          <Text
+            style={[
+              s.groupMeta,
+              s.groupMetaFirst,
+              selectedForDelete && s.deleteTextSoft,
+            ]}
+            numberOfLines={1}
+          >
+            {group.niveau}
+          </Text>
+        )}
         <Text
-          style={[s.groupMeta, selectedForDelete && s.deleteTextSoft]}
+          style={[
+            s.groupMeta,
+            !group.niveau && s.groupMetaFirst,
+            selectedForDelete && s.deleteTextSoft,
+          ]}
           numberOfLines={1}
         >
           {group.students.length} élève{group.students.length !== 1 ? "s" : ""}
@@ -279,6 +302,7 @@ function PreviewCard({
       folderId: item.originFolderId,
       color: item.color,
       teacherId: "",
+      niveau: item.niveau ?? null,
       students: item.students,
     };
 
@@ -320,7 +344,7 @@ const pv = StyleSheet.create({
 /* ────────────────────────────────────────────────────────────── */
 
 export default function GestionGroupes(props: Props) {
-  const { setPage, professeur } = props;
+  const { setPage, professeur, initialFolderId, setLastFolderId } = props;
   const teacherId = professeur?.user_id ?? null;
   const { width, height } = useWindowDimensions();
 
@@ -340,7 +364,9 @@ export default function GestionGroupes(props: Props) {
 
   const [folders, setFolders] = useState<FolderT[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
-  const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
+  const [selectedFolder, setSelectedFolder] = useState<string | null>(
+    () => initialFolderId ?? getLastGestionGroupesFolderId()
+  );
 
   const [showCreateFolder, setShowCreateFolder] = useState(false);
   const [showCreateGroup, setShowCreateGroup] = useState(false);
@@ -348,8 +374,16 @@ export default function GestionGroupes(props: Props) {
   const [folderName, setFolderName] = useState("");
   const [newGroupName, setNewGroupName] = useState("");
   const [newGroupColor, setNewGroupColor] = useState(COLORS[0]);
+  const [newGroupNiveau, setNewGroupNiveau] = useState<string | null>(null);
+  const [newCustomNiveau, setNewCustomNiveau] = useState("");
+  const [editingGroup, setEditingGroup] = useState<Group | null>(null);
+  const [niveauToRename, setNiveauToRename] = useState<string | null>(null);
+  const [renameNiveauName, setRenameNiveauName] = useState("");
+  const [niveauToDelete, setNiveauToDelete] = useState<string | null>(null);
+  const [isUpdatingNiveau, setIsUpdatingNiveau] = useState(false);
 
   const [organizeMode, setOrganizeMode] = useState(false);
+  const [editMode, setEditMode] = useState(false);
   const [dragItem, setDragItem] = useState<DragItem | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [highlightKey, setHighlightKey] = useState<string | null>(null);
@@ -412,7 +446,9 @@ export default function GestionGroupes(props: Props) {
 
   useEffect(() => {
     selectedFolderRef.current = selectedFolder;
-  }, [selectedFolder]);
+    (globalThis as any).__gestionGroupesLastFolderId = selectedFolder;
+    setLastFolderId?.(selectedFolder);
+  }, [selectedFolder, setLastFolderId]);
 
   useEffect(() => {
     organizeModeRef.current = organizeMode;
@@ -532,7 +568,7 @@ export default function GestionGroupes(props: Props) {
           .eq("user_id", teacherId),
         supabase
           .from("groups")
-          .select("id,name,folder_id,color,teacher_id")
+          .select("id,name,folder_id,color,teacher_id,niveau")
           .eq("teacher_id", teacherId),
       ]);
 
@@ -552,6 +588,7 @@ export default function GestionGroupes(props: Props) {
         folderId: g.folder_id ? String(g.folder_id) : null,
         color: String(g.color ?? "#3498DB"),
         teacherId: String(g.teacher_id ?? ""),
+        niveau: g.niveau ? String(g.niveau) : null,
         students: [],
       }));
 
@@ -630,6 +667,15 @@ export default function GestionGroupes(props: Props) {
       (g) => g.teacherId === teacherId && g.folderId === selectedFolder
     );
   }, [groups, teacherId, selectedFolder]);
+
+  const niveaux = useMemo(() => {
+    const names = new Set<string>();
+    groups.forEach((group) => {
+      const niveau = trim(group.niveau ?? "");
+      if (niveau) names.add(niveau);
+    });
+    return Array.from(names).sort((a, b) => a.localeCompare(b));
+  }, [groups]);
 
   const titleFolder = breadcrumb.length
     ? breadcrumb[breadcrumb.length - 1].name
@@ -783,6 +829,12 @@ export default function GestionGroupes(props: Props) {
     selectedFolder,
     refreshZones,
   ]);
+
+  useEffect(() => {
+    if (currentGroups.length === 0 && editMode) {
+      setEditMode(false);
+    }
+  }, [currentGroups.length, editMode]);
 
   const requestDeleteSelection = useCallback(() => {
     if (!selectionCount) return;
@@ -1405,13 +1457,48 @@ export default function GestionGroupes(props: Props) {
     }
   };
 
-  const createGroup = async () => {
+  const resetGroupForm = useCallback(() => {
+    setShowCreateGroup(false);
+    setEditingGroup(null);
+    setNewGroupName("");
+    setNewGroupColor(COLORS[0]);
+    setNewGroupNiveau(null);
+    setNewCustomNiveau("");
+  }, []);
+
+  const openCreateGroupModal = useCallback(() => {
+    setEditingGroup(null);
+    setNewGroupName("");
+    setNewGroupColor(COLORS[0]);
+    setNewGroupNiveau(null);
+    setNewCustomNiveau("");
+    setShowCreateGroup(true);
+  }, []);
+
+  const openEditGroupModal = useCallback(
+    (group: Group) => {
+      if (selectionMode || organizeModeRef.current || isDraggingRef.current) return;
+
+      setEditMode(false);
+      const niveau = trim(group.niveau ?? "");
+      setEditingGroup(group);
+      setNewGroupName(group.name);
+      setNewGroupColor(group.color);
+      setNewGroupNiveau(niveau || null);
+      setNewCustomNiveau("");
+      setShowCreateGroup(true);
+    },
+    [selectionMode]
+  );
+
+  const saveGroup = async () => {
     const name = trim(newGroupName);
     if (!name || !teacherId) return;
 
     if (
       groups.some(
         (g) =>
+          g.id !== editingGroup?.id &&
           g.teacherId === teacherId &&
           g.folderId === selectedFolder &&
           g.name.toLowerCase() === name.toLowerCase()
@@ -1421,25 +1508,134 @@ export default function GestionGroupes(props: Props) {
       return;
     }
 
+    const customNiveau = trim(newCustomNiveau);
+    const niveau = customNiveau || newGroupNiveau || null;
+
     try {
-      const res = await supabase.from("groups").insert({
+      const payload = {
         name,
-        teacher_id: teacherId,
-        folder_id: selectedFolder,
         color: newGroupColor,
-      });
+        niveau,
+      };
+
+      const res = editingGroup
+        ? await supabase
+            .from("groups")
+            .update(payload)
+            .eq("id", editingGroup.id)
+            .eq("teacher_id", teacherId)
+        : await supabase.from("groups").insert({
+            ...payload,
+            teacher_id: teacherId,
+            folder_id: selectedFolder,
+          });
 
       if (res.error) throw res.error;
 
-      setShowCreateGroup(false);
-      setNewGroupName("");
-      setNewGroupColor(COLORS[0]);
+      resetGroupForm();
       await fetchAll();
     } catch (e) {
-      console.error("createGroup", e);
-      showInfo("Erreur", "Impossible de créer la classe.");
+      console.error("saveGroup", e);
+      showInfo(
+        "Erreur",
+        editingGroup
+          ? "Impossible de modifier la classe."
+          : "Impossible de créer la classe."
+      );
     }
   };
+
+  const openRenameNiveau = useCallback((niveau: string) => {
+    setNiveauToRename(niveau);
+    setRenameNiveauName(niveau);
+  }, []);
+
+  const renameNiveau = useCallback(async () => {
+    const oldName = trim(niveauToRename ?? "");
+    const nextName = trim(renameNiveauName);
+    if (!teacherId || !oldName || !nextName || isUpdatingNiveau) return;
+
+    if (oldName.toLowerCase() !== nextName.toLowerCase()) {
+      const alreadyExists = niveaux.some(
+        (niveau) =>
+          niveau.toLowerCase() === nextName.toLowerCase() &&
+          niveau.toLowerCase() !== oldName.toLowerCase()
+      );
+
+      if (alreadyExists) {
+        showInfo("Niveau déjà utilisé", "Un niveau avec ce nom existe déjà.");
+        return;
+      }
+    }
+
+    setIsUpdatingNiveau(true);
+    try {
+      const res = await supabase
+        .from("groups")
+        .update({ niveau: nextName })
+        .eq("teacher_id", teacherId)
+        .eq("niveau", oldName);
+
+      if (res.error) throw res.error;
+
+      if (newGroupNiveau === oldName) {
+        setNewGroupNiveau(nextName);
+      }
+
+      setNiveauToRename(null);
+      setRenameNiveauName("");
+      await fetchAll();
+    } catch (e) {
+      console.error("renameNiveau", e);
+      showInfo("Erreur", "Impossible de renommer ce niveau.");
+    } finally {
+      if (aliveRef.current) setIsUpdatingNiveau(false);
+    }
+  }, [
+    teacherId,
+    niveauToRename,
+    renameNiveauName,
+    isUpdatingNiveau,
+    niveaux,
+    newGroupNiveau,
+    fetchAll,
+    showInfo,
+  ]);
+
+  const deleteNiveau = useCallback(async () => {
+    const niveau = trim(niveauToDelete ?? "");
+    if (!teacherId || !niveau || isUpdatingNiveau) return;
+
+    setIsUpdatingNiveau(true);
+    try {
+      const res = await supabase
+        .from("groups")
+        .update({ niveau: null })
+        .eq("teacher_id", teacherId)
+        .eq("niveau", niveau);
+
+      if (res.error) throw res.error;
+
+      if (newGroupNiveau === niveau) {
+        setNewGroupNiveau(null);
+      }
+
+      setNiveauToDelete(null);
+      await fetchAll();
+    } catch (e) {
+      console.error("deleteNiveau", e);
+      showInfo("Erreur", "Impossible de supprimer ce niveau.");
+    } finally {
+      if (aliveRef.current) setIsUpdatingNiveau(false);
+    }
+  }, [
+    teacherId,
+    niveauToDelete,
+    isUpdatingNiveau,
+    newGroupNiveau,
+    fetchAll,
+    showInfo,
+  ]);
 
   const openGroup = useCallback(
     (g: Group) => {
@@ -1449,20 +1645,27 @@ export default function GestionGroupes(props: Props) {
       }
       if (isDraggingRef.current) return;
       if (organizeModeRef.current) return;
+      if (editMode) {
+        openEditGroupModal(g);
+        return;
+      }
 
       const payload = {
         id: g.id,
         nom: g.name,
         eleves: g.students,
         color: g.color,
+        niveau: g.niveau ?? null,
+        folderId: g.folderId ?? null,
       };
 
+      (globalThis as any).__gestionGroupesLastFolderId = g.folderId ?? null;
       props.setSelectedGroupUuid?.(payload);
       props.setSelectedGroup?.(payload as any);
 
       setTimeout(() => setPage?.("GestionEleves"), 0);
     },
-    [props, setPage, selectionMode, toggleSelection]
+    [props, setPage, selectionMode, toggleSelection, editMode, openEditGroupModal]
   );
 
   const openFolder = useCallback(
@@ -1473,11 +1676,12 @@ export default function GestionGroupes(props: Props) {
       }
       if (isDraggingRef.current) return;
       if (organizeModeRef.current) return;
+      if (editMode) return;
 
       selectedFolderRef.current = id;
       setSelectedFolder(id);
     },
-    [selectionMode, toggleSelection]
+    [selectionMode, toggleSelection, editMode]
   );
 
   const goBack = useCallback(() => {
@@ -1492,6 +1696,7 @@ export default function GestionGroupes(props: Props) {
     resetDragVisual();
     organizeModeRef.current = false;
     setOrganizeMode(false);
+    setEditMode(false);
     setSelectionMode((prev) => {
       if (prev) {
         setSelectedMap({});
@@ -1500,6 +1705,14 @@ export default function GestionGroupes(props: Props) {
       return true;
     });
   }, [isDeleting, resetDragVisual]);
+
+  const toggleEditMode = useCallback(() => {
+    if (isDeleting || selectionMode) return;
+    resetDragVisual();
+    organizeModeRef.current = false;
+    setOrganizeMode(false);
+    setEditMode((prev) => !prev);
+  }, [isDeleting, selectionMode, resetDragVisual]);
 
   const rootResponderHandlers = !IS_WEB
     ? {
@@ -1559,15 +1772,35 @@ export default function GestionGroupes(props: Props) {
                 <Text style={s.backBtnText}>Retour</Text>
               </Pressable>
             ) : (
-              <View style={s.backBtnGhost} />
+              <Text
+                style={s.headerTitle}
+                numberOfLines={1}
+                ellipsizeMode="tail"
+              >
+                {titleFolder}
+              </Text>
             )}
           </View>
 
           <View style={s.headerRight}>
+            {currentGroups.length > 0 && (
+              <Pressable
+                style={[s.topIconBtn, editMode && s.topIconBtnEditActive]}
+                onPress={toggleEditMode}
+                disabled={isDeleting || selectionMode}
+              >
+                <Pencil
+                  size={18}
+                  color={editMode ? "#1F5B86" : "#fff"}
+                  strokeWidth={2.6}
+                />
+              </Pressable>
+            )}
+
             <Pressable
               style={s.topIconBtn}
               onPress={() => setShowCreateMenu(true)}
-              disabled={isDeleting || selectionMode}
+              disabled={isDeleting || selectionMode || editMode}
             >
               <Plus size={18} color="#fff" strokeWidth={2.8} />
             </Pressable>
@@ -1575,23 +1808,26 @@ export default function GestionGroupes(props: Props) {
             <Pressable
               style={[s.topIconBtn, selectionMode && s.topIconBtnActive]}
               onPress={toggleSelectionMode}
-              disabled={isDeleting}
+              disabled={isDeleting || editMode}
             >
               <Trash2 size={18} color="#fff" strokeWidth={2.6} />
             </Pressable>
           </View>
         </View>
 
-        <View style={s.headerTitleZone}>
+      </View>
+
+      {selectedFolder !== null && (
+        <View style={s.subHeader}>
           <Text
-            style={s.headerTitle}
+            style={s.subHeaderTitle}
             numberOfLines={isMobileLayout ? 2 : 1}
             ellipsizeMode="tail"
           >
             {titleFolder}
           </Text>
         </View>
-      </View>
+      )}
 
       {organizeMode && !dragItem && !selectionMode && (
         <View style={s.editBanner}>
@@ -1601,10 +1837,22 @@ export default function GestionGroupes(props: Props) {
         </View>
       )}
 
+      {editMode && !selectionMode && (
+        <View style={s.editBanner}>
+          <Text style={s.editBannerText}>
+            Mode modification activé · Touchez une classe
+          </Text>
+        </View>
+      )}
+
       <Pressable
         style={s.flex1}
         onPress={() => {
           if (selectionMode) return;
+          if (editMode) {
+            setEditMode(false);
+            return;
+          }
           if (organizeMode && !dragItem) {
             organizeModeRef.current = false;
             setOrganizeMode(false);
@@ -1677,7 +1925,7 @@ export default function GestionGroupes(props: Props) {
                           hl && s.dropActive,
                           hidden && s.sourceHidden,
                           selectedForDelete && s.deleteSelectedCard,
-                          organizeMode &&
+                          (organizeMode || editMode) &&
                             !hidden &&
                             !selectionMode && {
                               transform: [{ rotate: jiggleRot }],
@@ -1715,13 +1963,14 @@ export default function GestionGroupes(props: Props) {
                       name: group.name,
                       originFolderId: group.folderId,
                       color: group.color,
+                      niveau: group.niveau ?? null,
                       students: group.students,
                     };
 
                     const hidden = draggingId === group.id;
                     const selectedForDelete = isSelected("group", group.id);
 
-                    const handlers = selectionMode
+                    const handlers = selectionMode || editMode
                       ? {}
                       : IS_WEB
                         ? makeWebHandlers(item, () => openGroup(group))
@@ -1860,7 +2109,7 @@ export default function GestionGroupes(props: Props) {
               style={s.smallMenuAction}
               onPress={() => {
                 setShowCreateMenu(false);
-                setShowCreateGroup(true);
+                openCreateGroupModal();
               }}
             >
               <Text style={s.smallMenuActionText}>Nouvelle classe</Text>
@@ -1917,21 +2166,116 @@ export default function GestionGroupes(props: Props) {
         visible={showCreateGroup}
         transparent
         animationType="fade"
-        onRequestClose={() => setShowCreateGroup(false)}
+        onRequestClose={resetGroupForm}
       >
         <View style={s.overlay}>
-          <View style={s.modal}>
-            <Text style={s.modalTitle}>Nouvelle classe</Text>
+          <View style={[s.modal, s.groupModal]}>
+            <ScrollView
+              style={s.groupModalScroll}
+              contentContainerStyle={s.groupModalContent}
+              keyboardShouldPersistTaps="handled"
+              alwaysBounceVertical
+              showsVerticalScrollIndicator={false}
+            >
+              <Text style={s.modalTitle}>{editingGroup ? "Modifier la classe" : "Nouvelle classe"}</Text>
 
-            <TextInput
-              style={s.input}
-              placeholder="Nom de la classe"
-              placeholderTextColor="#a0adb8"
-              value={newGroupName}
-              onChangeText={setNewGroupName}
-              autoFocus
-              onSubmitEditing={createGroup}
-            />
+              <TextInput
+                style={s.input}
+                placeholder="Nom de la classe"
+                placeholderTextColor="#a0adb8"
+                value={newGroupName}
+                onChangeText={setNewGroupName}
+                onSubmitEditing={saveGroup}
+              />
+
+            <View style={s.levelBlock}>
+              <Text style={s.levelLabel}>Niveau</Text>
+              <View style={s.levelRow}>
+                <Pressable
+                  style={[
+                    s.levelPill,
+                    !newGroupNiveau && !trim(newCustomNiveau) && s.levelPillActive,
+                  ]}
+                  onPress={() => {
+                    setNewGroupNiveau(null);
+                    setNewCustomNiveau("");
+                  }}
+                >
+                  <Text
+                    style={[
+                      s.levelPillText,
+                      !newGroupNiveau && !trim(newCustomNiveau) && s.levelPillTextActive,
+                    ]}
+                  >
+                    Aucun
+                  </Text>
+                </Pressable>
+              </View>
+
+              {niveaux.length > 0 && (
+                <View style={s.levelManageList}>
+                  {niveaux.map((niveau) => {
+                    const active =
+                      newGroupNiveau === niveau && !trim(newCustomNiveau);
+
+                    return (
+                      <View
+                        key={niveau}
+                        style={[
+                          s.levelManageRow,
+                          active && s.levelManageRowActive,
+                        ]}
+                      >
+                        <Pressable
+                          style={s.levelManageSelect}
+                          onPress={() => {
+                            setNewGroupNiveau(niveau);
+                            setNewCustomNiveau("");
+                          }}
+                        >
+                          <Text
+                            style={[
+                              s.levelManageName,
+                              active && s.levelManageNameActive,
+                            ]}
+                            numberOfLines={1}
+                          >
+                            {niveau}
+                          </Text>
+                        </Pressable>
+
+                        <Pressable
+                          style={s.levelIconBtn}
+                          onPress={() => openRenameNiveau(niveau)}
+                          hitSlop={8}
+                        >
+                          <Pencil size={13} color="#1F5B86" strokeWidth={2.6} />
+                        </Pressable>
+                        <Pressable
+                          style={[s.levelIconBtn, s.levelIconBtnDanger]}
+                          onPress={() => setNiveauToDelete(niveau)}
+                          hitSlop={8}
+                        >
+                          <Trash2 size={13} color="#D84A4A" strokeWidth={2.6} />
+                        </Pressable>
+                      </View>
+                    );
+                  })}
+                </View>
+              )}
+
+              <TextInput
+                style={s.input}
+                placeholder="Créer ou saisir un niveau"
+                placeholderTextColor="#a0adb8"
+                value={newCustomNiveau}
+                onChangeText={(value) => {
+                  setNewCustomNiveau(value);
+                  if (trim(value)) setNewGroupNiveau(null);
+                }}
+                onSubmitEditing={saveGroup}
+              />
+            </View>
 
             <View style={s.colorRow}>
               {COLORS.map((c) => (
@@ -1947,22 +2291,21 @@ export default function GestionGroupes(props: Props) {
               ))}
             </View>
 
-            <View style={s.modalActions}>
-              <Pressable
-                style={s.btnCancel}
-                onPress={() => {
-                  setShowCreateGroup(false);
-                  setNewGroupName("");
-                  setNewGroupColor(COLORS[0]);
-                }}
-              >
-                <Text style={s.btnCancelText}>Annuler</Text>
-              </Pressable>
+              <View style={s.modalActions}>
+                <Pressable
+                  style={s.btnCancel}
+                  onPress={() => {
+                    resetGroupForm();
+                  }}
+                >
+                  <Text style={s.btnCancelText}>Annuler</Text>
+                </Pressable>
 
-              <Pressable style={s.btnConfirm} onPress={createGroup}>
-                <Text style={s.btnConfirmText}>Créer</Text>
-              </Pressable>
-            </View>
+                <Pressable style={s.btnConfirm} onPress={saveGroup}>
+                  <Text style={s.btnConfirmText}>{editingGroup ? "Modifier" : "Créer"}</Text>
+                </Pressable>
+              </View>
+            </ScrollView>
           </View>
         </View>
       </Modal>
@@ -2000,6 +2343,102 @@ export default function GestionGroupes(props: Props) {
                 disabled={isDeleting}
               >
                 {isDeleting ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={s.btnConfirmText}>Supprimer</Text>
+                )}
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={!!niveauToRename}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          if (!isUpdatingNiveau) {
+            setNiveauToRename(null);
+            setRenameNiveauName("");
+          }
+        }}
+      >
+        <View style={s.overlay}>
+          <View style={s.modal}>
+            <Text style={s.modalTitle}>Renommer le niveau</Text>
+            <TextInput
+              style={s.input}
+              placeholder="Nom du niveau"
+              placeholderTextColor="#a0adb8"
+              value={renameNiveauName}
+              onChangeText={setRenameNiveauName}
+              autoFocus
+              onSubmitEditing={renameNiveau}
+            />
+
+            <View style={s.modalActions}>
+              <Pressable
+                style={s.btnCancel}
+                onPress={() => {
+                  if (!isUpdatingNiveau) {
+                    setNiveauToRename(null);
+                    setRenameNiveauName("");
+                  }
+                }}
+                disabled={isUpdatingNiveau}
+              >
+                <Text style={s.btnCancelText}>Annuler</Text>
+              </Pressable>
+
+              <Pressable
+                style={s.btnConfirm}
+                onPress={renameNiveau}
+                disabled={isUpdatingNiveau || !trim(renameNiveauName)}
+              >
+                {isUpdatingNiveau ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={s.btnConfirmText}>Renommer</Text>
+                )}
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={!!niveauToDelete}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          if (!isUpdatingNiveau) setNiveauToDelete(null);
+        }}
+      >
+        <View style={s.overlay}>
+          <View style={s.modal}>
+            <Text style={s.modalTitle}>Supprimer le niveau</Text>
+            <Text style={s.confirmBody}>
+              Ce niveau sera retiré de toutes les classes qui l'utilisent.
+            </Text>
+
+            <View style={s.modalActions}>
+              <Pressable
+                style={s.btnCancel}
+                onPress={() => {
+                  if (!isUpdatingNiveau) setNiveauToDelete(null);
+                }}
+                disabled={isUpdatingNiveau}
+              >
+                <Text style={s.btnCancelText}>Annuler</Text>
+              </Pressable>
+
+              <Pressable
+                style={[s.btnConfirm, s.btnDanger]}
+                onPress={deleteNiveau}
+                disabled={isUpdatingNiveau}
+              >
+                {isUpdatingNiveau ? (
                   <ActivityIndicator color="#fff" />
                 ) : (
                   <Text style={s.btnConfirmText}>Supprimer</Text>
@@ -2054,6 +2493,7 @@ const s = StyleSheet.create({
     paddingBottom: 10,
     paddingHorizontal: 14,
     gap: 4,
+    position: "relative",
     shadowColor: "#000",
     shadowOpacity: 0.15,
     shadowOffset: { width: 0, height: 3 },
@@ -2079,12 +2519,6 @@ const s = StyleSheet.create({
     minWidth: 100,
     justifyContent: "flex-end",
   },
-  headerTitleZone: {
-    marginTop: -2,
-    paddingTop: 2,
-    paddingBottom: 4,
-    justifyContent: "flex-start",
-  },
   headerTitle: {
     fontSize: 16,
     fontWeight: "800",
@@ -2092,6 +2526,24 @@ const s = StyleSheet.create({
     letterSpacing: 0.15,
     includeFontPadding: false,
     lineHeight: 20,
+  },
+  subHeader: {
+    backgroundColor: "#2B79B1",
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    alignItems: "center",
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255,255,255,0.14)",
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(0,0,0,0.08)",
+  },
+  subHeaderTitle: {
+    fontSize: 14,
+    fontWeight: "900",
+    color: "#fff",
+    letterSpacing: 0.2,
+    includeFontPadding: false,
+    lineHeight: 18,
   },
 
   topIconBtn: {
@@ -2108,6 +2560,10 @@ const s = StyleSheet.create({
   topIconBtnActive: {
     backgroundColor: "#D84A4A",
     borderColor: "rgba(255,255,255,0.4)",
+  },
+  topIconBtnEditActive: {
+    backgroundColor: "#fff",
+    borderColor: "rgba(255,255,255,0.9)",
   },
 
   backBtn: {
@@ -2126,10 +2582,6 @@ const s = StyleSheet.create({
     shadowRadius: 8,
     shadowOffset: { width: 0, height: 3 },
     elevation: 4,
-  },
-  backBtnGhost: {
-    width: 1,
-    height: 38,
   },
   backBtnDrop: {
     backgroundColor: "#1a5fa0",
@@ -2249,10 +2701,10 @@ const s = StyleSheet.create({
   groupChipInner: {
     alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 6,
-    paddingVertical: 9,
-    gap: 5,
-    minHeight: 72,
+    paddingHorizontal: 8,
+    paddingVertical: 10,
+    gap: 4,
+    minHeight: 82,
   },
   groupTextWrap: {
     width: "100%",
@@ -2260,22 +2712,20 @@ const s = StyleSheet.create({
     justifyContent: "center",
     minWidth: 0,
   },
-  groupDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-  },
   groupName: {
-    fontSize: 11,
+    fontSize: 15,
     fontWeight: "800",
     color: "#1a2a3a",
     textAlign: "center",
+    lineHeight: 18,
   },
   groupMeta: {
-    fontSize: 9,
+    fontSize: 10,
     color: "#6b7f8e",
-    marginTop: 1,
     textAlign: "center",
+  },
+  groupMetaFirst: {
+    marginTop: 7,
   },
 
   fullHit: {
@@ -2454,6 +2904,19 @@ const s = StyleSheet.create({
     fontWeight: "800",
     color: "#1a2a3a",
   },
+  groupModal: {
+    maxHeight: "88%",
+    padding: 0,
+    overflow: "hidden",
+  },
+  groupModalScroll: {
+    width: "100%",
+  },
+  groupModalContent: {
+    gap: 16,
+    padding: 24,
+    paddingBottom: 28,
+  },
   confirmBody: {
     fontSize: 14,
     color: "#5f7282",
@@ -2504,6 +2967,87 @@ const s = StyleSheet.create({
     fontWeight: "800",
     color: "#fff",
   },
+  levelBlock: {
+    gap: 8,
+  },
+  levelLabel: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#6b7f8e",
+  },
+  levelRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  levelPill: {
+    minHeight: 34,
+    maxWidth: "100%",
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: "#d0dce6",
+    backgroundColor: "#f6f9fb",
+    paddingHorizontal: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  levelPillActive: {
+    backgroundColor: "#1F5B86",
+    borderColor: "#1F5B86",
+  },
+  levelPillText: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: "#526879",
+  },
+  levelPillTextActive: {
+    color: "#fff",
+  },
+  levelManageList: {
+    gap: 6,
+  },
+  levelManageRow: {
+    minHeight: 38,
+    borderRadius: 11,
+    borderWidth: 1,
+    borderColor: "#d7e4ef",
+    backgroundColor: "#f8fbfd",
+    paddingLeft: 12,
+    paddingRight: 6,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  levelManageRowActive: {
+    backgroundColor: "#1F5B86",
+    borderColor: "#1F5B86",
+  },
+  levelManageSelect: {
+    flex: 1,
+    minWidth: 0,
+    minHeight: 36,
+    justifyContent: "center",
+  },
+  levelManageName: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: "#526879",
+  },
+  levelManageNameActive: {
+    color: "#fff",
+  },
+  levelIconBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 10,
+    backgroundColor: "#edf4fb",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  levelIconBtnDanger: {
+    backgroundColor: "#fff1f1",
+  },
+
   colorRow: {
     flexDirection: "row",
     flexWrap: "wrap",

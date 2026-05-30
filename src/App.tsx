@@ -12,6 +12,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { supabase } from "./supabaseClient";
 import BottomBar from "./ui/BottomBar";
 import MotDePasseByMail from "./MotDePasseByMail";
+import ConditionsDeblocageCarte from "./GestionResultats/Progressivite/ConditionsDeblocageCarte";
 import "react-native-gesture-handler";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 
@@ -24,6 +25,11 @@ const AccueilProf = React.lazy(() => import("./AccueilProf"));
 const Parametres = React.lazy(() => import("./Parametres"));
 const GestionGroupes = React.lazy(() => import("./GestionGroupes"));
 const GestionEleves = React.lazy(() => import("./GestionEleves"));
+const CreationGroupeSessionEleve = React.lazy(() =>
+  import("./SessionProf/GestionGroupes/CreationGroupeSessionEleve").then((module: any) => ({
+    default: module.default || module.CreationGroupeSessionEleve || (() => null),
+  }))
+) as React.LazyExoticComponent<React.ComponentType<any>>;
 const GestionBalises = React.lazy(() => import("./GestionBalises"));
 const CreationBalise = React.lazy(() => import("./CreationBalise"));
 const GestionParcours = React.lazy(() => import("./GestionParcours"));
@@ -37,6 +43,10 @@ const GestionResultatsTentatives = React.lazy(() => import("./GestionResultatsTe
 const GestionResultatsProgressivite = React.lazy(() => import("./GestionResultatsProgressivite")) as React.LazyExoticComponent<React.ComponentType<any>>;
 const GestionPoints = React.lazy(() => import("./GestionPoints")) as React.LazyExoticComponent<React.ComponentType<any>>;
 const Association = React.lazy(() => import("./Association")) as React.LazyExoticComponent<React.ComponentType<any>>;
+
+const CreationArbreDeCompetence = React.lazy(
+  () => import("./GestionResultats/Progressivite/CreationArbreDeCompetence")
+) as React.LazyExoticComponent<React.ComponentType<any>>;
 
 const PersonnalisationBalises = React.lazy(
   () => import("./GestionResultats/Progressivite/GestionPoints/Personnalisation/PersonnalisationBalises")
@@ -62,7 +72,7 @@ const Jeudeserreurs = React.lazy(() =>
 ) as React.LazyExoticComponent<React.ComponentType<any>>;
 const CreerJeuDesErreurs = React.lazy(() => import("./Jeux/CreerJeuDesErreurs"));
 
-const StatistiquesEleve = React.lazy(() => import("./StatistiquesEleve"));
+const StatistiquesEleve = React.lazy(() => import("./SessionProf/GestionGroupes/StatistiquesEleve"));
 const MotDePasseOublie = React.lazy(() => import("./MotDePasseOublie"));
 const PartageParcours = React.lazy(() => import("./PartageParcours"));
 const ObjectifsEleve = React.lazy(() => import("./ObjectifsEleve"));
@@ -85,6 +95,7 @@ type PageType =
   | "Parametres"
   | "gestionGroupes"
   | "GestionEleves"
+  | "CreationGroupeSessionEleve"
   | "gestionBalises"
   | "CreationBalise"
   | "gestionParcours"
@@ -100,6 +111,8 @@ type PageType =
   | "personnalisationBalises"
   | "personnalisationParcoursTermines"
   | "personnalisationTentatives"
+  | "ConditionsDeblocageCarte"
+  | "CreationArbreDeCompetence"
   | "EcrireResultat"
   | "EcrireCodeBaliseEleve"
   | "Jeudeserreurs"
@@ -224,6 +237,7 @@ const normalizePage = (value: string | null | undefined): PageType => {
     case "parametres": return "Parametres";
     case "gestiongroupes": return "gestionGroupes";
     case "gestioneleves": return "GestionEleves";
+    case "creationgroupesessioneleve": return "CreationGroupeSessionEleve";
     case "gestionbalises": return "gestionBalises";
     case "creationbalise": return "CreationBalise";
     case "gestionparcours": return "gestionParcours";
@@ -239,6 +253,8 @@ const normalizePage = (value: string | null | undefined): PageType => {
     case "personnalisationbalises": return "personnalisationBalises";
     case "personnalisationparcourstermines": return "personnalisationParcoursTermines";
     case "personnalisationtentatives": return "personnalisationTentatives";
+    case "conditionsdeblocagecarte": return "ConditionsDeblocageCarte";
+    case "creationarbredecompetence": return "CreationArbreDeCompetence";
     case "ecrireresultat": return "EcrireResultat";
     case "ecrirecodebaliseeleve": return "EcrireCodeBaliseEleve";
     case "jeudeserreurs": return "Jeudeserreurs";
@@ -290,6 +306,8 @@ const PUBLIC_PAGES = new Set<PageType>([
 const PROF_EXTRA_PAGES = new Set<PageType>([
   "Parametres",
   "GestionEleves",
+  "StatistiquesEleve",
+  "CreationGroupeSessionEleve",
   "CreationBalise",
   "CreerUnNouveauParcours",
   "CreerJeuDesErreurs",
@@ -302,6 +320,8 @@ const PROF_EXTRA_PAGES = new Set<PageType>([
   "personnalisationBalises",
   "personnalisationParcoursTermines",
   "personnalisationTentatives",
+  "ConditionsDeblocageCarte",
+  "CreationArbreDeCompetence",
   "PartageParcours",
   "configurationPersonnalisee",
   "gestionResultatsTentatives_parcours",
@@ -325,6 +345,8 @@ const pageToTabId = (p: PageType) => {
   switch (normalized) {
     case "AccueilProf": return "accueil";
 
+    case "ConditionsDeblocageCarte":
+    case "CreationArbreDeCompetence":
     case "GestionPoints":
     case "GestionResultatsTentatives":
     case "GestionResultatsProgressivite":
@@ -334,6 +356,9 @@ const pageToTabId = (p: PageType) => {
     case "personnalisationTentatives":
     case "GestionResultats":
       return "gestionResultats";
+
+    case "CreationGroupeSessionEleve":
+      return "gestionGroupes";
 
     case "CreationBalise":
     case "BaliseCode":
@@ -409,13 +434,15 @@ export default function App() {
   const [recoveryErrorMessage, setRecoveryErrorMessage] = useState("");
 
   const [selectedGroup, setSelectedGroup] = useState<SelectedGroup | null>(null);
-  const [parcoursId, setParcoursId] = useState<string | null>(null);
+const [selectedStatistiquesEleve, setSelectedStatistiquesEleve] = useState<any>(null);
+const [parcoursId, setParcoursId] = useState<string | null>(null);
 
   const [professeurs] = useState<Professeur[]>([]);
   const [parcoursGlobaux, setParcoursGlobaux] = useState<any[]>([]);
   const [dossiersParcours] = useState<any[]>([]);
   const [groupes] = useState<any[]>([]);
   const [parcoursActif, setParcoursActif] = useState<any>(null);
+  const [pagePrecedenteCodeBalise, setPagePrecedenteCodeBalise] = useState<PageType>("EcrireResultat");
   const [resultatsEleves] = useState<any[]>([]);
   const [parcoursTerminesEleves] = useState<any[]>([]);
   const [, setAffichageResultat] = useState(false);
@@ -443,6 +470,8 @@ export default function App() {
   const [baremePointsParcours] = useState<any>({});
 
   const setNormalizedPage = useCallback((next: PageInput) => {
+    let nextPage: PageType;
+
     if (typeof next === "object" && next !== null) {
       const nextParcoursId = next.parcoursId ?? next.id ?? null;
       const nextName = next.name ?? next.page ?? "";
@@ -451,12 +480,17 @@ export default function App() {
         setParcoursId(nextParcoursId);
       }
 
-      setPage(normalizePage(nextName));
-      return;
+      nextPage = normalizePage(nextName);
+    } else {
+      nextPage = normalizePage(String(next));
     }
 
-    setPage(normalizePage(String(next)));
-  }, []);
+    if (nextPage === "EcrireCodeBaliseEleve" && page !== "EcrireCodeBaliseEleve") {
+      setPagePrecedenteCodeBalise(page);
+    }
+
+    setPage(nextPage);
+  }, [page]);
 
   const goStr = useCallback(
     (p: any) => {
@@ -956,11 +990,15 @@ export default function App() {
 
                   {page === "GestionEleves" && selectedGroup && (
                     <GestionEleves
-                      setPage={goStr}
-                      professeur={professeur}
-                      setModeConnexion={setModeConnexion}
-                      selectedGroup={selectedGroup}
-                    />
+  setPage={goStr}
+  professeur={professeur}
+  setModeConnexion={setModeConnexion}
+  selectedGroup={selectedGroup}
+  onOpenStatistiquesEleve={(eleve: any) => {
+    setSelectedStatistiquesEleve(eleve);
+    setNormalizedPage("StatistiquesEleve");
+  }}
+/>
                   )}
 
                   {page === "GestionEleves" && !selectedGroup && (
@@ -972,6 +1010,33 @@ export default function App() {
                       showBottomBar
                     />
                   )}
+
+                  {page === "CreationGroupeSessionEleve" && selectedGroup && (
+                    <CreationGroupeSessionEleve
+                      setPage={goStr}
+                      professeur={professeur}
+                      selectedGroup={selectedGroup}
+                    />
+                  )}
+
+                  {page === "CreationGroupeSessionEleve" && !selectedGroup && (
+  <FallbackScreen
+    title="Aucun groupe sélectionné"
+    message="Sélectionne un groupe depuis « Gestion des groupes » avant de créer une session groupe."
+    onPrimaryPress={() => setNormalizedPage("gestionGroupes")}
+    primaryLabel="Retour à la gestion des groupes"
+    showBottomBar
+  />
+)}
+
+{page === "StatistiquesEleve" && (
+  <StatistiquesEleve
+    setPage={goStr}
+    professeur={professeur}
+    eleve={selectedStatistiquesEleve}
+    selectedGroup={selectedGroup}
+  />
+)}
 
                   {page === "CreationBalise" && (
                     <CreationBalise setPage={goStr} />
@@ -1041,6 +1106,25 @@ export default function App() {
   />
 )}
 
+{page === "ConditionsDeblocageCarte" && (
+  <ConditionsDeblocageCarte
+    carteCible={(globalThis as any).__conditionsCarteNode}
+    carteParent={(globalThis as any).__conditionsCarteCarteParent}
+    pageActive={(globalThis as any).__conditionsCartePageActive}
+    pages={(globalThis as any).__conditionsCartePages}
+    onBack={() => setNormalizedPage("CreationArbreDeCompetence")}
+    onSave={() => {}}
+  />
+)}
+
+{page === "CreationArbreDeCompetence" && (
+  <CreationArbreDeCompetence
+    carte={(globalThis as any).__conditionsCarteCarteParent}
+    setPage={goStr}
+    onBack={() => setNormalizedPage("GestionResultatsProgressivite")}
+  />
+)}
+
                   {page === "PartageParcours" && (
                     <PartageParcours setPage={goStr} professeur={professeur} />
                   )}
@@ -1095,6 +1179,7 @@ export default function App() {
     eleveConnecte={eleve}
     parcoursActif={parcoursActif}
     handleDeconnexion={handleDeconnexion}
+    pagePrecedente={pagePrecedenteCodeBalise}
   />
 )}
 
@@ -1105,8 +1190,13 @@ export default function App() {
                   )}
 
                   {page === "StatistiquesEleve" && (
-                    <ClassementEleve setPage={goStr} />
-                  )}
+  <StatistiquesEleve
+    setPage={goStr}
+    professeur={professeur}
+    eleve={selectedStatistiquesEleve}
+    selectedGroup={selectedGroup}
+  />
+)}
 
                   {page === "ObjectifsEleve" && (
                     <ObjectifsEleve

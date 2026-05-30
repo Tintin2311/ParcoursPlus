@@ -18,6 +18,7 @@ import {
   Briefcase,
   Camera,
   Check,
+  ChevronLeft,
   Cloud,
   Coffee,
   Edit3,
@@ -101,13 +102,14 @@ type FolderIconName =
 /* =======================
    Constantes
 ======================= */
-const C_BG = "#EFEFEF";
-const C_HEADER = "#87A7BA";
-const C_TEXT = "#0f172a";
-const C_MUTED = "rgba(15,23,42,0.65)";
-const C_BORDER = "rgba(0,0,0,0.08)";
-const C_PRIMARY = "#0ea5e9";
-const C_DANGER = "#ef4444";
+const C_BG = "#edf2f6";
+const C_HEADER = "#1F5B86";
+const C_HEADER_2 = "#2B79B1";
+const C_TEXT = "#1a2a3a";
+const C_MUTED = "#6b7f8e";
+const C_BORDER = "#d0dce6";
+const C_PRIMARY = "#1F5B86";
+const C_DANGER = "#D84A4A";
 const BOTTOM_BAR_HEIGHT = 78;
 
 const colorOptions: FolderColor[] = [
@@ -1175,22 +1177,11 @@ const { error } = await supabase.from("parcours_folders").insert({
     <SafeAreaView style={styles.root}>
       <View style={styles.header}>
         <View style={styles.headerRow}>
-          <TouchableOpacity onPress={goBack} style={styles.topIconBtn} activeOpacity={0.85}>
-            <ArrowLeft size={18} color="#fff" />
-          </TouchableOpacity>
-
-          <View style={styles.headerTitleWrap}>
-            <Text style={styles.headerTitle}>
-              {selectionMode
-                ? `${selectedIds.length} sélectionné${selectedIds.length > 1 ? "s" : ""}`
-                : "Mes Parcours"}
-            </Text>
-            {!selectionMode && refreshingSilently ? (
-              <Text style={styles.headerSyncText}>Synchronisation…</Text>
-            ) : null}
-            {!selectionMode && ordering ? (
-              <Text style={styles.headerSyncText}>Réorganisation…</Text>
-            ) : null}
+          <View style={styles.headerLeft}>
+            <TouchableOpacity onPress={goBack} style={styles.backBtn} activeOpacity={0.85}>
+              <ChevronLeft size={19} color="#fff" strokeWidth={3} />
+              <Text style={styles.backBtnText}>Retour</Text>
+            </TouchableOpacity>
           </View>
 
           <View style={styles.headerActions}>
@@ -1247,12 +1238,37 @@ const { error } = await supabase.from("parcours_folders").insert({
             )}
           </View>
         </View>
+      </View>
+
+      <View style={styles.subHeader}>
+        <Text style={styles.subHeaderTitle} numberOfLines={2}>
+          {selectionMode
+            ? `${selectedIds.length} sélectionné${selectedIds.length > 1 ? "s" : ""}`
+            : currentFolder
+            ? currentFolder.nom
+            : "MES PARCOURS"}
+        </Text>
+        {!selectionMode && refreshingSilently ? (
+          <Text style={styles.subHeaderSyncText}>Synchronisation...</Text>
+        ) : null}
+        {!selectionMode && ordering ? (
+          <Text style={styles.subHeaderSyncText}>Réorganisation...</Text>
+        ) : null}
+      </View>
+
+      {!currentFolder && !selectionMode && (refreshingSilently || ordering) && (
+        <View style={styles.statusBar}>
+          <Text style={styles.statusBarText}>
+            {refreshingSilently ? "Synchronisation..." : "Réorganisation..."}
+          </Text>
+        </View>
+      )}
 
         {searchVisible && !selectionMode && (
           <View style={styles.searchBarWrap}>
             <Search
               size={16}
-              color="rgba(255,255,255,0.85)"
+              color={C_MUTED}
               style={styles.headerSearchIcon}
             />
             <TextInput
@@ -1263,12 +1279,11 @@ const { error } = await supabase.from("parcours_folders").insert({
                   ? `Rechercher dans ${currentFolder.nom}`
                   : "Rechercher"
               }
-              placeholderTextColor="rgba(255,255,255,0.78)"
+              placeholderTextColor="#a0adb8"
               style={styles.headerSearchInput}
             />
           </View>
         )}
-      </View>
 
       {!!searchTerm.trim() && (
         <View style={styles.orderHintBox}>
@@ -1971,8 +1986,8 @@ const styles = StyleSheet.create({
 
   emptyArea: {
     flex: 1,
-    paddingHorizontal: 12,
-    paddingTop: 12,
+    paddingHorizontal: 16,
+    paddingTop: 16,
     paddingBottom: BOTTOM_BAR_HEIGHT + 120,
   },
 
@@ -1985,107 +2000,174 @@ const styles = StyleSheet.create({
   },
   loadingText: {
     color: C_TEXT,
-    fontWeight: "700",
+    fontWeight: "800",
   },
   errorText: {
     color: C_DANGER,
     textAlign: "center",
-    fontWeight: "700",
+    fontWeight: "800",
   },
   retryBtn: {
     marginTop: 8,
     backgroundColor: C_PRIMARY,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    paddingHorizontal: 18,
+    paddingVertical: 11,
     borderRadius: 12,
   },
   retryBtnText: {
     color: "#fff",
-    fontWeight: "800",
+    fontWeight: "900",
   },
 
   header: {
     backgroundColor: C_HEADER,
-    paddingHorizontal: 12,
-    paddingTop: Platform.select({ ios: 10, android: 10, default: 10 }),
+    paddingHorizontal: 14,
+    paddingTop: Platform.select({ ios: 10, android: 8, default: 12 }),
     paddingBottom: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: "rgba(0,0,0,0.06)",
+    shadowColor: "#000",
+    shadowOpacity: 0.15,
+    shadowOffset: { width: 0, height: 3 },
+    shadowRadius: 8,
+    elevation: 6,
   },
   headerRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    justifyContent: "space-between",
+    minHeight: 46,
+    gap: 10,
   },
-  headerTitleWrap: {
+  headerLeft: {
     flex: 1,
     minWidth: 0,
-    paddingHorizontal: 2,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
   },
   headerTitle: {
     color: "#fff",
-    fontSize: 20,
-    fontWeight: "800",
+    fontSize: 16,
+    fontWeight: "900",
+    letterSpacing: 0.2,
+    includeFontPadding: false,
+    lineHeight: 20,
   },
-  headerSyncText: {
-    color: "rgba(255,255,255,0.88)",
-    fontSize: 12,
-    fontWeight: "700",
-    marginTop: 2,
+  backBtn: {
+    minHeight: 38,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 13,
+    backgroundColor: C_HEADER_2,
+    borderWidth: 2,
+    borderColor: "rgba(255,255,255,0.28)",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    shadowColor: "#000",
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 4,
+  },
+  backBtnText: {
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: "800",
   },
   headerActions: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
+    justifyContent: "flex-end",
   },
   topIconBtn: {
-    width: 42,
-    height: 42,
-    borderRadius: 12,
-    backgroundColor: "rgba(255,255,255,0.18)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.28)",
+    width: 46,
+    height: 46,
+    borderRadius: 15,
+    backgroundColor: "rgba(255,255,255,0.14)",
+    borderWidth: 1.8,
+    borderColor: "rgba(255,255,255,0.25)",
     alignItems: "center",
     justifyContent: "center",
+    flexShrink: 0,
   },
   topIconBtnActive: {
-    backgroundColor: "rgba(255,255,255,0.28)",
+    backgroundColor: "rgba(255,255,255,0.30)",
+    borderColor: "rgba(255,255,255,0.55)",
+  },
+
+  subHeader: {
+    backgroundColor: C_HEADER_2,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    alignItems: "center",
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255,255,255,0.14)",
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(0,0,0,0.08)",
+  },
+  subHeaderTitle: {
+    color: "#fff",
+    fontSize: 14,
+    fontWeight: "900",
+    textAlign: "center",
+    letterSpacing: 0.2,
+    includeFontPadding: false,
+    lineHeight: 18,
+  },
+  subHeaderSyncText: {
+    marginTop: 2,
+    color: "rgba(255,255,255,0.85)",
+    fontSize: 11,
+    fontWeight: "800",
+  },
+  statusBar: {
+    backgroundColor: C_HEADER_2,
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    alignItems: "center",
+  },
+  statusBarText: {
+    color: "rgba(255,255,255,0.86)",
+    fontSize: 11,
+    fontWeight: "800",
   },
 
   searchBarWrap: {
+    marginHorizontal: 14,
     marginTop: 10,
     position: "relative",
   },
   headerSearchIcon: {
     position: "absolute",
-    left: 10,
-    top: 12,
+    left: 12,
+    top: 13,
     zIndex: 1,
   },
   headerSearchInput: {
-    backgroundColor: "rgba(255,255,255,0.18)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.28)",
+    backgroundColor: "#fff",
+    borderWidth: 1.5,
+    borderColor: C_BORDER,
     borderRadius: 12,
-    color: "#fff",
-    paddingLeft: 34,
+    color: C_TEXT,
+    paddingLeft: 38,
     paddingRight: 12,
     paddingVertical: Platform.select({ web: 10, default: 11 }),
+    fontWeight: "700",
   },
 
   orderHintBox: {
-    backgroundColor: "rgba(14,165,233,0.08)",
+    backgroundColor: "#e6f0fa",
     borderWidth: 1,
-    borderColor: "rgba(14,165,233,0.18)",
-    borderRadius: 14,
-    padding: 12,
-    marginHorizontal: 12,
-    marginTop: 12,
+    borderColor: "#c7dceb",
+    paddingVertical: 8,
+    paddingHorizontal: 14,
   },
   orderHintText: {
     color: C_PRIMARY,
-    fontWeight: "700",
+    fontWeight: "800",
     fontSize: 12,
+    textAlign: "center",
   },
 
   emptyBox: {
@@ -2093,18 +2175,24 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: C_BORDER,
     borderRadius: 16,
-    padding: 22,
+    padding: 24,
     alignItems: "center",
-    gap: 8,
+    gap: 9,
+    shadowColor: "#000",
+    shadowOpacity: 0.06,
+    shadowOffset: { width: 0, height: 2 },
+    shadowRadius: 6,
+    elevation: 2,
   },
   emptyTitle: {
     color: C_TEXT,
-    fontWeight: "800",
-    fontSize: 16,
+    fontWeight: "900",
+    fontSize: 17,
   },
   emptyText: {
     color: C_MUTED,
     textAlign: "center",
+    lineHeight: 20,
   },
 
   card: {
@@ -2113,15 +2201,20 @@ const styles = StyleSheet.create({
     borderColor: C_BORDER,
     borderRadius: 16,
     padding: 14,
+    shadowColor: "#000",
+    shadowOpacity: 0.06,
+    shadowOffset: { width: 0, height: 2 },
+    shadowRadius: 6,
+    elevation: 2,
   },
   cardSelected: {
-    borderColor: "rgba(14,165,233,0.45)",
-    backgroundColor: "rgba(14,165,233,0.08)",
+    borderColor: C_PRIMARY,
+    backgroundColor: "#eef5ff",
   },
   cardDragging: {
-    opacity: 0.95,
-    borderColor: "rgba(14,165,233,0.45)",
-    backgroundColor: "rgba(14,165,233,0.08)",
+    opacity: 0.96,
+    borderColor: C_PRIMARY,
+    backgroundColor: "#eef5ff",
   },
   cardTopRow: {
     flexDirection: "row",
@@ -2132,19 +2225,19 @@ const styles = StyleSheet.create({
   cardTopRight: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: 7,
   },
   folderIconWrap: {
     width: 46,
     height: 46,
-    borderRadius: 14,
+    borderRadius: 13,
     alignItems: "center",
     justifyContent: "center",
   },
   courseIconWrap: {
     width: 46,
     height: 46,
-    borderRadius: 14,
+    borderRadius: 13,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: C_PRIMARY,
@@ -2153,7 +2246,9 @@ const styles = StyleSheet.create({
     width: 34,
     height: 34,
     borderRadius: 10,
-    backgroundColor: "rgba(0,0,0,0.04)",
+    backgroundColor: "#edf4fb",
+    borderWidth: 1,
+    borderColor: "#d7e4ef",
     alignItems: "center",
     justifyContent: "center",
   },
@@ -2163,13 +2258,15 @@ const styles = StyleSheet.create({
   reorderActions: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
+    gap: 5,
   },
   reorderBtn: {
     width: 32,
     height: 32,
     borderRadius: 10,
-    backgroundColor: "rgba(0,0,0,0.04)",
+    backgroundColor: "#edf4fb",
+    borderWidth: 1,
+    borderColor: "#d7e4ef",
     alignItems: "center",
     justifyContent: "center",
   },
@@ -2185,16 +2282,18 @@ const styles = StyleSheet.create({
     width: 34,
     height: 34,
     borderRadius: 10,
-    backgroundColor: "rgba(0,0,0,0.04)",
+    backgroundColor: "#edf4fb",
+    borderWidth: 1,
+    borderColor: "#d7e4ef",
     alignItems: "center",
     justifyContent: "center",
   },
   selectCircle: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
+    width: 25,
+    height: 25,
+    borderRadius: 13,
     borderWidth: 2,
-    borderColor: "rgba(15,23,42,0.25)",
+    borderColor: "#a9bbc9",
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#fff",
@@ -2205,65 +2304,72 @@ const styles = StyleSheet.create({
   },
   cardTitle: {
     color: C_TEXT,
-    fontWeight: "800",
+    fontWeight: "900",
     fontSize: 16,
   },
   cardDescription: {
     color: C_MUTED,
     marginTop: 5,
     lineHeight: 18,
+    fontWeight: "600",
   },
   metaRow: {
-    marginTop: 10,
+    marginTop: 11,
   },
   metaText: {
     color: C_MUTED,
-    fontWeight: "600",
+    fontWeight: "800",
+    fontSize: 12,
   },
 
   modalBackdrop: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(0,0,0,0.35)",
+    backgroundColor: "rgba(0,0,0,0.48)",
   },
 
   sheet: {
     position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: 0,
+    left: 12,
+    right: 12,
+    bottom: 12,
     backgroundColor: "#fff",
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    paddingHorizontal: 16,
-    paddingTop: 10,
-    paddingBottom: 16,
-    borderTopWidth: 1,
+    borderRadius: 20,
+    padding: 18,
+    borderWidth: 1,
     borderColor: C_BORDER,
+    shadowColor: "#000",
+    shadowOpacity: 0.2,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 16,
   },
   sheetHandle: {
     alignSelf: "center",
     width: 48,
     height: 5,
     borderRadius: 999,
-    backgroundColor: "rgba(0,0,0,0.14)",
+    backgroundColor: "#c9d3db",
     marginBottom: 12,
   },
   sheetHeader: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    marginBottom: 10,
+    marginBottom: 12,
+    gap: 10,
   },
   sheetTitle: {
+    flex: 1,
+    minWidth: 0,
     color: C_TEXT,
     fontSize: 18,
-    fontWeight: "800",
+    fontWeight: "900",
   },
   sheetCloseBtn: {
-    width: 34,
-    height: 34,
-    borderRadius: 10,
-    backgroundColor: "rgba(0,0,0,0.05)",
+    width: 36,
+    height: 36,
+    borderRadius: 11,
+    backgroundColor: "#f0f4f8",
     alignItems: "center",
     justifyContent: "center",
   },
@@ -2272,16 +2378,17 @@ const styles = StyleSheet.create({
     color: C_MUTED,
     fontSize: 12,
     marginBottom: 6,
-    fontWeight: "700",
+    fontWeight: "800",
   },
   input: {
-    backgroundColor: "rgba(0,0,0,0.03)",
-    borderWidth: 1,
+    backgroundColor: "#fff",
+    borderWidth: 1.5,
     borderColor: C_BORDER,
     borderRadius: 12,
     color: C_TEXT,
-    paddingHorizontal: 12,
+    paddingHorizontal: 14,
     paddingVertical: Platform.select({ web: 10, default: 11 }),
+    fontSize: 15,
   },
   textarea: {
     minHeight: 88,
@@ -2301,8 +2408,8 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   colorDotSelected: {
-    borderWidth: 2,
-    borderColor: "#fff",
+    borderWidth: 3,
+    borderColor: C_TEXT,
   },
 
   iconsGrid: {
@@ -2314,15 +2421,15 @@ const styles = StyleSheet.create({
     width: 42,
     height: 42,
     borderRadius: 12,
-    borderWidth: 1,
+    borderWidth: 1.5,
     borderColor: C_BORDER,
-    backgroundColor: "rgba(0,0,0,0.03)",
+    backgroundColor: "#f6f9fb",
     alignItems: "center",
     justifyContent: "center",
   },
   iconOptionSelected: {
-    borderColor: "rgba(14,165,233,0.45)",
-    backgroundColor: "rgba(14,165,233,0.10)",
+    borderColor: C_PRIMARY,
+    backgroundColor: "#e6f0fa",
   },
 
   saveBtnFull: {
@@ -2337,7 +2444,7 @@ const styles = StyleSheet.create({
   },
   saveBtnFullText: {
     color: "#fff",
-    fontWeight: "800",
+    fontWeight: "900",
   },
 
   actionSheet: {
@@ -2350,10 +2457,15 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: C_BORDER,
     padding: 14,
+    shadowColor: "#000",
+    shadowOpacity: 0.2,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 16,
   },
   actionSheetTitle: {
     color: C_TEXT,
-    fontWeight: "800",
+    fontWeight: "900",
     fontSize: 16,
     marginBottom: 8,
   },
@@ -2361,24 +2473,24 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    minHeight: 46,
-    paddingHorizontal: 8,
+    minHeight: 48,
+    paddingHorizontal: 10,
     borderRadius: 12,
   },
   actionRowText: {
     color: C_TEXT,
-    fontWeight: "700",
+    fontWeight: "800",
   },
   cancelBtn: {
     marginTop: 8,
-    backgroundColor: "rgba(0,0,0,0.05)",
+    backgroundColor: "#f0f4f8",
     borderRadius: 12,
     paddingVertical: 12,
     alignItems: "center",
   },
   cancelBtnText: {
-    color: C_TEXT,
-    fontWeight: "800",
+    color: C_MUTED,
+    fontWeight: "900",
   },
 
   confirmCard: {
@@ -2386,18 +2498,23 @@ const styles = StyleSheet.create({
     left: 16,
     right: 16,
     top: "50%",
-    transform: [{ translateY: -110 }],
+    transform: [{ translateY: -112 }],
     backgroundColor: "#fff",
     borderRadius: 20,
     borderWidth: 1,
     borderColor: C_BORDER,
-    padding: 18,
+    padding: 20,
+    shadowColor: "#000",
+    shadowOpacity: 0.2,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 16,
   },
   confirmIconWrap: {
     width: 44,
     height: 44,
     borderRadius: 14,
-    backgroundColor: "rgba(239,68,68,0.12)",
+    backgroundColor: "#fff1f1",
     alignItems: "center",
     justifyContent: "center",
     marginBottom: 12,
@@ -2406,7 +2523,7 @@ const styles = StyleSheet.create({
   confirmTitle: {
     color: C_TEXT,
     fontSize: 18,
-    fontWeight: "800",
+    fontWeight: "900",
     textAlign: "center",
   },
   confirmText: {
@@ -2414,6 +2531,7 @@ const styles = StyleSheet.create({
     color: C_MUTED,
     textAlign: "center",
     lineHeight: 20,
+    fontWeight: "600",
   },
   confirmActions: {
     flexDirection: "row",
@@ -2424,13 +2542,13 @@ const styles = StyleSheet.create({
     flex: 1,
     minHeight: 46,
     borderRadius: 12,
-    backgroundColor: "rgba(0,0,0,0.05)",
+    backgroundColor: "#f0f4f8",
     alignItems: "center",
     justifyContent: "center",
   },
   confirmBtnSecondaryText: {
-    color: C_TEXT,
-    fontWeight: "800",
+    color: C_MUTED,
+    fontWeight: "900",
   },
   confirmBtnDanger: {
     flex: 1,
@@ -2444,7 +2562,7 @@ const styles = StyleSheet.create({
   },
   confirmBtnDangerText: {
     color: "#fff",
-    fontWeight: "800",
+    fontWeight: "900",
   },
   btnDisabled: {
     opacity: 0.65,
@@ -2453,7 +2571,7 @@ const styles = StyleSheet.create({
   moveHelperText: {
     color: C_MUTED,
     marginBottom: 10,
-    fontWeight: "600",
+    fontWeight: "800",
   },
   moveTopActions: {
     flexDirection: "row",
@@ -2464,9 +2582,9 @@ const styles = StyleSheet.create({
     flex: 1,
     minHeight: 42,
     borderRadius: 12,
-    borderWidth: 1,
+    borderWidth: 1.5,
     borderColor: C_BORDER,
-    backgroundColor: "rgba(0,0,0,0.03)",
+    backgroundColor: "#f6f9fb",
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
@@ -2475,20 +2593,20 @@ const styles = StyleSheet.create({
   },
   moveNavBtnText: {
     color: C_TEXT,
-    fontWeight: "700",
+    fontWeight: "800",
   },
   moveChooseHereBtn: {
-    backgroundColor: "rgba(14,165,233,0.08)",
-    borderColor: "rgba(14,165,233,0.25)",
+    backgroundColor: "#e6f0fa",
+    borderColor: "#c7dceb",
   },
   moveChooseHereText: {
     color: C_PRIMARY,
-    fontWeight: "800",
+    fontWeight: "900",
   },
   destinationRow: {
     minHeight: 48,
     borderRadius: 12,
-    borderWidth: 1,
+    borderWidth: 1.5,
     borderColor: C_BORDER,
     backgroundColor: "#fff",
     paddingHorizontal: 12,
@@ -2500,12 +2618,12 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   destinationRowSelected: {
-    backgroundColor: "rgba(14,165,233,0.08)",
-    borderColor: "rgba(14,165,233,0.35)",
+    backgroundColor: "#e6f0fa",
+    borderColor: C_PRIMARY,
   },
   destinationText: {
     color: C_TEXT,
-    fontWeight: "600",
+    fontWeight: "800",
     flex: 1,
   },
   destinationRight: {
@@ -2516,7 +2634,7 @@ const styles = StyleSheet.create({
   chevronText: {
     color: C_MUTED,
     fontSize: 20,
-    fontWeight: "700",
+    fontWeight: "900",
     lineHeight: 20,
   },
   emptyMiniBox: {
@@ -2524,11 +2642,12 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     borderWidth: 1,
     borderColor: C_BORDER,
-    backgroundColor: "rgba(0,0,0,0.03)",
+    backgroundColor: "#f6f9fb",
     padding: 14,
     alignItems: "center",
   },
   emptyMiniText: {
     color: C_MUTED,
+    fontWeight: "700",
   },
 });

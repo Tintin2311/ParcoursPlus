@@ -12,7 +12,6 @@ import {
   Image,
 } from "react-native";
 import Svg, { Path } from "react-native-svg";
-import { BarChart3 } from "lucide-react-native";
 
 /* ======================= Types ======================= */
 type SetPageFn = (page: any) => void;
@@ -32,7 +31,6 @@ type Props = { setPage: SetPageFn };
 /* ======================= Couleurs ======================= */
 const PAGE_BG = "#EDF2F6";
 const HEADER_BG = "#1F5B86";
-const HEADER_ICON_BG = "#2D6C97";
 const HEADER_TITLE = "#FFFFFF";
 
 const CONTENT_BG = "#EEF3F7";
@@ -100,8 +98,6 @@ const GestionResultats: React.FC<Props> = ({ setPage }) => {
   const titleSize = isDesktop ? 20 : isTablet ? 18 : verySmallPhone ? 15 : 16;
   const subtitleSize = isDesktop ? 14 : isTablet ? 13 : 12;
   const headerTitleSize = isDesktop ? 20 : isTablet ? 19 : 18;
-  const headerIconSize = isDesktop ? 18 : isTablet ? 18 : 17;
-  const headerIconBox = isDesktop ? 34 : isTablet ? 34 : 32;
 
   const items = useMemo<MenuItem[]>(
     () => [
@@ -140,20 +136,6 @@ const GestionResultats: React.FC<Props> = ({ setPage }) => {
         ]}
       >
         <View style={styles.headerLeft}>
-          <View
-            style={[
-              styles.headerIconWrap,
-              {
-                width: headerIconBox,
-                height: headerIconBox,
-                borderRadius: 10,
-                marginRight: 10,
-              },
-            ]}
-          >
-            <BarChart3 size={headerIconSize} color="#FFFFFF" strokeWidth={2.2} />
-          </View>
-
           <Text style={[styles.headerTitle, { fontSize: headerTitleSize }]}>
             BARÈMES
           </Text>
@@ -325,12 +307,6 @@ const styles = StyleSheet.create({
   headerLeft: {
     flexDirection: "row",
     alignItems: "center",
-  },
-
-  headerIconWrap: {
-    backgroundColor: HEADER_ICON_BG,
-    alignItems: "center",
-    justifyContent: "center",
   },
 
   headerTitle: {

@@ -33,6 +33,14 @@ type EleveMin = {
   name?: string | null;
   nom?: string | null;
   group_id?: string | null;
+
+  // Mode session groupe
+  isGroupSession?: boolean | null;
+  groupSessionId?: string | null;
+  groupSessionCode?: string | null;
+  groupSessionName?: string | null;
+  groupStudents?: EleveMin[] | null;
+  targetStudentIds?: string[] | null;
 };
 
 type ParcoursRow = {
@@ -74,8 +82,71 @@ const C_GREEN = "#22C55E";
 const C_ORANGE = "#F97316";
 const C_RED = "#EF4444";
 
+// ─────────────────────────────────────────────
+// Titres des niveaux
+// ─────────────────────────────────────────────
+
+const LEVEL_TITLES: Record<number, string> = {
+  1: "Touriste perdu",
+  2: "Ramasseur de plots",
+  3: "Explorateur du quartier",
+  4: "Aventurier novice",
+  5: "Pisteur des sentiers",
+  6: "Éclaireur des bois",
+  7: "Gardien des balises",
+  8: "Maître cartographe",
+  9: "Seigneur des boussoles",
+  10: "Légende de l’orientation",
+};
+
+const getLevelTitle = (level: number) => {
+  return LEVEL_TITLES[level] ?? "Mythe des cartes";
+};
+
+// ─────────────────────────────────────────────
+// Système XP exponentiel
+// Niveau 1 : 100 pts
+// Niveau 2 : 200 pts
+// Niveau 3 : 400 pts
+// Niveau 4 : 800 pts
+// etc.
+// Les points totaux ne repartent jamais à 0.
+// ─────────────────────────────────────────────
+
+const BASE_XP_LEVEL = 100;
+
+const getLevelData = (totalXpRaw: number) => {
+  const totalXp = Math.max(0, Math.floor(Number(totalXpRaw) || 0));
+
+  let level = 1;
+  let xpNeededForCurrentLevel = BASE_XP_LEVEL;
+  let accumulatedBeforeLevel = 0;
+
+  while (totalXp >= accumulatedBeforeLevel + xpNeededForCurrentLevel) {
+    accumulatedBeforeLevel += xpNeededForCurrentLevel;
+    level += 1;
+    xpNeededForCurrentLevel *= 2;
+  }
+
+  const xpInCurrentLevel = totalXp - accumulatedBeforeLevel;
+  const xpProgress =
+    xpNeededForCurrentLevel > 0
+      ? (xpInCurrentLevel / xpNeededForCurrentLevel) * 100
+      : 0;
+
+  return {
+    level,
+    totalXp,
+    xpInCurrentLevel,
+    xpNeededForCurrentLevel,
+    accumulatedBeforeLevel,
+    xpProgress,
+    title: getLevelTitle(level),
+  };
+};
+
 const getDisplayName = (row: any) =>
-  String(row?.nom ?? row?.name ?? "Sans nom");
+  String(row?.nom ?? row?.name ?? row?.display_name ?? "Sans nom");
 
 const normalizeAssoc = (value: any): string[] => {
   if (!value) return [];
@@ -126,6 +197,50 @@ const formatDateMs = (value?: string | null) => {
   const t = new Date(value).getTime();
   return Number.isFinite(t) ? t : 0;
 };
+
+function getStudentId(eleve?: EleveMin | null) {
+  return eleve?.id ?? eleve?.uuid ?? null;
+}
+
+function getTargetStudentIds(eleve?: EleveMin | null) {
+  if (!eleve) return [];
+
+  if (eleve.isGroupSession && Array.isArray(eleve.targetStudentIds)) {
+    return eleve.targetStudentIds.map(String).filter(Boolean);
+  }
+
+  if (eleve.isGroupSession && Array.isArray(eleve.groupStudents)) {
+    return eleve.groupStudents
+      .map((student) => getStudentId(student))
+      .filter(Boolean)
+      .map(String);
+  }
+
+  const singleId = getStudentId(eleve);
+  return singleId ? [String(singleId)] : [];
+}
+
+function getMainStudentForDisplay(eleve?: EleveMin | null) {
+  if (!eleve) return null;
+
+  if (eleve.isGroupSession && Array.isArray(eleve.groupStudents) && eleve.groupStudents.length > 0) {
+    return eleve.groupStudents[0];
+  }
+
+  return eleve;
+}
+
+function getGroupDisplayName(eleve?: EleveMin | null) {
+  if (!eleve?.isGroupSession) return null;
+
+  if (eleve.groupSessionName) return eleve.groupSessionName;
+
+  if (Array.isArray(eleve.groupStudents) && eleve.groupStudents.length > 0) {
+    return eleve.groupStudents.map((student) => getDisplayName(student)).join(" / ");
+  }
+
+  return eleve.groupSessionCode ? `Groupe ${eleve.groupSessionCode}` : "Session groupe";
+}
 
 // ─────────────────────────────────────────────
 // ActionCard — style carte de jeu
@@ -266,14 +381,20 @@ const AccueilEleve: React.FC<Props> = ({
   const backgroundImage =
     isLandscape || isLargeScreen ? BG_PAYSAGE : BG_MOBILE;
 
-  const studentId = eleveConnecte?.id ?? eleveConnecte?.uuid ?? null;
-  const groupId = eleveConnecte?.group_id ?? null;
+  const isGroupSession = !!eleveConnecte?.isGroupSession;
+  const mainStudent = getMainStudentForDisplay(eleveConnecte);
+  const studentId = getStudentId(mainStudent);
+  const targetStudentIds = React.useMemo(() => getTargetStudentIds(eleveConnecte), [eleveConnecte]);
+  const groupId = mainStudent?.group_id ?? eleveConnecte?.group_id ?? null;
+  const groupDisplayName = getGroupDisplayName(eleveConnecte);
 
   const nom = (
-    eleveConnecte?.display_name ??
-    eleveConnecte?.name ??
-    eleveConnecte?.nom ??
-    "AVENTURIER"
+    isGroupSession
+      ? groupDisplayName ?? "SESSION GROUPE"
+      : eleveConnecte?.display_name ??
+        eleveConnecte?.name ??
+        eleveConnecte?.nom ??
+        "AVENTURIER"
   ).toUpperCase();
 
   const [loading, setLoading] = React.useState(true);
@@ -286,20 +407,41 @@ const AccueilEleve: React.FC<Props> = ({
   const [confirmVisible, setConfirmVisible] = React.useState(false);
   const [loggingOut, setLoggingOut] = React.useState(false);
 
+  // ─────────────────────────────────────────────
+  // Popup montée de niveau
+  // ─────────────────────────────────────────────
+
+  const [levelUpVisible, setLevelUpVisible] = React.useState(false);
+  const [newLevelTitle, setNewLevelTitle] = React.useState("");
+
+  const previousLevelRef = React.useRef(1);
+
   React.useEffect(() => {
     const loadHome = async () => {
       setLoading(true);
       try {
-        if (!studentId) return;
+        if (!studentId && targetStudentIds.length === 0) return;
+
+        const statsQueryIds = targetStudentIds.length > 0 ? targetStudentIds : studentId ? [String(studentId)] : [];
+
+        const statsPromise =
+          statsQueryIds.length > 1
+            ? supabase
+                .from("eleve_parcours_stats")
+                .select(
+                  "student_id,parcours_id,best_points,last_points,best_score,last_score,total_balises,tentatives_count,parcours_termine,updated_at,created_at"
+                )
+                .in("student_id", statsQueryIds)
+            : supabase
+                .from("eleve_parcours_stats")
+                .select(
+                  "student_id,parcours_id,best_points,last_points,best_score,last_score,total_balises,tentatives_count,parcours_termine,updated_at,created_at"
+                )
+                .eq("student_id", statsQueryIds[0]);
 
         const [{ data: statsData }, { data: parcoursData }] =
           await Promise.all([
-            supabase
-              .from("eleve_parcours_stats")
-              .select(
-                "parcours_id,best_points,last_points,best_score,last_score,total_balises,tentatives_count,parcours_termine,updated_at,created_at"
-              )
-              .eq("student_id", studentId),
+            statsPromise,
             supabase
               .from("parcours")
               .select("*")
@@ -307,27 +449,28 @@ const AccueilEleve: React.FC<Props> = ({
               .order("created_at", { ascending: true }),
           ]);
 
-        const stats = ((statsData as StatRow[]) || []).filter(Boolean);
-        const allParcours = (
-          (parcoursData as ParcoursRow[]) || []
-        ).filter(Boolean);
+        const stats = ((statsData as any[]) || []).filter(Boolean) as StatRow[];
+        const allParcours = ((parcoursData as ParcoursRow[]) || []).filter(Boolean);
 
         const visibleParcours = groupId
-          ? allParcours.filter((p) =>
-              isParcoursVisibleForGroup(p, groupId)
-            )
+          ? allParcours.filter((p) => isParcoursVisibleForGroup(p, groupId))
           : allParcours;
 
         const visibleIds = new Set(visibleParcours.map((p) => String(p.id)));
-        const visibleStats = stats.filter((s) =>
-          visibleIds.has(String(s.parcours_id))
-        );
+        const visibleStats = stats.filter((s) => visibleIds.has(String(s.parcours_id)));
 
-        const totalPts = visibleStats.reduce((sum, row) => {
+        // En mode groupe, on affiche la moyenne simple des points du groupe,
+        // pour éviter de tripler artificiellement le score affiché quand 3 élèves sont ensemble.
+        const rawTotalPts = visibleStats.reduce((sum, row) => {
           return sum + Number(row.best_points ?? row.last_points ?? 0);
         }, 0);
+        const divisor = isGroupSession ? Math.max(1, statsQueryIds.length) : 1;
+        const totalPts = rawTotalPts / divisor;
 
-        const completed = visibleStats.filter(isStatCompleted).length;
+        const completedByParcours = new Set(
+          visibleStats.filter(isStatCompleted).map((row) => String(row.parcours_id))
+        );
+        const completed = completedByParcours.size;
 
         const startedNotDoneStats = visibleStats
           .filter((row) => {
@@ -347,9 +490,7 @@ const AccueilEleve: React.FC<Props> = ({
 
         const lastContinue = startedNotDoneStats[0]
           ? visibleParcours.find(
-              (p) =>
-                String(p.id) ===
-                String(startedNotDoneStats[0].parcours_id)
+              (p) => String(p.id) === String(startedNotDoneStats[0].parcours_id)
             ) ?? null
           : null;
 
@@ -363,11 +504,27 @@ const AccueilEleve: React.FC<Props> = ({
     };
 
     loadHome();
-  }, [studentId, groupId]);
+  }, [studentId, targetStudentIds, groupId, isGroupSession]);
 
-  const level = Math.floor(score / 500) + 1;
-  const currentXp = score % 500;
-  const xpProgress = totalParcours > 0 ? (currentXp / 500) * 100 : 0;
+  const levelData = React.useMemo(() => getLevelData(score), [score]);
+
+  const level = levelData.level;
+  const currentXp = levelData.xpInCurrentLevel;
+  const xpNeeded = levelData.xpNeededForCurrentLevel;
+  const xpProgress = levelData.xpProgress;
+  const currentTitle = levelData.title;
+
+  React.useEffect(() => {
+    const oldLevel = previousLevelRef.current;
+
+    if (level > oldLevel) {
+      setNewLevelTitle(currentTitle);
+      setLevelUpVisible(true);
+    }
+
+    previousLevelRef.current = level;
+  }, [level, currentTitle]);
+
   const globalProgress =
     totalParcours > 0
       ? Math.round((completedParcours / totalParcours) * 100)
@@ -389,6 +546,10 @@ const AccueilEleve: React.FC<Props> = ({
     setParcoursActif?.(continueParcours);
     setPage("EcrireCodeBaliseEleve");
   };
+
+  const subtitleGroup = isGroupSession
+    ? `${targetStudentIds.length} élèves connectés avec le code ${eleveConnecte?.groupSessionCode ?? "groupe"}`
+    : null;
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -413,6 +574,11 @@ const AccueilEleve: React.FC<Props> = ({
               <Text numberOfLines={1} style={styles.nameText}>
                 {nom}
               </Text>
+              {!!subtitleGroup && (
+                <Text numberOfLines={1} style={styles.groupSubText}>
+                  {subtitleGroup}
+                </Text>
+              )}
             </View>
 
             <Pressable
@@ -430,6 +596,21 @@ const AccueilEleve: React.FC<Props> = ({
               isLargeScreen && styles.scrollContentLarge,
             ]}
           >
+            {/* ── Panneau mode groupe ── */}
+            {isGroupSession && (
+              <View style={styles.groupSessionPanel}>
+                <View style={styles.groupSessionIcon}>
+                  <Feather name="users" size={19} color="#0f766e" />
+                </View>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={styles.groupSessionTitle}>Mode groupe actif</Text>
+                  <Text style={styles.groupSessionText} numberOfLines={2}>
+                    Les résultats seront enregistrés pour tous les élèves de cette session.
+                  </Text>
+                </View>
+              </View>
+            )}
+
             {/* ── Panneau niveau / XP ── */}
             <View
               style={[
@@ -444,12 +625,14 @@ const AccueilEleve: React.FC<Props> = ({
 
               <View style={styles.levelInfo}>
                 <View style={styles.levelTopRow}>
-                  <Text style={styles.levelTitle}>EXPÉRIENCE</Text>
+                  <Text numberOfLines={1} style={styles.levelTitle}>
+                    {currentTitle}
+                  </Text>
                   {loading ? (
                     <ActivityIndicator color="#FFFFFF" size="small" />
                   ) : (
                     <Text style={styles.levelValue}>
-                      {currentXp}/500 pts
+                      {currentXp}/{xpNeeded} pts
                     </Text>
                   )}
                 </View>
@@ -473,8 +656,19 @@ const AccueilEleve: React.FC<Props> = ({
                     numberOfLines={1}
                     style={styles.progressMetaText}
                   >
-                    Parcours terminés : {completedParcours}/
-                    {totalParcours}
+                    Total : {Math.round(score)} pts
+                  </Text>
+                  <Text style={styles.progressMetaText}>
+                    {Math.round(xpProgress)}%
+                  </Text>
+                </View>
+
+                <View style={styles.progressMetaRowSecond}>
+                  <Text
+                    numberOfLines={1}
+                    style={styles.progressMetaText}
+                  >
+                    Parcours terminés : {completedParcours}/{totalParcours}
                   </Text>
                   <Text style={styles.progressMetaText}>
                     {globalProgress}%
@@ -564,6 +758,45 @@ const AccueilEleve: React.FC<Props> = ({
             </View>
           </Modal>
 
+          {/* ── Modal montée de niveau ── */}
+          <Modal
+            transparent
+            visible={levelUpVisible}
+            animationType="fade"
+          >
+            <View style={styles.levelUpOverlay}>
+              <LinearGradient
+                colors={["#0f2740", "#13395f", "#1b4d80"]}
+                style={styles.levelUpBox}
+              >
+                <Text style={styles.levelUpSmall}>
+                  FÉLICITATIONS
+                </Text>
+
+                <Text style={styles.levelUpTitle}>
+                  Niveau {level}
+                </Text>
+
+                <Text style={styles.levelUpText}>
+                  Vous devenez
+                </Text>
+
+                <Text style={styles.levelUpRank}>
+                  {newLevelTitle}
+                </Text>
+
+                <Pressable
+                  style={styles.levelUpButton}
+                  onPress={() => setLevelUpVisible(false)}
+                >
+                  <Text style={styles.levelUpButtonText}>
+                    Continuer
+                  </Text>
+                </Pressable>
+              </LinearGradient>
+            </View>
+          </Modal>
+
           <BottomBarEleve
             currentPage="AccueilEleve"
             onNavigate={(page) => setPage(page)}
@@ -616,6 +849,7 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255,255,255,0.26)",
     justifyContent: "center",
     paddingHorizontal: 14,
+    paddingVertical: 6,
   },
 
   nameText: {
@@ -623,6 +857,13 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: "900",
     letterSpacing: 1.2,
+  },
+
+  groupSubText: {
+    color: "rgba(255,255,255,0.78)",
+    fontSize: 11,
+    fontWeight: "800",
+    marginTop: 2,
   },
 
   logoutBtn: {
@@ -649,9 +890,46 @@ const styles = StyleSheet.create({
     alignSelf: "center",
   },
 
+  groupSessionPanel: {
+    minHeight: 66,
+    borderRadius: 20,
+    backgroundColor: "rgba(240,253,250,0.88)",
+    borderWidth: 1,
+    borderColor: "rgba(20,184,166,0.35)",
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 10,
+    marginBottom: 12,
+  },
+
+  groupSessionIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 999,
+    backgroundColor: "rgba(20,184,166,0.16)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  groupSessionTitle: {
+    color: "#0f766e",
+    fontSize: 14,
+    fontWeight: "900",
+  },
+
+  groupSessionText: {
+    color: "rgba(15,118,110,0.78)",
+    fontSize: 12,
+    fontWeight: "700",
+    marginTop: 2,
+    lineHeight: 16,
+  },
+
   // ── Panneau niveau ────────────────────────
   levelPanel: {
-    minHeight: 98,
+    minHeight: 108,
     borderRadius: 24,
     backgroundColor: "rgba(8,30,48,0.76)",
     borderWidth: 1,
@@ -669,7 +947,7 @@ const styles = StyleSheet.create({
   },
 
   levelPanelSmall: {
-    minHeight: 92,
+    minHeight: 104,
     padding: 10,
   },
 
@@ -711,10 +989,11 @@ const styles = StyleSheet.create({
   },
 
   levelTitle: {
+    flex: 1,
     color: "#FFFFFF",
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: "900",
-    letterSpacing: 1.2,
+    letterSpacing: 0.7,
   },
 
   levelValue: {
@@ -741,6 +1020,13 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     gap: 8,
     marginTop: 8,
+  },
+
+  progressMetaRowSecond: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    gap: 8,
+    marginTop: 3,
   },
 
   progressMetaText: {
@@ -944,5 +1230,69 @@ const styles = StyleSheet.create({
   confirmText: {
     color: "#FFFFFF",
     fontWeight: "900",
+  },
+
+  // ── Popup montée de niveau ─────────────────
+
+  levelUpOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.65)",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 24,
+  },
+
+  levelUpBox: {
+    width: "100%",
+    maxWidth: 380,
+    borderRadius: 28,
+    paddingVertical: 30,
+    paddingHorizontal: 24,
+    alignItems: "center",
+    borderWidth: 2,
+    borderColor: "rgba(255,255,255,0.18)",
+  },
+
+  levelUpSmall: {
+    color: "#FBBF24",
+    fontSize: 12,
+    fontWeight: "900",
+    letterSpacing: 2,
+    marginBottom: 10,
+  },
+
+  levelUpTitle: {
+    color: "#FFFFFF",
+    fontSize: 36,
+    fontWeight: "900",
+    marginBottom: 10,
+  },
+
+  levelUpText: {
+    color: "rgba(255,255,255,0.78)",
+    fontSize: 16,
+    fontWeight: "700",
+    marginBottom: 10,
+  },
+
+  levelUpRank: {
+    color: "#FDE68A",
+    fontSize: 24,
+    fontWeight: "900",
+    textAlign: "center",
+    marginBottom: 24,
+  },
+
+  levelUpButton: {
+    backgroundColor: "#FBBF24",
+    borderRadius: 16,
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+  },
+
+  levelUpButtonText: {
+    color: "#0f172a",
+    fontWeight: "900",
+    fontSize: 15,
   },
 });

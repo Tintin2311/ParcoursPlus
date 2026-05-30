@@ -119,6 +119,7 @@ type Props = {
   eleveConnecte?: EleveConnecte | null;
   parcoursActif?: ParcoursActif | null;
   handleDeconnexion?: () => Promise<void> | void;
+  pagePrecedente?: any;
 };
 
 const BG_GAME =
@@ -751,6 +752,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   eleveConnecte,
   parcoursActif,
   handleDeconnexion,
+  pagePrecedente = "EcrireResultat",
 }) => {
   const { width, height } = useWindowDimensions();
 
@@ -1042,6 +1044,11 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       setLoggingOut(false);
     }
   }, [handleDeconnexion, loggingOut, setPage]);
+
+  const handleRetour = useCallback(() => {
+    Keyboard.dismiss();
+    setPage(pagePrecedente);
+  }, [pagePrecedente, setPage]);
 
   const resolveStudent = useCallback(async () => {
     let nextStudentId = eleveConnecte?.id ?? null;
@@ -2210,7 +2217,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         >
           <View style={styles.headerZone}>
             <View style={[styles.topBar, isPoinconParcours && styles.topBarCompact]}>
-              <TouchableOpacity activeOpacity={0.9} onPress={() => setPage("EcrireResultat")} style={[styles.iconBtn, isPoinconParcours && styles.iconBtnCompact]}>
+              <TouchableOpacity activeOpacity={0.9} onPress={handleRetour} style={[styles.iconBtn, isPoinconParcours && styles.iconBtnCompact]}>
                 <Feather name="arrow-left" size={isPoinconParcours ? 16 : 18} color="#fff" />
               </TouchableOpacity>
 

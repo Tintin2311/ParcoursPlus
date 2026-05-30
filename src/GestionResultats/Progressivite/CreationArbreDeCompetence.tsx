@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Modal,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -20,6 +22,7 @@ type Props = {
   carte: any;
   onBack: () => void;
   onOpenCarte?: (carte: any) => void;
+  setPage?: (page: any) => void;
 };
 
 type Outil =
@@ -28,6 +31,7 @@ type Outil =
   | "deplacer"
   | "relier"
   | "ciseaux"
+  | "conditions"
   | "supprimer";
 
 type Noeud = {
@@ -36,6 +40,7 @@ type Noeud = {
   ligne: number;
   colonne: number;
   color: string;
+  conditionsActive?: boolean;
 };
 
 type Lien = {
@@ -49,6 +54,7 @@ type PageArbre = {
   nom: string;
   noeuds: Noeud[];
   liens: Lien[];
+  conditionsDeblocage?: Record<string, any[]>;
 };
 
 type PendingAction = "move" | "add" | null;
@@ -67,6 +73,7 @@ const TEXT_BG = "#E8F1FD";
 const DANGER = "#EF4444";
 const SUCCESS = "#22C55E";
 const WARNING = "#F59E0B";
+const LOCK = HEADER_BG;
 
 const COLORS = [
   "#1F5B86",
@@ -83,12 +90,25 @@ function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
 
+function nukeConditionIfUnlocked(
+  oldConditions: Record<string, any[]>,
+  nodeId: string,
+  nextLockedState: boolean
+) {
+  if (nextLockedState) return oldConditions;
+
+  const next = { ...oldConditions };
+  delete next[nodeId];
+  return next;
+}
+
 function createDefaultPage(): PageArbre {
   return {
     id: uid(),
     nom: "Barème 1",
     noeuds: [],
     liens: [],
+    conditionsDeblocage: {},
   };
 }
 
@@ -96,6 +116,7 @@ export default function CreationArbreDeCompetence({
   carte,
   onBack,
   onOpenCarte,
+  setPage,
 }: Props) {
   const { width, height } = useWindowDimensions();
   const isPhone = width < 760;
@@ -111,6 +132,11 @@ export default function CreationArbreDeCompetence({
   const ligneToY = (ligne: number) => GRID_TOP + ligne * (CELL_H + ROW_GAP);
 
   const storageKey = `arbre_competence_${carte?.id || "default"}`;
+
+  const horizontalScrollRef = useRef<ScrollView | null>(null);
+  const verticalScrollRef = useRef<ScrollView | null>(null);
+  const lastScrollRef = useRef({ x: 0, y: 0 });
+  const restoredRef = useRef(false);
 
   const [outil, setOutil] = useState<Outil>("selection");
   const [pages, setPages] = useState<PageArbre[]>([createDefaultPage()]);
@@ -143,74 +169,6 @@ export default function CreationArbreDeCompetence({
   const loadedRef = useRef(false);
   const colorIndex = useRef(1);
 
-  useEffect(() => {
-    let mounted = true;
-
-    async function load() {
-      try {
-        const raw = await AsyncStorage.getItem(storageKey);
-        if (!mounted) return;
-
-        if (raw) {
-          const data = JSON.parse(raw);
-
-          if (Array.isArray(data?.pages) && data.pages.length > 0) {
-            const fixedPages: PageArbre[] = data.pages.map((p: any) => ({
-              ...p,
-              liens: Array.isArray(p.liens) ? p.liens : [],
-              noeuds:
-                Array.isArray(p.noeuds) && p.noeuds.length > 0
-                  ? p.noeuds
-                  : createDefaultPage().noeuds,
-            }));
-
-            setPages(fixedPages);
-            setPageId(data.pageId || fixedPages[0].id);
-            setSelectedId(
-              data.selectedId || fixedPages[0]?.noeuds?.[0]?.id || ""
-            );
-          } else {
-            const first = createDefaultPage();
-            setPages([first]);
-            setPageId(first.id);
-            setSelectedId(first.noeuds[0]?.id || "");
-          }
-        } else {
-          const first = createDefaultPage();
-          setPages([first]);
-          setPageId(first.id);
-          setSelectedId(first.noeuds[0]?.id || "");
-        }
-      } catch {
-        const first = createDefaultPage();
-        setPages([first]);
-        setPageId(first.id);
-        setSelectedId(first.noeuds[0]?.id || "");
-      } finally {
-        loadedRef.current = true;
-      }
-    }
-
-    load();
-
-    return () => {
-      mounted = false;
-    };
-  }, [storageKey]);
-
-  useEffect(() => {
-    if (!loadedRef.current) return;
-
-    AsyncStorage.setItem(
-      storageKey,
-      JSON.stringify({
-        pages,
-        pageId,
-        selectedId,
-      })
-    ).catch(() => {});
-  }, [pages, pageId, selectedId, storageKey]);
-
   const pageActive = useMemo(
     () => pages.find((p) => p.id === pageId) || pages[0],
     [pages, pageId]
@@ -218,11 +176,16 @@ export default function CreationArbreDeCompetence({
 
   const noeuds = pageActive?.noeuds || [];
   const liens = pageActive?.liens || [];
+  const conditionsDeblocage = pageActive?.conditionsDeblocage || {};
 
   const selectedNode = useMemo(
     () => noeuds.find((n) => n.id === selectedId) || noeuds[0] || null,
     [noeuds, selectedId]
   );
+
+  const selectedNodeConditionsCount = selectedNode
+    ? conditionsDeblocage[selectedNode.id]?.length || 0
+    : 0;
 
   const moveSource = useMemo(
     () => noeuds.find((n) => n.id === moveSourceId) || null,
@@ -248,6 +211,8 @@ export default function CreationArbreDeCompetence({
     if (outil === "relier") {
       return linkStartId ? "Clique sur une carte voisine" : "Clique sur la carte de départ";
     }
+
+    if (outil === "conditions") return "Clique sur une carte pour ajouter ou retirer le cadenas de conditions de déblocage";
 
     if (outil === "supprimer") return "Clique sur une carte à supprimer";
 
@@ -293,6 +258,163 @@ export default function CreationArbreDeCompetence({
 
   const canScrollCanvas =
     !breakWarningVisible && !quitWarningVisible && !renameVisible && !deleteConfirmVisible;
+
+  const showConditionsOverlay =
+    outil === "conditions" &&
+    !!selectedNode?.conditionsActive &&
+    !isBlockingPromptOpen &&
+    !breakWarningVisible &&
+    !quitWarningVisible &&
+    !deleteNodeVisible;
+
+  useEffect(() => {
+    let mounted = true;
+
+    async function load() {
+      try {
+        const raw = await AsyncStorage.getItem(storageKey);
+        if (!mounted) return;
+
+        const g = globalThis as any;
+        const wantsRestore =
+          !!g.__arbrePendingRestore || !!g.__conditionsCarteReturnFromConditions;
+
+        if (raw) {
+          const data = JSON.parse(raw);
+
+          if (Array.isArray(data?.pages) && data.pages.length > 0) {
+            const fixedPages: PageArbre[] = data.pages.map((p: any) => ({
+              ...p,
+              liens: Array.isArray(p.liens) ? p.liens : [],
+              conditionsDeblocage:
+                p.conditionsDeblocage && typeof p.conditionsDeblocage === "object"
+                  ? p.conditionsDeblocage
+                  : {},
+              noeuds:
+                Array.isArray(p.noeuds) && p.noeuds.length > 0
+                  ? p.noeuds
+                  : createDefaultPage().noeuds,
+            }));
+
+            const restoredPageId =
+              wantsRestore && g.__conditionsCartePageId
+                ? g.__conditionsCartePageId
+                : data.pageId || fixedPages[0].id;
+
+            const restoredSelectedId =
+              wantsRestore && g.__conditionsCarteSelectedId
+                ? g.__conditionsCarteSelectedId
+                : data.selectedId || fixedPages[0]?.noeuds?.[0]?.id || "";
+
+            setPages(fixedPages);
+            setPageId(restoredPageId);
+            setSelectedId(restoredSelectedId);
+          } else {
+            const first = createDefaultPage();
+            setPages([first]);
+            setPageId(first.id);
+            setSelectedId(first.noeuds[0]?.id || "");
+          }
+        } else {
+          const first = createDefaultPage();
+          setPages([first]);
+          setPageId(first.id);
+          setSelectedId(first.noeuds[0]?.id || "");
+        }
+      } catch {
+        const first = createDefaultPage();
+        setPages([first]);
+        setPageId(first.id);
+        setSelectedId(first.noeuds[0]?.id || "");
+      } finally {
+        loadedRef.current = true;
+      }
+    }
+
+    load();
+
+    return () => {
+      mounted = false;
+    };
+  }, [storageKey]);
+
+  useEffect(() => {
+    if (!loadedRef.current) return;
+
+    AsyncStorage.setItem(
+      storageKey,
+      JSON.stringify({
+        pages,
+        pageId,
+        selectedId,
+      })
+    ).catch(() => {});
+  }, [pages, pageId, selectedId, storageKey]);
+
+  useEffect(() => {
+    if (!loadedRef.current || restoredRef.current) return;
+
+    const g = globalThis as any;
+    const wantsRestore =
+      !!g.__arbrePendingRestore || !!g.__conditionsCarteReturnFromConditions;
+
+    if (!wantsRestore) return;
+
+    restoredRef.current = true;
+
+    const restoreX = Number(g.__arbreScrollX || 0);
+    const restoreY = Number(g.__arbreScrollY || 0);
+    const restorePageId = g.__conditionsCartePageId || pageId;
+    const restoreSelectedId = g.__conditionsCarteSelectedId || selectedId;
+
+    if (restorePageId && restorePageId !== pageId) {
+      setPageId(restorePageId);
+    }
+
+    if (restoreSelectedId && restoreSelectedId !== selectedId) {
+      setSelectedId(restoreSelectedId);
+    }
+
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        horizontalScrollRef.current?.scrollTo({
+          x: restoreX,
+          y: 0,
+          animated: false,
+        });
+
+        verticalScrollRef.current?.scrollTo({
+          x: 0,
+          y: restoreY,
+          animated: false,
+        });
+
+        lastScrollRef.current = { x: restoreX, y: restoreY };
+
+        g.__arbrePendingRestore = false;
+        g.__conditionsCarteReturnFromConditions = false;
+      }, 80);
+    });
+  }, [canvasH, canvasW, pageId, selectedId]);
+
+  const saveTreeReturnState = (nodeId?: string) => {
+    const g = globalThis as any;
+
+    g.__arbreScrollX = lastScrollRef.current.x;
+    g.__arbreScrollY = lastScrollRef.current.y;
+    g.__conditionsCarteSelectedId = nodeId || selectedId || null;
+    g.__conditionsCartePageId = pageActive?.id || pageId || null;
+    g.__conditionsCarteStorageKey = storageKey;
+    g.__arbrePendingRestore = true;
+  };
+
+  const handleHorizontalScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    lastScrollRef.current.x = event.nativeEvent.contentOffset.x;
+  };
+
+  const handleVerticalScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    lastScrollRef.current.y = event.nativeEvent.contentOffset.y;
+  };
 
   const updateCurrentPage = (updater: (page: PageArbre) => PageArbre) => {
     setPages((old) =>
@@ -740,6 +862,20 @@ export default function CreationArbreDeCompetence({
     if (isBlockingPromptOpen) return;
     if (outil === "ciseaux") return;
 
+    if (outil === "conditions") {
+      setSelectedId(node.id);
+
+      // Si la carte n'a pas encore de cadenas : on ajoute le cadenas.
+      if (!node.conditionsActive) {
+        toggleConditionsForNode(node);
+        return;
+      }
+
+      // Si la carte a déjà un cadenas : on ne le retire pas ici.
+      // L'overlay s'affiche et le bouton "Débloquer" devient le seul moyen de retirer le cadenas.
+      return;
+    }
+
     if (outil === "supprimer") {
       setSelectedId(node.id);
       setSelectedLinkId(null);
@@ -764,15 +900,6 @@ export default function CreationArbreDeCompetence({
 
     if (outil === "selection") {
       setSelectedId(node.id);
-
-      onOpenCarte?.({
-        ...node,
-        nom: node.titre,
-        arbre_page_id: pageActive.id,
-        arbre_page_nom: pageActive.nom,
-        carte_parent: carte,
-      });
-
       return;
     }
 
@@ -878,6 +1005,11 @@ export default function CreationArbreDeCompetence({
           l.to !== node.id &&
           !lienTraverseCase(l, node.ligne, node.colonne)
       ),
+      conditionsDeblocage: nukeConditionIfUnlocked(
+        p.conditionsDeblocage || {},
+        node.id,
+        false
+      ),
     }));
 
     const autreNoeud = noeuds.find((n) => n.id !== node.id);
@@ -974,6 +1106,44 @@ export default function CreationArbreDeCompetence({
     setSelectedLinkId(null);
     setLinkError("");
   }
+
+  const toggleConditionsForNode = (node: Noeud) => {
+    setSelectedId(node.id);
+
+    updateCurrentPage((p) => ({
+      ...p,
+      noeuds: p.noeuds.map((n) =>
+        n.id === node.id
+          ? { ...n, conditionsActive: !n.conditionsActive }
+          : n
+      ),
+      conditionsDeblocage: nukeConditionIfUnlocked(
+        p.conditionsDeblocage || {},
+        node.id,
+        !node.conditionsActive
+      ),
+    }));
+  };
+
+  const ouvrirConditionsCarte = (node: Noeud) => {
+    setSelectedId(node.id);
+    saveTreeReturnState(node.id);
+
+    (globalThis as any).__conditionsCarteNode = {
+      ...node,
+      nom: node.titre,
+      arbre_page_id: pageActive?.id,
+      arbre_page_nom: pageActive?.nom,
+      carte_parent: carte,
+    };
+    (globalThis as any).__conditionsCarteCarteParent = carte;
+    (globalThis as any).__conditionsCartePageActive = pageActive;
+    (globalThis as any).__conditionsCartePages = pages;
+    (globalThis as any).__conditionsCarteStorageKey = storageKey;
+    (globalThis as any).__conditionsCarteReturnFromConditions = false;
+
+    setPage?.("ConditionsDeblocageCarte");
+  };
 
   const renderLiensSVG = (interactive: boolean) => {
     const orderedLiens = [...liens].sort((a, b) => {
@@ -1180,6 +1350,7 @@ export default function CreationArbreDeCompetence({
           ["selection", "mouse-pointer", "Sélection", "#1F5B86"],
           ["deplacer", "move", "Déplacer", "#1F5B86"],
           ["relier", "git-merge", "Relier", "#1F5B86"],
+          ["conditions", "lock", "Conditions", LOCK],
           ["supprimer", "slash", "Supprimer", "#1F5B86"],
         ] as any[]
       ).map(([id, icon, label, color]) => (
@@ -1370,15 +1541,21 @@ export default function CreationArbreDeCompetence({
 
         <View style={S.canvasWrap}>
           <ScrollView
+            ref={horizontalScrollRef}
             horizontal
             showsHorizontalScrollIndicator={false}
             contentContainerStyle={{ width: canvasW }}
             scrollEnabled={canScrollCanvas}
+            onScroll={handleHorizontalScroll}
+            scrollEventThrottle={16}
           >
             <ScrollView
+              ref={verticalScrollRef}
               showsVerticalScrollIndicator={false}
               contentContainerStyle={{ width: canvasW, height: canvasH }}
               scrollEnabled={canScrollCanvas}
+              onScroll={handleVerticalScroll}
+              scrollEventThrottle={16}
             >
               <View style={[S.canvas, { width: canvasW, height: canvasH }]}> 
                 {renderLiensSVG(false)}
@@ -1465,13 +1642,13 @@ export default function CreationArbreDeCompetence({
                   const isDeleteTarget = deleteNodeVisible && nodeToDelete?.id === node.id;
                   const isUnlinkedWarning =
                     quitWarningVisible && unlinkedWarningIds.includes(node.id);
+                  const isLocked = !!node.conditionsActive;
+                  const nodeConditionsCount = conditionsDeblocage[node.id]?.length || 0;
 
                   const bgColor = isMoveSource
                     ? WARNING
                     : isLinkStart
                     ? SUCCESS
-                    : selected
-                    ? node.color
                     : CARD_BG;
 
                   const borderColor = isUnlinkedWarning
@@ -1484,13 +1661,16 @@ export default function CreationArbreDeCompetence({
                     ? "#86EFAC"
                     : selected
                     ? HEADER_BG
+                    : isLocked
+                    ? LOCK
                     : CARD_BORDER;
 
-                  const textColor = selected || isMoveSource || isLinkStart || isUnlinkedWarning ? HEADER_TITLE : CARD_TITLE;
+                  const textColor = isMoveSource || isLinkStart || isUnlinkedWarning ? HEADER_TITLE : CARD_TITLE;
 
                   return (
                     <Pressable
                       key={node.id}
+                      pointerEvents="auto"
                       onPress={() => gererClicNoeud(node)}
                       disabled={isBlockingPromptOpen}
                       style={[
@@ -1504,10 +1684,12 @@ export default function CreationArbreDeCompetence({
                           borderColor,
                         },
                         selected && S.nodeSelected,
+                        selected && isLocked && S.nodeSelectedLocked,
                         isMoveSource && S.nodeMoveSource,
                         isLinkStart && S.nodeLinkStart,
                         isDeleteTarget && S.nodeDeleteTarget,
                         isUnlinkedWarning && S.nodeUnlinkedWarning,
+                        isLocked && S.nodeLocked,
                       ]}
                     >
                       <LinearGradient
@@ -1515,6 +1697,12 @@ export default function CreationArbreDeCompetence({
                         style={StyleSheet.absoluteFill}
                         pointerEvents="none"
                       />
+
+                      {isLocked && (
+                        <View pointerEvents="none" style={S.lockCenter}>
+                          <Feather name="lock" size={isPhone ? 23 : 32} color="rgba(255,255,255,0.96)" />
+                        </View>
+                      )}
 
                       <View pointerEvents="none" style={S.nodeContent}>
                         <View
@@ -1536,6 +1724,8 @@ export default function CreationArbreDeCompetence({
                         {isMoveSource && <Text style={S.badge}>À déplacer</Text>}
                         {isLinkStart && <Text style={S.badge}>Départ lien</Text>}
                       </View>
+
+                      
                     </Pressable>
                   );
                 })}
@@ -1562,6 +1752,61 @@ export default function CreationArbreDeCompetence({
           <TouchableOpacity style={S.cutConfirmBtn} onPress={couperLienSelectionne}>
             <Text style={S.cutConfirmText}>Couper</Text>
           </TouchableOpacity>
+        </View>
+      )}
+
+      {showConditionsOverlay && selectedNode && (
+        <View pointerEvents="box-none" style={S.conditionsBottomOverlay}>
+          <View style={S.conditionsBottomCard}>
+            <View style={S.conditionsBottomTextBox}>
+              <Text style={S.conditionsBottomTitle} numberOfLines={1}>
+                {selectedNode.titre}
+              </Text>
+            </View>
+
+            <View style={S.conditionsBottomButtons}>
+              <TouchableOpacity
+                activeOpacity={0.9}
+                style={S.unlockButton}
+                onPress={() => {
+                  updateCurrentPage((p) => ({
+                    ...p,
+                    noeuds: p.noeuds.map((n) =>
+                      n.id === selectedNode.id
+                        ? { ...n, conditionsActive: false }
+                        : n
+                    ),
+                    conditionsDeblocage: nukeConditionIfUnlocked(
+                      p.conditionsDeblocage || {},
+                      selectedNode.id,
+                      false
+                    ),
+                  }));
+                }}
+              >
+                <View style={S.unlockButtonContent}>
+                  <Feather
+                    name="unlock"
+                    size={14}
+                    color={DANGER}
+                  />
+
+                  <Text style={S.unlockButtonText}>
+                    Débloquer
+                  </Text>
+                </View>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                activeOpacity={0.9}
+                style={S.conditionsButton}
+                onPress={() => ouvrirConditionsCarte(selectedNode)}
+              >
+                <Text style={S.conditionsButtonText}>{`Conditions
+de déblocage`}</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
         </View>
       )}
 
@@ -1687,7 +1932,14 @@ export default function CreationArbreDeCompetence({
               </View>
 
               <View style={S.infoSection}>
-                <Text style={S.infoSectionTitle}>5. Avant de quitter</Text>
+                <Text style={S.infoSectionTitle}>5. Cadenas et conditions de déblocage</Text>
+                <Text style={S.infoText}>
+                  L'outil Cadenas permet de verrouiller une carte. Une étiquette apparaît sur la carte : clique dessus pour choisir les conditions à partir d'une carte reliée.
+                </Text>
+              </View>
+
+              <View style={S.infoSection}>
+                <Text style={S.infoSectionTitle}>6. Avant de quitter</Text>
                 <Text style={S.infoText}>
                   Si une carte n'est reliée à aucune autre, un message d'avertissement apparaît au retour. La carte isolée devient rouge pour être facile à repérer.
                 </Text>
@@ -1957,15 +2209,16 @@ const S = StyleSheet.create({
   },
 
   toolsBar: {
-    width: 78,
+    width: 90,
     borderRadius: 20,
     backgroundColor: CARD_BG,
     borderWidth: 1,
     borderColor: CARD_BORDER,
-    paddingVertical: 12,
-    paddingHorizontal: 8,
+    paddingTop: 10,
+    paddingBottom: 28,
+    paddingHorizontal: 6,
     alignItems: "center",
-    gap: 8,
+    gap: 4,
     shadowColor: "#000",
     shadowOpacity: 0.08,
     shadowRadius: 8,
@@ -1974,9 +2227,9 @@ const S = StyleSheet.create({
   },
 
   toolBtn: {
-    minWidth: 58,
-    paddingHorizontal: 7,
-    paddingVertical: 7,
+    minWidth: 60,
+    paddingHorizontal: 5,
+    paddingVertical: 5,
     borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
@@ -2006,7 +2259,7 @@ const S = StyleSheet.create({
 
   toolLabel: {
     color: "#1F5B86",
-    fontSize: 8,
+    fontSize: 7,
     fontWeight: "900",
     textAlign: "center",
   },
@@ -2017,7 +2270,7 @@ const S = StyleSheet.create({
   },
 
   toolStats: {
-    marginTop: "auto",
+    marginTop: 8,
     alignItems: "center",
   },
 
@@ -2050,51 +2303,43 @@ const S = StyleSheet.create({
 
   gridCell: {
     position: "absolute",
+    zIndex: 1,
+    elevation: 1,
     borderRadius: 18,
     borderWidth: 1.5,
     borderStyle: "dashed",
     borderColor: "rgba(31,91,134,0.12)",
     alignItems: "center",
     justifyContent: "center",
-    zIndex: 10,
   },
 
   gridCellOccupied: {
-    borderColor: "transparent",
+    opacity: 0,
   },
 
   gridCellAdd: {
-    backgroundColor: "rgba(31,91,134,0.08)",
-    borderColor: HEADER_BG,
-    borderWidth: 2,
-    zIndex: 15,
+    borderColor: "rgba(34,197,94,0.28)",
+    backgroundColor: "rgba(34,197,94,0.04)",
   },
 
   gridCellAddDanger: {
-    backgroundColor: "rgba(239,68,68,0.10)",
-    borderColor: DANGER,
+    borderColor: "rgba(239,68,68,0.48)",
+    backgroundColor: "rgba(239,68,68,0.05)",
   },
 
   gridCellMove: {
-    backgroundColor: "rgba(245,158,11,0.08)",
-    borderColor: "rgba(245,158,11,0.45)",
-    borderWidth: 2,
-    zIndex: 15,
+    borderColor: "rgba(245,158,11,0.38)",
+    backgroundColor: "rgba(245,158,11,0.05)",
   },
 
   gridCellChosen: {
-    backgroundColor: "rgba(34,197,94,0.14)",
-    borderColor: SUCCESS,
-    borderWidth: 3,
-    shadowColor: SUCCESS,
-    shadowOpacity: 0.35,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 0 },
+    borderColor: WARNING,
+    backgroundColor: "rgba(245,158,11,0.12)",
   },
 
   gridAddText: {
-    color: HEADER_BG,
-    fontSize: 28,
+    color: SUCCESS,
+    fontSize: 24,
     fontWeight: "900",
   },
 
@@ -2104,33 +2349,37 @@ const S = StyleSheet.create({
 
   gridMoveText: {
     color: WARNING,
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: "900",
-    textTransform: "uppercase",
-  },
-
-  deleteLinksSvg: {
-    zIndex: 35,
-    elevation: 35,
   },
 
   node: {
     position: "absolute",
-    zIndex: 40,
+    zIndex: 50,
+    elevation: 10,
     borderRadius: 22,
     borderWidth: 1.5,
+    alignItems: "center",
+    justifyContent: "center",
     overflow: "hidden",
     shadowColor: "#000",
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
+    shadowOpacity: 0.10,
+    shadowRadius: 9,
     shadowOffset: { width: 0, height: 3 },
-    elevation: 3,
   },
 
   nodeSelected: {
-    borderWidth: 3,
-    shadowOpacity: 0.18,
-    shadowRadius: 12,
+    borderWidth: 4,
+    shadowOpacity: 0.20,
+    shadowRadius: 14,
+  },
+
+  nodeSelectedLocked: {
+    borderWidth: 5,
+    borderColor: HEADER_BG,
+    shadowOpacity: 0.24,
+    shadowRadius: 18,
+    transform: [{ scale: 1.03 }],
   },
 
   nodeMoveSource: {
@@ -2142,44 +2391,38 @@ const S = StyleSheet.create({
   },
 
   nodeDeleteTarget: {
-    borderWidth: 4,
-    shadowColor: DANGER,
-    shadowOpacity: 0.45,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: 0 },
+    borderWidth: 3,
   },
 
   nodeUnlinkedWarning: {
-    borderWidth: 4,
-    shadowColor: DANGER,
-    shadowOpacity: 0.55,
-    shadowRadius: 20,
-    shadowOffset: { width: 0, height: 0 },
+    borderWidth: 3,
+    borderColor: "#FCA5A5",
+  },
+
+  nodeLocked: {
+    borderWidth: 3,
+    borderColor: LOCK,
   },
 
   nodeContent: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
     alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 6,
+    paddingHorizontal: 8,
+    zIndex: 50,
   },
 
   nodeIconBox: {
     width: 38,
     height: 38,
-    borderRadius: 13,
-    borderWidth: 2,
+    borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: 5,
+    borderWidth: 1,
+    marginBottom: 6,
   },
 
   nodeEmoji: {
-    fontSize: 22,
+    fontSize: 20,
   },
 
   nodeTitle: {
@@ -2200,6 +2443,148 @@ const S = StyleSheet.create({
     overflow: "hidden",
   },
 
+  lockCenter: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    zIndex: 55,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(76,29,149,0.28)",
+  },
+
+  conditionsMiniPill: {
+    position: "absolute",
+    right: 8,
+    bottom: 8,
+    zIndex: 70,
+    minWidth: 22,
+    height: 22,
+    borderRadius: 999,
+    backgroundColor: LOCK,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 6,
+    borderWidth: 2,
+    borderColor: "rgba(255,255,255,0.85)",
+  },
+
+  conditionsMiniPillText: {
+    color: HEADER_TITLE,
+    fontSize: 10,
+    fontWeight: "900",
+  },
+
+  conditionsBottomOverlay: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    paddingHorizontal: 12,
+    paddingBottom: 12,
+    alignItems: "center",
+    justifyContent: "flex-end",
+    zIndex: 30,
+    elevation: 30,
+  },
+
+  conditionsBottomCard: {
+    pointerEvents: "auto",
+    width: "100%",
+    maxWidth: 760,
+    minHeight: 86,
+    borderRadius: 20,
+    backgroundColor: "rgba(255,255,255,0.98)",
+    borderWidth: 1,
+    borderColor: "rgba(31,91,134,0.22)",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    shadowColor: "#000",
+    shadowOpacity: 0.12,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 6,
+  },
+
+  conditionsBottomIcon: {
+    width: 46,
+    height: 46,
+    borderRadius: 16,
+    backgroundColor: "rgba(124,58,237,0.12)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  conditionsBottomTextBox: {
+    width: "100%",
+    minWidth: 0,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 6,
+  },
+
+  conditionsBottomTitle: {
+    color: HEADER_BG,
+    fontSize: 11,
+    fontWeight: "900",
+    lineHeight: 14,
+    textAlign: "center",
+  },
+
+  conditionsBottomButtons: {
+    width: "100%",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+
+  unlockButton: {
+    flex: 1,
+    minHeight: 44,
+    paddingHorizontal: 10,
+    borderRadius: 14,
+    backgroundColor: "#FFFFFF",
+    borderWidth: 1,
+    borderColor: "rgba(239,68,68,0.40)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  unlockButtonText: {
+    color: DANGER,
+    fontWeight: "900",
+    fontSize: 12,
+  },
+
+  unlockButtonContent: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+  },
+
+  conditionsButton: {
+    flex: 1,
+    minHeight: 44,
+    paddingHorizontal: 10,
+    borderRadius: 14,
+    backgroundColor: HEADER_BG,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  conditionsButtonText: {
+    color: "#fff",
+    fontWeight: "900",
+    fontSize: 11,
+    textAlign: "center",
+    lineHeight: 13,
+  },
+
   toast: {
     position: "absolute",
     left: 16,
@@ -2210,13 +2595,13 @@ const S = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(248,113,113,0.8)",
     paddingHorizontal: 14,
-    paddingVertical: 12,
-    zIndex: 300,
+    paddingVertical: 10,
+    zIndex: 120,
   },
 
   toastText: {
-    color: HEADER_TITLE,
-    fontSize: 13,
+    color: "white",
+    fontSize: 12,
     fontWeight: "900",
     textAlign: "center",
   },
@@ -2226,86 +2611,152 @@ const S = StyleSheet.create({
     left: 16,
     right: 16,
     bottom: 18,
-    minHeight: 58,
-    borderRadius: 18,
-    backgroundColor: CARD_BG,
+    borderRadius: 20,
+    backgroundColor: "rgba(255,255,255,0.98)",
     borderWidth: 1,
-    borderColor: "rgba(239,68,68,0.35)",
+    borderColor: CONTENT_BORDER,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 14,
     gap: 10,
-    zIndex: 100,
+    zIndex: 90,
     shadowColor: "#000",
-    shadowOpacity: 0.12,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 5 },
-    elevation: 4,
+    shadowOpacity: 0.16,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 6,
   },
 
   cutOverlayText: {
     flex: 1,
     color: CARD_TITLE,
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: "900",
   },
 
   cutCancelBtn: {
     paddingHorizontal: 12,
     paddingVertical: 10,
-    borderRadius: 12,
-    backgroundColor: "#E2E8F0",
+    borderRadius: 14,
+    backgroundColor: TEXT_BG,
   },
 
   cutCancelText: {
-    color: CARD_TITLE,
+    color: HEADER_BG,
+    fontSize: 12,
     fontWeight: "900",
   },
 
   cutConfirmBtn: {
-    paddingHorizontal: 16,
+    paddingHorizontal: 14,
     paddingVertical: 10,
-    borderRadius: 12,
+    borderRadius: 14,
     backgroundColor: DANGER,
   },
 
   cutConfirmText: {
-    color: HEADER_TITLE,
+    color: "white",
+    fontSize: 12,
     fontWeight: "900",
   },
 
   blockingLayer: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    top: 0,
-    bottom: 0,
-    zIndex: 500,
-    backgroundColor: "rgba(15,23,42,0.08)",
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 100,
     justifyContent: "flex-end",
-    padding: 12,
+  },
+
+  breakWarningBar: {
+    marginHorizontal: 14,
+    marginBottom: 14,
+    borderRadius: 22,
+    backgroundColor: "rgba(255,255,255,0.98)",
+    borderWidth: 1,
+    borderColor: "rgba(239,68,68,0.25)",
+    padding: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    shadowColor: "#000",
+    shadowOpacity: 0.18,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 8,
+  },
+
+  breakWarningTextBox: {
+    flex: 1,
+  },
+
+  breakWarningTitle: {
+    color: CARD_TITLE,
+    fontSize: 14,
+    fontWeight: "900",
+  },
+
+  breakWarningText: {
+    color: CARD_SUBTITLE,
+    fontSize: 12,
+    fontWeight: "700",
+    marginTop: 4,
+  },
+
+  breakWarningActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+
+  breakCancelBtn: {
+    paddingHorizontal: 13,
+    paddingVertical: 10,
+    borderRadius: 14,
+    backgroundColor: TEXT_BG,
+  },
+
+  breakCancelText: {
+    color: HEADER_BG,
+    fontSize: 12,
+    fontWeight: "900",
+  },
+
+  breakConfirmBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 14,
+    backgroundColor: DANGER,
+  },
+
+  breakConfirmText: {
+    color: "white",
+    fontSize: 12,
+    fontWeight: "900",
+  },
+
+  deleteLinksSvg: {
+    zIndex: 85,
   },
 
   deleteNodeBar: {
     position: "absolute",
-    left: 12,
-    right: 12,
-    bottom: 42,
-    borderRadius: 18,
-    backgroundColor: CARD_BG,
+    left: 14,
+    right: 14,
+    bottom: 14,
+    zIndex: 110,
+    borderRadius: 22,
+    backgroundColor: "rgba(255,255,255,0.98)",
     borderWidth: 1,
-    borderColor: "rgba(239,68,68,0.35)",
-    flexDirection: "column",
-    alignItems: "stretch",
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    gap: 10,
-    zIndex: 520,
+    borderColor: "rgba(239,68,68,0.25)",
+    padding: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
     shadowColor: "#000",
-    shadowOpacity: 0.14,
-    shadowRadius: 14,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 5,
+    shadowOpacity: 0.18,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 8,
   },
 
   deleteNodeTextBox: {
@@ -2313,152 +2764,175 @@ const S = StyleSheet.create({
   },
 
   deleteNodeTitle: {
-    color: DANGER,
+    color: CARD_TITLE,
     fontSize: 14,
     fontWeight: "900",
-    marginBottom: 3,
-    textAlign: "center",
   },
 
   deleteNodeText: {
-    color: CARD_TITLE,
+    color: CARD_SUBTITLE,
     fontSize: 12,
-    fontWeight: "800",
-    lineHeight: 17,
-    textAlign: "center",
+    fontWeight: "700",
+    marginTop: 4,
   },
 
   deleteNodeActions: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "center",
-    gap: 10,
+    gap: 8,
   },
 
-  breakWarningBar: {
-    position: "absolute",
-    left: 12,
-    right: 12,
-    bottom: 72,
-    borderRadius: 18,
-    backgroundColor: CARD_BG,
-    borderWidth: 1,
-    borderColor: "rgba(239,68,68,0.35)",
-    flexDirection: "column",
-    alignItems: "stretch",
-    paddingHorizontal: 14,
-    paddingVertical: 14,
-    gap: 12,
-    zIndex: 540,
+  modalBg: {
+    flex: 1,
+    backgroundColor: "rgba(15,23,42,0.45)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 20,
+  },
+
+  modalCard: {
+    width: "100%",
+    maxWidth: 420,
+    borderRadius: 24,
+    backgroundColor: "white",
+    padding: 18,
     shadowColor: "#000",
-    shadowOpacity: 0.14,
-    shadowRadius: 14,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 5,
+    shadowOpacity: 0.20,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 8,
   },
 
-  breakWarningTextBox: {
-    minHeight: 58,
-    justifyContent: "center",
-  },
-
-  breakWarningTitle: {
-    color: DANGER,
-    fontSize: 16,
+  modalTitle: {
+    color: CARD_TITLE,
+    fontSize: 18,
     fontWeight: "900",
-    marginBottom: 3,
     textAlign: "center",
   },
 
-  breakWarningText: {
-    color: CARD_TITLE,
+  modalText: {
+    color: CARD_SUBTITLE,
     fontSize: 13,
-    fontWeight: "800",
-    lineHeight: 17,
+    fontWeight: "700",
+    lineHeight: 19,
     textAlign: "center",
+    marginTop: 10,
   },
 
-  breakWarningActions: {
+  modalActions: {
     flexDirection: "row",
+    gap: 10,
+    marginTop: 16,
+  },
+
+  modalDangerIcon: {
+    width: 58,
+    height: 58,
+    borderRadius: 22,
+    backgroundColor: "rgba(239,68,68,0.10)",
+    alignSelf: "center",
     alignItems: "center",
     justifyContent: "center",
-    gap: 12,
+    marginBottom: 12,
   },
 
-  breakCancelBtn: {
-    flex: 1,
-    maxWidth: 260,
-    paddingHorizontal: 12,
-    paddingVertical: 11,
-    borderRadius: 14,
-    backgroundColor: "#E2E8F0",
+  input: {
+    minHeight: 48,
+    borderRadius: 16,
+    backgroundColor: TEXT_BG,
     borderWidth: 1,
-    borderColor: CARD_BORDER,
-    alignItems: "center",
+    borderColor: CONTENT_BORDER,
+    paddingHorizontal: 14,
+    color: CARD_TITLE,
+    fontSize: 14,
+    fontWeight: "800",
+    marginTop: 16,
   },
 
-  breakCancelText: {
-    color: CARD_TITLE,
+  primaryBtnFull: {
+    marginTop: 14,
+    height: 48,
+    borderRadius: 16,
+    backgroundColor: HEADER_BG,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  primaryBtnText: {
+    color: "white",
+    fontSize: 13,
     fontWeight: "900",
   },
 
-  breakConfirmBtn: {
+  secondaryBtn: {
     flex: 1,
-    maxWidth: 260,
-    paddingHorizontal: 12,
-    paddingVertical: 11,
-    borderRadius: 14,
+    height: 46,
+    borderRadius: 16,
+    backgroundColor: TEXT_BG,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  secondaryBtnText: {
+    color: HEADER_BG,
+    fontSize: 13,
+    fontWeight: "900",
+  },
+
+  dangerBtn: {
+    flex: 1,
+    height: 46,
+    borderRadius: 16,
     backgroundColor: DANGER,
     alignItems: "center",
-  },
-
-  breakConfirmText: {
-    color: HEADER_TITLE,
-    fontWeight: "900",
+    justifyContent: "center",
+    flexDirection: "row",
+    gap: 7,
   },
 
   infoModalBg: {
     flex: 1,
-    backgroundColor: "rgba(15,23,42,0.38)",
+    backgroundColor: "rgba(15,23,42,0.46)",
     alignItems: "center",
     justifyContent: "center",
     padding: 18,
   },
 
   infoModalCard: {
-    overflow: "hidden",
     width: "100%",
-    maxWidth: 620,
-    maxHeight: "86%",
-    flexShrink: 1,
-    borderRadius: 24,
-    backgroundColor: CARD_BG,
-    borderWidth: 1,
-    borderColor: CARD_BORDER,
+    maxWidth: 560,
+    maxHeight: "88%",
+    borderRadius: 26,
+    backgroundColor: "white",
     padding: 16,
+    shadowColor: "#000",
+    shadowOpacity: 0.22,
+    shadowRadius: 22,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 10,
   },
 
   infoModalHeader: {
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    marginBottom: 12,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: CONTENT_BORDER,
   },
 
   infoBigIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 16,
+    width: 50,
+    height: 50,
+    borderRadius: 18,
     backgroundColor: TEXT_BG,
-    borderWidth: 1,
-    borderColor: CARD_BORDER,
     alignItems: "center",
     justifyContent: "center",
   },
 
   infoModalTitle: {
     color: CARD_TITLE,
-    fontSize: 20,
+    fontSize: 17,
     fontWeight: "900",
   },
 
@@ -2467,20 +2941,18 @@ const S = StyleSheet.create({
     fontSize: 12,
     fontWeight: "700",
     marginTop: 3,
-    lineHeight: 17,
   },
 
   infoScrollContent: {
-    flexGrow: 1,
-    paddingBottom: 8,
-    gap: 10,
+    paddingVertical: 12,
+    gap: 12,
   },
 
   infoSection: {
     borderRadius: 18,
     backgroundColor: "#F8FAFC",
     borderWidth: 1,
-    borderColor: CARD_BORDER,
+    borderColor: CONTENT_BORDER,
     padding: 12,
   },
 
@@ -2492,7 +2964,7 @@ const S = StyleSheet.create({
   },
 
   infoText: {
-    color: CARD_TITLE,
+    color: CARD_SUBTITLE,
     fontSize: 12,
     fontWeight: "700",
     lineHeight: 18,
@@ -2501,218 +2973,103 @@ const S = StyleSheet.create({
   infoIllustrationRow: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "center",
     gap: 10,
     marginBottom: 8,
   },
 
-  infoLinkDemo: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 8,
-  },
-
   infoMiniCardDashed: {
-    width: 72,
-    height: 54,
-    borderRadius: 16,
-    borderWidth: 2,
+    width: 68,
+    height: 48,
+    borderRadius: 14,
+    borderWidth: 1.5,
     borderStyle: "dashed",
-    borderColor: HEADER_BG,
+    borderColor: "rgba(31,91,134,0.28)",
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: TEXT_BG,
+    backgroundColor: "rgba(31,91,134,0.04)",
   },
 
   infoMiniPlus: {
     color: HEADER_BG,
-    fontSize: 24,
+    fontSize: 22,
     fontWeight: "900",
   },
 
-  infoMiniCard: {
-    width: 76,
-    height: 54,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: CARD_BORDER,
-    backgroundColor: CARD_BG,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
   infoMiniCardBlue: {
-    width: 76,
-    height: 54,
+    width: 72,
+    height: 52,
     borderRadius: 16,
-    borderWidth: 2,
-    borderColor: HEADER_ICON_BG,
     backgroundColor: HEADER_BG,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  infoMiniCardWarning: {
-    width: 76,
-    height: 54,
-    borderRadius: 16,
-    borderWidth: 2,
-    borderColor: "#FCA5A5",
-    backgroundColor: DANGER,
     alignItems: "center",
     justifyContent: "center",
   },
 
   infoMiniEmoji: {
     fontSize: 18,
-    marginBottom: 1,
   },
 
   infoMiniCardText: {
-    color: HEADER_TITLE,
-    fontSize: 11,
+    color: "white",
+    fontSize: 10,
     fontWeight: "900",
-    textAlign: "center",
+  },
+
+  infoLinkDemo: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 8,
+  },
+
+  infoMiniCard: {
+    width: 70,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: "white",
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  infoMiniCardWarning: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: DANGER,
+    alignItems: "center",
+    justifyContent: "center",
   },
 
   infoMiniCardTextDark: {
     color: CARD_TITLE,
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: "900",
-    textAlign: "center",
   },
 
   infoGreenLine: {
-    width: 72,
-    height: 7,
+    height: 5,
+    width: 70,
     backgroundColor: SUCCESS,
-    borderTopWidth: 2,
-    borderBottomWidth: 2,
-    borderColor: "#BBF7D0",
   },
 
   infoRedLine: {
-    width: 72,
-    height: 7,
+    height: 5,
+    width: 70,
     backgroundColor: DANGER,
-    borderTopWidth: 2,
-    borderBottomWidth: 2,
-    borderColor: "#FCA5A5",
   },
 
   infoCloseBtn: {
-    marginTop: 12,
-    borderRadius: 16,
+    height: 48,
+    borderRadius: 17,
     backgroundColor: HEADER_BG,
-    paddingVertical: 13,
     alignItems: "center",
+    justifyContent: "center",
+    marginTop: 8,
   },
 
   infoCloseText: {
-    color: HEADER_TITLE,
-    fontSize: 14,
+    color: "white",
+    fontSize: 13,
     fontWeight: "900",
-  },
-
-  modalBg: {
-    flex: 1,
-    backgroundColor: "rgba(15,23,42,0.38)",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 20,
-  },
-
-  modalCard: {
-    width: "100%",
-    maxWidth: 420,
-    borderRadius: 22,
-    backgroundColor: CARD_BG,
-    borderWidth: 1,
-    borderColor: CARD_BORDER,
-    padding: 18,
-  },
-
-  modalTitle: {
-    color: CARD_TITLE,
-    fontSize: 20,
-    fontWeight: "900",
-    marginBottom: 10,
-  },
-
-  modalText: {
-    color: CARD_TITLE,
-    fontSize: 14,
-    fontWeight: "700",
-    lineHeight: 20,
-  },
-
-  modalActions: {
-    flexDirection: "row",
-    justifyContent: "flex-end",
-    gap: 10,
-    marginTop: 18,
-  },
-
-  secondaryBtn: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderRadius: 14,
-    backgroundColor: "#E2E8F0",
-    borderWidth: 1,
-    borderColor: CARD_BORDER,
-  },
-
-  secondaryBtnText: {
-    color: CARD_TITLE,
-    fontSize: 14,
-    fontWeight: "900",
-  },
-
-  dangerBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderRadius: 14,
-    backgroundColor: DANGER,
-  },
-
-  modalDangerIcon: {
-    width: 56,
-    height: 56,
-    borderRadius: 18,
-    backgroundColor: "rgba(239,68,68,0.12)",
-    borderWidth: 1,
-    borderColor: "rgba(239,68,68,0.25)",
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 14,
-  },
-
-  primaryBtnFull: {
-    marginTop: 14,
-    borderRadius: 14,
-    backgroundColor: HEADER_BG,
-    paddingVertical: 13,
-    alignItems: "center",
-  },
-
-  primaryBtnText: {
-    color: HEADER_TITLE,
-    fontSize: 14,
-    fontWeight: "900",
-  },
-
-  input: {
-    borderWidth: 1,
-    borderColor: CARD_BORDER,
-    borderRadius: 14,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    color: CARD_TITLE,
-    fontWeight: "800",
-    backgroundColor: "#F8FAFC",
   },
 });

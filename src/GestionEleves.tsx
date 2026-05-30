@@ -1,4 +1,10 @@
 // src/GestionEleves.tsx
+// ✅ Modif demandée :
+// - Suppression du badge Garçon/Fille
+// - Fond bleu pâle ou rose pâle selon le genre
+// - Icônes crayon + poubelle remontées en haut à droite
+// - Prénom + code redescendus pour mieux voir le code
+
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import BottomBar from "./ui/BottomBar";
 import {
@@ -6,10 +12,12 @@ import {
   Alert,
   FlatList,
   Keyboard,
+  KeyboardAvoidingView,
   Modal,
   Platform,
   Pressable,
   SafeAreaView,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -20,15 +28,16 @@ import {
 import { Picker } from "@react-native-picker/picker";
 import {
   ArrowLeft,
-  UserPlus,
+  ChevronLeft,
+  Download,
   Edit3,
-  Trash2,
+  RotateCcw,
   Save,
-  X,
   Search,
-  ArrowUpAZ,
-  ArrowDownAZ,
-  Hash,
+  Trash2,
+  UserPlus,
+  Users,
+  X,
 } from "lucide-react-native";
 import { supabase } from "./supabaseClient";
 
@@ -41,6 +50,9 @@ type GroupeMinimal = {
   name?: string;
   nom?: string;
   color?: string;
+  niveau?: string | null;
+  folderId?: string | null;
+  folder_id?: string | null;
   teacher_id?: string | number;
 };
 
@@ -63,25 +75,46 @@ type Props = {
   selectedGroup?: GroupeMinimal | null;
   selectedGroupId?: string | null;
   setModeConnexion?: (mode: any) => void;
+  onOpenStatistiquesEleve?: (eleve: Eleve) => void;
 };
 
-/* ======================= Thème ======================= */
-const C_BG = "#EFEFEF";
-const C_HEADER = "#87A7BA";
-const C_BORDER = "rgba(0,0,0,0.08)";
-const C_TEXT = "#0f172a";
+/* ======================= Charte graphique ======================= */
+const PAGE_BG = "#EDF2F6";
+const HEADER_BG = "#1F5B86";
+const HEADER_ICON_BG = "#2D6C97";
+const HEADER_TITLE = "#FFFFFF";
 
-const TAG_FILLE_BG = "rgba(236,72,153,0.20)";
-const TAG_GARCON_BG = "rgba(59,130,246,0.20)";
-const TAG_NEUTRE_BG = "rgba(15,23,42,0.08)";
+const CONTENT_BG = "#EEF3F7";
+const CONTENT_BORDER = "#C6D2DC";
 
-const TAG_FILLE_TEXT = "#be185d";
-const TAG_GARCON_TEXT = "#1d4ed8";
-const TAG_NEUTRE_TEXT = "#334155";
+const CARD_BG = "#FFFFFF";
+const CARD_BLUE_BG = "#F8FCFF";
+const CARD_PINK_BG = "#FFFAFC";
+
+const CARD_BORDER = "#C9D5DF";
+const CARD_BLUE_BORDER = "#D5E8F4";
+const CARD_PINK_BORDER = "#EED8E2";
+const CARD_BLUE_ACCENT = "#8FC5E8";
+const CARD_PINK_ACCENT = "#E9A8C2";
+
+const CARD_TITLE = "#233548";
+const CARD_MUTED = "#6B7E8E";
+
+const BLUE_SOFT = "#F2F8FC";
+const BLUE_BORDER = "#CFE0EC";
+const GREEN = HEADER_BG;
+const RED = "#DC2626";
 
 const BOTTOM_BAR_HEIGHT = 78;
-const SAFE_EXTRA_IOS = Platform.OS === "ios" ? 0 : 0;
-const GRID_GAP = 8;
+const DEFAULT_BOTTOM_SPACE = 104;
+const GRID_GAP = 12;
+
+const IOS_SHADOW = {
+  shadowColor: "#000",
+  shadowOpacity: 0.08,
+  shadowOffset: { width: 0, height: 2 },
+  shadowRadius: 8,
+};
 
 /* ======================= Helpers ======================= */
 function normalizeText(v: string) {
@@ -97,42 +130,103 @@ function getColumnCount(width: number) {
   if (width >= 1250) return 5;
   if (width >= 980) return 4;
   if (width >= 700) return 3;
-  if (width >= 420) return 2;
   return 2;
 }
 
-const GestionEleves: React.FC<Props> = ({ setPage, professeur, selectedGroup, selectedGroupId }) => {
-  const { width } = useWindowDimensions();
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
+}
+
+function escapeHtml(value: string) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function getFirstName(name: string) {
+  return String(name || "").trim().split(/\s+/)[0] || "Sans nom";
+}
+
+function getSafeFileName(value: string) {
+  const normalized = normalizeText(value)
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return normalized || "classe";
+}
+
+function getStudentCardColors(genre: GenreEleve) {
+  if (genre === "F") {
+    return {
+      backgroundColor: CARD_PINK_BG,
+      borderColor: CARD_PINK_BORDER,
+      accentColor: CARD_PINK_ACCENT,
+    };
+  }
+
+  if (genre === "M") {
+    return {
+      backgroundColor: CARD_BLUE_BG,
+      borderColor: CARD_BLUE_BORDER,
+      accentColor: CARD_BLUE_ACCENT,
+    };
+  }
+
+  return {
+    backgroundColor: CARD_BG,
+    borderColor: CARD_BORDER,
+    accentColor: "transparent",
+  };
+}
+
+/* ======================= Composant principal ======================= */
+const GestionEleves: React.FC<Props> = ({
+  setPage,
+  professeur,
+  selectedGroup,
+  selectedGroupId,
+  onOpenStatistiquesEleve,
+}) => {
+  const { width, height } = useWindowDimensions();
+
+  const isDesktop = width >= 1100;
+  const isTablet = width >= 768 && width < 1100;
+  const isPhone = width < 768;
+  const verySmallPhone = width < 380;
+
+  const horizontalPadding = isDesktop ? 28 : isTablet ? 22 : 14;
+  const headerHeight = isDesktop ? 86 : isTablet ? 82 : 78;
+  const headerTitleSize = isDesktop ? 20 : isTablet ? 19 : 18;
 
   const numColumns = useMemo(() => getColumnCount(width), [width]);
-  const contentPadding = 10;
   const totalGap = GRID_GAP * (numColumns - 1);
-  const usableWidth = Math.max(0, width - contentPadding * 2 - totalGap);
+  const usableWidth = Math.max(0, width - horizontalPadding * 2 - totalGap);
   const cardWidth = usableWidth / numColumns;
 
-  const isPhone = width < 700;
-  const isSmallPhone = width < 430;
-  const isCompactHeader = width < 700;
-  const isVerySmall = width < 420;
-
-  const cardHeight = useMemo(() => {
-    if (width < 430) return 104;
-    if (width < 700) return 114;
-    return 132;
-  }, [width]);
+  const estimatedCardHeight = (height - headerHeight - DEFAULT_BOTTOM_SPACE - 92) / 3;
+  const cardHeight = clamp(
+    estimatedCardHeight,
+    isPhone ? (verySmallPhone ? 122 : 132) : 142,
+    isDesktop ? 170 : 158
+  );
 
   const [eleves, setEleves] = useState<Eleve[]>([]);
   const [isLoaded, setIsLoaded] = useState(false);
 
   const [searchTerm, setSearchTerm] = useState("");
   const [showSearch, setShowSearch] = useState(false);
-  const [sortMode, setSortMode] = useState<SortMode>("order_asc");
+  const [sortMode] = useState<SortMode>("order_asc");
 
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
 
   const [editingEleveId, setEditingEleveId] = useState<string | null>(null);
   const [editedEleveName, setEditedEleveName] = useState("");
   const [editedEleveGenre, setEditedEleveGenre] = useState<GenreEleve>("M");
+  const [editedEleveCode, setEditedEleveCode] = useState("");
 
   const [newEleveName, setNewEleveName] = useState("");
   const [newEleveGenre, setNewEleveGenre] = useState<GenreEleve>("M");
@@ -148,7 +242,30 @@ const GestionEleves: React.FC<Props> = ({ setPage, professeur, selectedGroup, se
     return id != null ? String(id) : null;
   }, [selectedGroup, selectedGroupId]);
 
-  /* ======================= Fetch ======================= */
+  const headerName = selectedGroup?.name ?? selectedGroup?.nom ?? "Groupe";
+
+  const backToGroups = useCallback(() => {
+    const folderId = selectedGroup?.folderId ?? selectedGroup?.folder_id;
+    if (folderId !== undefined) {
+      (globalThis as any).__gestionGroupesLastFolderId = folderId;
+    }
+    setPage("gestionGroupes");
+  }, [selectedGroup, setPage]);
+
+  const editingEleve = useMemo(() => {
+    return eleves.find((eleve) => eleve.id === editingEleveId) ?? null;
+  }, [eleves, editingEleveId]);
+
+  const recapEleves = useMemo(() => {
+    return [...eleves].sort((a, b) => {
+      const aOrder = typeof a.order_index === "number" ? a.order_index : Number.MAX_SAFE_INTEGER;
+      const bOrder = typeof b.order_index === "number" ? b.order_index : Number.MAX_SAFE_INTEGER;
+
+      if (aOrder !== bOrder) return aOrder - bOrder;
+      return normalizeText(a.name).localeCompare(normalizeText(b.name), "fr", { sensitivity: "base" });
+    });
+  }, [eleves]);
+
   const fetchEleves = useCallback(async () => {
     setEmptyHint(null);
 
@@ -203,12 +320,11 @@ const GestionEleves: React.FC<Props> = ({ setPage, professeur, selectedGroup, se
     setRefreshing(false);
   }, [fetchEleves]);
 
-  /* ======================= Utils ======================= */
-  const generateEleveCode = useCallback(() => {
+  const generateEleveCode = useCallback((ignoredEleveId?: string | null) => {
     let newCode: string;
     do {
       newCode = Math.floor(100000 + Math.random() * 900000).toString();
-    } while (eleves.some((e) => e.code === newCode));
+    } while (eleves.some((e) => e.id !== ignoredEleveId && e.code === newCode));
     return newCode;
   }, [eleves]);
 
@@ -219,18 +335,6 @@ const GestionEleves: React.FC<Props> = ({ setPage, professeur, selectedGroup, se
     }, 0);
     return maxVal + 1;
   }, [eleves]);
-
-  const genreLabel = useCallback((genre: GenreEleve) => {
-    if (genre === "M") return "Garçon";
-    if (genre === "F") return "Fille";
-    return "Non défini";
-  }, []);
-
-  const genreBadgeStyle = useCallback((genre: GenreEleve) => {
-    if (genre === "M") return { backgroundColor: TAG_GARCON_BG, color: TAG_GARCON_TEXT };
-    if (genre === "F") return { backgroundColor: TAG_FILLE_BG, color: TAG_FILLE_TEXT };
-    return { backgroundColor: TAG_NEUTRE_BG, color: TAG_NEUTRE_TEXT };
-  }, []);
 
   const filteredAndSortedEleves = useMemo(() => {
     const q = normalizeText(searchTerm);
@@ -274,16 +378,41 @@ const GestionEleves: React.FC<Props> = ({ setPage, professeur, selectedGroup, se
     setEditingEleveId(eleve.id);
     setEditedEleveName(eleve.name);
     setEditedEleveGenre(eleve.genre ?? "M");
+    setEditedEleveCode(eleve.code);
   }, []);
 
   const cancelEditing = useCallback(() => {
     setEditingEleveId(null);
     setEditedEleveName("");
     setEditedEleveGenre("M");
+    setEditedEleveCode("");
+    Keyboard.dismiss();
   }, []);
+
+  const resetEditedEleveCode = useCallback(() => {
+    let newCode = "";
+    do {
+      newCode = generateEleveCode(editingEleveId);
+    } while (newCode === editedEleveCode);
+
+    setEditedEleveCode(newCode);
+  }, [generateEleveCode, editingEleveId, editedEleveCode]);
 
   const openAddModal = useCallback(() => {
     setShowAddModal(true);
+  }, []);
+
+  const openExportModal = useCallback(() => {
+    if (recapEleves.length === 0) {
+      Alert.alert("Aucun élève", "Il n'y a aucun code à télécharger pour cette classe.");
+      return;
+    }
+
+    setShowExportModal(true);
+  }, [recapEleves.length]);
+
+  const closeExportModal = useCallback(() => {
+    setShowExportModal(false);
   }, []);
 
   const closeAddModal = useCallback(() => {
@@ -293,23 +422,148 @@ const GestionEleves: React.FC<Props> = ({ setPage, professeur, selectedGroup, se
     Keyboard.dismiss();
   }, []);
 
-  const cycleSortMode = useCallback(() => {
-    setSortMode((prev) => {
-      if (prev === "order_asc") return "order_desc";
-      if (prev === "order_desc") return "alpha_asc";
-      if (prev === "alpha_asc") return "alpha_desc";
-      return "order_asc";
-    });
+  const openStudentStats = useCallback(
+    (eleve: Eleve) => {
+      if (onOpenStatistiquesEleve) {
+        onOpenStatistiquesEleve(eleve);
+        return;
+      }
+
+      (globalThis as any).__selectedStatistiquesEleve = eleve;
+      (globalThis as any).__selectedStatistiquesEleveId = eleve.id;
+      (globalThis as any).__selectedStatistiquesEleveGroupId = groupId;
+      (globalThis as any).__selectedStatistiquesEleveGroup = selectedGroup ?? null;
+      setPage("StatistiquesEleve");
+    },
+    [groupId, selectedGroup, setPage, onOpenStatistiquesEleve]
+  );
+
+  const buildRecapHtml = useCallback(() => {
+    const title = `Classe ${headerName}`;
+    const rows = recapEleves
+      .map(
+        (eleve) => `
+          <tr>
+            <td>${escapeHtml(getFirstName(eleve.name))}</td>
+            <td>${escapeHtml(eleve.code)}</td>
+          </tr>`
+      )
+      .join("");
+
+    return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>${escapeHtml(title)}</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        color: #233548;
+        padding: 32px;
+      }
+      h1 {
+        color: #1F5B86;
+        font-size: 24px;
+        margin: 0 0 20px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th {
+        background: #1F5B86;
+        color: #ffffff;
+        text-align: left;
+      }
+      th,
+      td {
+        border: 1px solid #C6D2DC;
+        padding: 10px 12px;
+        font-size: 14px;
+      }
+      tr:nth-child(even) td {
+        background: #F2F8FC;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>${escapeHtml(title)}</h1>
+    <table>
+      <thead>
+        <tr>
+          <th>Prénom</th>
+          <th>Code</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </body>
+</html>`;
+  }, [headerName, recapEleves]);
+
+  const downloadTextFile = useCallback((content: string, filename: string, mimeType: string) => {
+    const globalAny = globalThis as any;
+    const documentRef = globalAny.document;
+    const BlobRef = globalAny.Blob;
+    const URLRef = globalAny.URL || globalAny.webkitURL;
+
+    if (!documentRef || !BlobRef || !URLRef) {
+      Alert.alert("Téléchargement indisponible", "Cette exportation est disponible depuis la version web.");
+      return;
+    }
+
+    const blob = new BlobRef([content], { type: mimeType });
+    const url = URLRef.createObjectURL(blob);
+    const link = documentRef.createElement("a");
+    link.href = url;
+    link.download = filename;
+    documentRef.body.appendChild(link);
+    link.click();
+    documentRef.body.removeChild(link);
+    URLRef.revokeObjectURL(url);
   }, []);
 
-  const sortLabel = useMemo(() => {
-    if (sortMode === "order_asc") return "N° ↑";
-    if (sortMode === "order_desc") return "N° ↓";
-    if (sortMode === "alpha_asc") return "A → Z";
-    return "Z → A";
-  }, [sortMode]);
+  const exportRecap = useCallback(
+    (format: "pdf" | "word" | "excel") => {
+      const html = buildRecapHtml();
+      const fileBaseName = `codes-eleves-${getSafeFileName(headerName)}`;
 
-  /* ======================= CRUD ======================= */
+      if (format === "pdf") {
+        const globalAny = globalThis as any;
+        const windowRef = globalAny.window;
+
+        if (!windowRef?.open) {
+          Alert.alert("PDF indisponible", "L'export PDF est disponible depuis la version web.");
+          return;
+        }
+
+        const printWindow = windowRef.open("", "_blank");
+        if (!printWindow) {
+          Alert.alert("Fenêtre bloquée", "Autorisez l'ouverture de fenêtre pour générer le PDF.");
+          return;
+        }
+
+        printWindow.document.open();
+        printWindow.document.write(html);
+        printWindow.document.close();
+        printWindow.focus();
+        printWindow.print();
+        setShowExportModal(false);
+        return;
+      }
+
+      if (format === "word") {
+        downloadTextFile(`\ufeff${html}`, `${fileBaseName}.doc`, "application/msword;charset=utf-8");
+        setShowExportModal(false);
+        return;
+      }
+
+      downloadTextFile(`\ufeff${html}`, `${fileBaseName}.xls`, "application/vnd.ms-excel;charset=utf-8");
+      setShowExportModal(false);
+    },
+    [buildRecapHtml, downloadTextFile, headerName]
+  );
+
   const addEleveToSupabase = async () => {
     const trimmedName = newEleveName.trim();
 
@@ -360,17 +614,9 @@ const GestionEleves: React.FC<Props> = ({ setPage, professeur, selectedGroup, se
       return;
     }
 
-    const others = eleves.filter((e) => e.id !== eleveId);
-    if (others.some((e) => normalizeText(e.name) === normalizeText(trimmedName))) {
-      return Alert.alert("Doublon", "Un autre élève avec ce nom existe déjà dans ce groupe.");
-    }
-
     const { error } = await supabase
       .from("students")
-      .update({
-        name: trimmedName,
-        genre: editedEleveGenre,
-      })
+      .update({ name: trimmedName, genre: editedEleveGenre, code: editedEleveCode || generateEleveCode(eleveId) })
       .eq("id", eleveId)
       .eq("teacher_id", professeur.user_id)
       .eq("group_id", groupId);
@@ -416,28 +662,24 @@ const GestionEleves: React.FC<Props> = ({ setPage, professeur, selectedGroup, se
       return;
     }
 
-    if (editingEleveId === deleteTarget.id) {
-      cancelEditing();
-    }
+    if (editingEleveId === deleteTarget.id) cancelEditing();
 
     setDeleteTarget(null);
     await fetchEleves();
   }, [deleteTarget, professeur?.user_id, groupId, editingEleveId, fetchEleves, cancelEditing]);
 
-  /* ======================= Etats rapides ======================= */
   if (!groupId) {
     return (
-      <SafeAreaView style={styles.fullscreenCenter}>
-        <TouchableOpacity onPress={() => setPage("gestionGroupes")} style={styles.backPill}>
-          <ArrowLeft size={18} color="#fff" />
-          <Text style={styles.backPillText}>Retour aux groupes</Text>
-        </TouchableOpacity>
+      <SafeAreaView style={styles.safe}>
+        <View style={styles.centerScreen}>
+          <TouchableOpacity onPress={backToGroups} style={styles.backBtnLarge}>
+            <ArrowLeft size={18} color="#FFFFFF" strokeWidth={2.4} />
+            <Text style={styles.backBtnLargeText}>Retour aux groupes</Text>
+          </TouchableOpacity>
 
-        <Text style={[styles.centerText, { marginTop: 16, color: C_TEXT }]}>
-          Choisissez un groupe dans la page précédente.
-        </Text>
+          <Text style={styles.centerText}>Choisissez un groupe dans la page précédente.</Text>
+        </View>
 
-        <View style={{ height: BOTTOM_BAR_HEIGHT + SAFE_EXTRA_IOS }} />
         <BottomBar currentPage="gestionGroupes" onNavigate={setPage} />
       </SafeAreaView>
     );
@@ -445,256 +687,217 @@ const GestionEleves: React.FC<Props> = ({ setPage, professeur, selectedGroup, se
 
   if (!isLoaded) {
     return (
-      <SafeAreaView style={styles.fullscreenCenter}>
-        <ActivityIndicator size="large" />
-        <Text style={[styles.centerText, { marginTop: 12, color: C_TEXT }]}>Chargement des élèves…</Text>
-        <View style={{ height: BOTTOM_BAR_HEIGHT + SAFE_EXTRA_IOS }} />
+      <SafeAreaView style={styles.safe}>
+        <View style={styles.centerScreen}>
+          <ActivityIndicator size="large" color={HEADER_BG} />
+          <Text style={styles.centerText}>Chargement des élèves…</Text>
+        </View>
+
         <BottomBar currentPage="gestionGroupes" onNavigate={setPage} />
       </SafeAreaView>
     );
   }
 
-  const headerName = selectedGroup?.name ?? selectedGroup?.nom ?? "Groupe";
-
   return (
-    <SafeAreaView style={styles.root}>
-      <View style={[styles.header, isCompactHeader && styles.headerCompact]}>
-        <TouchableOpacity
-          onPress={() => setPage("gestionGroupes")}
-          style={styles.backPill}
-          accessibilityRole="button"
-          accessibilityLabel="Retour aux groupes"
+    <SafeAreaView style={styles.safe}>
+      <View style={styles.fill}>
+        <View
+          style={[
+            styles.header,
+            {
+              paddingHorizontal: horizontalPadding,
+            },
+          ]}
         >
-          <ArrowLeft size={18} color="#fff" />
-          {!isVerySmall && <Text style={styles.backBtnText}>Retour</Text>}
-        </TouchableOpacity>
+          <View style={styles.headerMainRow}>
+            <View style={styles.headerLeft}>
+              <TouchableOpacity onPress={backToGroups} style={styles.headerBackBtn}>
+                <ChevronLeft size={19} color="#FFFFFF" strokeWidth={3} />
+                <Text style={styles.headerBackText}>Retour</Text>
+              </TouchableOpacity>
+            </View>
 
-        <View style={styles.headerTitleWrap}>
-          <Text style={styles.headerTitle} numberOfLines={1}>
-            {headerName}
-          </Text>
-          <Text style={styles.headerSubtitle}>
-            {eleves.length} élève{eleves.length > 1 ? "s" : ""}
-          </Text>
+            <View style={styles.headerActions}>
+              <TouchableOpacity
+                onPress={() => setPage("CreationGroupeSessionEleve")}
+                style={styles.headerActionBtn}
+              >
+                <Users size={18} color="#FFFFFF" strokeWidth={2.4} />
+              </TouchableOpacity>
+
+              <TouchableOpacity onPress={openExportModal} style={styles.headerActionBtn}>
+                <Download size={18} color="#FFFFFF" strokeWidth={2.4} />
+              </TouchableOpacity>
+
+              <TouchableOpacity onPress={() => setShowSearch((v) => !v)} style={styles.headerActionBtn}>
+                <Search size={18} color="#FFFFFF" strokeWidth={2.4} />
+              </TouchableOpacity>
+            </View>
+          </View>
 
           {showSearch && (
             <View style={styles.headerSearchBar}>
               <TextInput
-                placeholder="Rechercher un élève…"
-                placeholderTextColor="rgba(255,255,255,0.85)"
+                placeholder="Rechercher un élève ou un code…"
+                placeholderTextColor="rgba(255,255,255,0.82)"
                 value={searchTerm}
                 onChangeText={setSearchTerm}
                 style={styles.inputHeader}
                 returnKeyType="search"
                 autoFocus
               />
-              <TouchableOpacity onPress={() => setShowSearch(false)} style={styles.headerSearchClose}>
-                <Text style={styles.headerSearchCloseTxt}>Fermer</Text>
+              <TouchableOpacity
+                onPress={() => {
+                  setShowSearch(false);
+                  setSearchTerm("");
+                }}
+                style={styles.headerSearchClose}
+              >
+                <X size={18} color="#FFFFFF" strokeWidth={2.5} />
               </TouchableOpacity>
             </View>
           )}
         </View>
 
-        <TouchableOpacity
-          onPress={() => setShowSearch((v) => !v)}
-          style={styles.searchIcon}
-          accessibilityLabel="Rechercher"
+        <View style={styles.subHeader}>
+          <Text style={[styles.headerTitle, { fontSize: headerTitleSize }]} numberOfLines={1}>
+            {headerName}
+          </Text>
+          <Text style={styles.headerSubtitle} numberOfLines={1}>
+            {eleves.length} élève{eleves.length > 1 ? "s" : ""}
+          </Text>
+        </View>
+
+        <View
+          style={[
+            styles.contentZone,
+            {
+              paddingHorizontal: horizontalPadding,
+              paddingTop: isPhone ? 12 : 16,
+            },
+          ]}
         >
-          <Search size={18} color="#fff" />
-        </TouchableOpacity>
+          <FlatList
+            key={`grid-${numColumns}`}
+            data={filteredAndSortedEleves}
+            keyExtractor={(item) => item.id}
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            keyboardShouldPersistTaps="handled"
+            numColumns={numColumns}
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={{
+              paddingBottom: BOTTOM_BAR_HEIGHT + 106,
+            }}
+            columnWrapperStyle={numColumns > 1 ? styles.columnWrapper : undefined}
+            ListHeaderComponent={
+              emptyHint && filteredAndSortedEleves.length === 0 ? (
+                <View style={styles.emptyBox}>
+                  <Text style={styles.emptyText}>{emptyHint}</Text>
+                </View>
+              ) : null
+            }
+            renderItem={({ item }) => {
+              const cardColors = getStudentCardColors(item.genre);
+
+	              return (
+	                <View style={[styles.itemOuter, { width: cardWidth }]}>
+	                  <TouchableOpacity
+	                    activeOpacity={0.9}
+	                    onPress={() => openStudentStats(item)}
+	                    style={[
+	                      styles.studentCard,
+	                      {
+	                        height: cardHeight,
+	                        backgroundColor: cardColors.backgroundColor,
+                        borderColor: cardColors.borderColor,
+                      },
+	                    ]}
+	                  >
+	                    <View
+	                      pointerEvents="none"
+	                      style={[
+	                        styles.genderAccent,
+	                        { backgroundColor: cardColors.accentColor },
+	                      ]}
+	                    />
+	                    <View style={styles.cardHeaderLine}>
+	                      <View style={styles.numberPill}>
+	                        <Text style={styles.numberPillText}>N° {item.order_index ?? "—"}</Text>
+	                      </View>
+
+	                      <View style={styles.cardTopActions}>
+	                        <TouchableOpacity
+	                          onPress={(event: any) => {
+	                            event?.stopPropagation?.();
+	                            startEditing(item);
+	                          }}
+	                          style={styles.iconBtn}
+	                          accessibilityLabel="Modifier l'élève"
+	                        >
+	                          <Edit3 size={15} color={HEADER_BG} strokeWidth={2.4} />
+	                        </TouchableOpacity>
+
+	                        <TouchableOpacity
+	                          onPress={(event: any) => {
+	                            event?.stopPropagation?.();
+	                            askDeleteEleve(item);
+	                          }}
+	                          style={[styles.iconBtn, styles.actionDeleteSoft]}
+	                          accessibilityLabel="Supprimer l'élève"
+	                        >
+	                          <Trash2 size={15} color={RED} strokeWidth={2.4} />
+	                        </TouchableOpacity>
+	                      </View>
+	                    </View>
+
+	                    <View style={styles.studentMainContent}>
+	                      <Text
+	                        style={[
+	                          styles.studentName,
+	                          isPhone && styles.studentNamePhone,
+	                          verySmallPhone && styles.studentNameVerySmall,
+	                        ]}
+	                        numberOfLines={2}
+	                      >
+	                        {item.name || "Sans nom"}
+	                      </Text>
+
+	                      <View style={styles.codeBox}>
+	                        <Text style={styles.codeLabel}>Code</Text>
+	                        <Text style={styles.codeMono} numberOfLines={1}>
+	                          {item.code}
+	                        </Text>
+	                      </View>
+	                    </View>
+	                  </TouchableOpacity>
+                </View>
+              );
+            }}
+          />
+        </View>
+
+        <View style={styles.fabWrap} pointerEvents="box-none">
+          <TouchableOpacity onPress={openAddModal} style={styles.fab} activeOpacity={0.9}>
+            <UserPlus size={21} color="#FFFFFF" strokeWidth={2.4} />
+            <Text style={styles.fabText}>Ajouter un élève</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
-      <FlatList
-        key={`grid-${numColumns}`}
-        data={filteredAndSortedEleves}
-        keyExtractor={(item) => item.id}
-        refreshing={refreshing}
-        onRefresh={onRefresh}
-        keyboardShouldPersistTaps="handled"
-        numColumns={numColumns}
-        contentContainerStyle={{
-          paddingHorizontal: contentPadding,
-          paddingTop: 8,
-          paddingBottom: BOTTOM_BAR_HEIGHT + 100,
-        }}
-        columnWrapperStyle={numColumns > 1 ? styles.columnWrapper : undefined}
-        ListHeaderComponent={
-          <View>
-            <View style={styles.listTopRow}>
-              <Text style={styles.sectionTitle}>Liste des élèves ({filteredAndSortedEleves.length})</Text>
-
-              <TouchableOpacity
-                style={styles.sortBtn}
-                onPress={cycleSortMode}
-                accessibilityLabel="Changer le mode de tri"
-              >
-                {sortMode === "alpha_asc" ? (
-                  <ArrowUpAZ size={16} color={C_TEXT} />
-                ) : sortMode === "alpha_desc" ? (
-                  <ArrowDownAZ size={16} color={C_TEXT} />
-                ) : (
-                  <Hash size={16} color={C_TEXT} />
-                )}
-                <Text style={styles.sortBtnText}>{sortLabel}</Text>
-              </TouchableOpacity>
-            </View>
-
-            {emptyHint && filteredAndSortedEleves.length === 0 && (
-              <View style={styles.emptyBox}>
-                <Text style={styles.emptyText}>{emptyHint}</Text>
-              </View>
-            )}
-          </View>
-        }
-        renderItem={({ item }) => {
-          const badge = genreBadgeStyle(item.genre);
-
-          return (
-            <View style={[styles.itemOuter, { width: cardWidth }]}>
-              <View style={[styles.studentCard, { height: cardHeight, minHeight: cardHeight }]}>
-                <View style={styles.studentTop}>
-                  {editingEleveId === item.id ? (
-                    <>
-                      <TextInput
-                        value={editedEleveName}
-                        onChangeText={setEditedEleveName}
-                        style={[styles.editInput, isPhone && styles.editInputPhone]}
-                        autoFocus
-                        returnKeyType="done"
-                        onSubmitEditing={() => updateEleveInSupabase(item.id)}
-                      />
-
-                      <View style={styles.editPickerBlock}>
-                        <Text style={styles.smallLabel}>Genre</Text>
-                        <View style={styles.pickerWrapSmall}>
-                          <Picker
-                            selectedValue={editedEleveGenre ?? "M"}
-                            onValueChange={(val) => setEditedEleveGenre((val as GenreEleve) ?? "M")}
-                            dropdownIconColor={C_TEXT}
-                            style={[styles.pickerSmall, isPhone && styles.pickerSmallPhone]}
-                          >
-                            <Picker.Item label="Garçon" value="M" />
-                            <Picker.Item label="Fille" value="F" />
-                          </Picker>
-                        </View>
-                      </View>
-                    </>
-                  ) : (
-                    <>
-                      <View style={styles.topMetaRow}>
-                        <View style={styles.numberPill}>
-                          <Text style={styles.numberPillText}>N° {item.order_index ?? "—"}</Text>
-                        </View>
-                      </View>
-
-                      <Text
-                        style={[
-                          styles.studentName,
-                          isPhone && styles.studentNamePhone,
-                          isSmallPhone && styles.studentNameSmallPhone,
-                        ]}
-                        numberOfLines={2}
-                      >
-                        {item.name || "Sans nom"}
-                      </Text>
-
-                      <View
-                        style={[
-                          styles.genreBadge,
-                          isPhone && styles.genreBadgePhone,
-                          { backgroundColor: badge.backgroundColor },
-                        ]}
-                      >
-                        <Text
-                          style={[
-                            styles.genreBadgeText,
-                            isPhone && styles.genreBadgeTextPhone,
-                            { color: badge.color },
-                          ]}
-                          numberOfLines={1}
-                        >
-                          {genreLabel(item.genre)}
-                        </Text>
-                      </View>
-
-                      <View style={styles.codeRow}>
-                        <Text style={[styles.codeLabel, isPhone && styles.codeLabelPhone]}>Code</Text>
-                        <Text style={[styles.codeMono, isPhone && styles.codeMonoPhone]} numberOfLines={1}>
-                          {item.code}
-                        </Text>
-                      </View>
-                    </>
-                  )}
-                </View>
-
-                <View style={[styles.actionsRow, isPhone && styles.actionsRowPhone]}>
-                  {editingEleveId === item.id ? (
-                    <>
-                      <TouchableOpacity
-                        onPress={() => updateEleveInSupabase(item.id)}
-                        style={[styles.iconBtn, styles.actionSave, isPhone && styles.iconBtnPhone]}
-                        accessibilityLabel="Sauvegarder"
-                      >
-                        <Save size={isPhone ? 14 : 16} color={C_TEXT} />
-                      </TouchableOpacity>
-
-                      <TouchableOpacity
-                        onPress={cancelEditing}
-                        style={[styles.iconBtn, styles.actionCancel, isPhone && styles.iconBtnPhone]}
-                        accessibilityLabel="Annuler"
-                      >
-                        <X size={isPhone ? 14 : 16} color={C_TEXT} />
-                      </TouchableOpacity>
-                    </>
-                  ) : (
-                    <>
-                      <TouchableOpacity
-                        onPress={() => startEditing(item)}
-                        style={[styles.iconBtn, isPhone && styles.iconBtnPhone]}
-                        accessibilityLabel="Modifier l'élève"
-                      >
-                        <Edit3 size={isPhone ? 14 : 16} color={C_TEXT} />
-                      </TouchableOpacity>
-
-                      <TouchableOpacity
-                        onPress={() => askDeleteEleve(item)}
-                        style={[styles.iconBtn, styles.actionDelete, isPhone && styles.iconBtnPhone]}
-                        accessibilityLabel="Supprimer l'élève"
-                      >
-                        <Trash2 size={isPhone ? 14 : 16} color="#991b1b" />
-                      </TouchableOpacity>
-                    </>
-                  )}
-                </View>
-              </View>
-            </View>
-          );
-        }}
-      />
-
-      {/* Bouton flottant style "Créer une balise" */}
-      <View style={styles.fabWrap}>
-        <TouchableOpacity onPress={openAddModal} style={styles.fab} activeOpacity={0.9}>
-          <UserPlus size={22} color="#fff" />
-          <Text style={styles.fabText}>Ajouter un élève</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Modal ajout */}
       <Modal visible={showAddModal} animationType="fade" transparent onRequestClose={closeAddModal}>
         <Pressable style={styles.modalOverlay} onPress={closeAddModal}>
-          <Pressable
-            style={[styles.modalCard, { width: Math.min(width - 28, 520) }]}
-            onPress={(e) => e.stopPropagation()}
-          >
+          <Pressable style={[styles.modalCard, { width: Math.min(width - 28, 520) }]} onPress={(e) => e.stopPropagation()}>
             <View style={styles.modalHeader}>
               <View style={styles.modalTitleRow}>
-                <UserPlus size={20} color="#10b981" />
-                <Text style={styles.modalTitle}>Ajouter un nouvel élève</Text>
+                <View style={styles.modalIconBlue}>
+                  <UserPlus size={20} color="#FFFFFF" strokeWidth={2.4} />
+                </View>
+                <Text style={styles.modalTitle}>Ajouter un élève</Text>
               </View>
 
-              <TouchableOpacity onPress={closeAddModal} style={styles.modalCloseBtn}>
-                <X size={18} color={C_TEXT} />
+              <TouchableOpacity onPress={closeAddModal} style={styles.closeBtn}>
+                <X size={20} color={HEADER_BG} strokeWidth={2.5} />
               </TouchableOpacity>
             </View>
 
@@ -702,7 +905,7 @@ const GestionEleves: React.FC<Props> = ({ setPage, professeur, selectedGroup, se
               <Text style={styles.label}>Nom de l'élève</Text>
               <TextInput
                 placeholder="Ex : Jean Dupont"
-                placeholderTextColor="rgba(15,23,42,0.45)"
+                placeholderTextColor="rgba(35,53,72,0.45)"
                 value={newEleveName}
                 onChangeText={setNewEleveName}
                 onSubmitEditing={addEleveToSupabase}
@@ -716,7 +919,7 @@ const GestionEleves: React.FC<Props> = ({ setPage, professeur, selectedGroup, se
                 <Picker
                   selectedValue={newEleveGenre ?? "M"}
                   onValueChange={(val) => setNewEleveGenre((val as GenreEleve) ?? "M")}
-                  dropdownIconColor={C_TEXT}
+                  dropdownIconColor={HEADER_BG}
                   style={styles.picker}
                 >
                   <Picker.Item label="Garçon" value="M" />
@@ -734,7 +937,7 @@ const GestionEleves: React.FC<Props> = ({ setPage, professeur, selectedGroup, se
                 </TouchableOpacity>
 
                 <TouchableOpacity onPress={addEleveToSupabase} style={styles.primaryBtn}>
-                  <UserPlus size={16} color="#fff" />
+                  <UserPlus size={16} color="#FFFFFF" strokeWidth={2.4} />
                   <Text style={styles.primaryBtnText}>Ajouter</Text>
                 </TouchableOpacity>
               </View>
@@ -743,21 +946,156 @@ const GestionEleves: React.FC<Props> = ({ setPage, professeur, selectedGroup, se
         </Pressable>
       </Modal>
 
-      {/* Modal suppression */}
-      <Modal visible={!!deleteTarget} animationType="fade" transparent onRequestClose={cancelDeleteEleve}>
-        <Pressable style={styles.modalOverlay} onPress={cancelDeleteEleve}>
-          <Pressable
-            style={[styles.modalCard, { width: Math.min(width - 28, 460) }]}
-            onPress={(e) => e.stopPropagation()}
-          >
+      <Modal visible={!!editingEleve} animationType="fade" transparent onRequestClose={cancelEditing}>
+        <KeyboardAvoidingView
+          style={styles.modalKeyboardView}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          keyboardVerticalOffset={12}
+        >
+          <Pressable style={styles.modalOverlay} onPress={cancelEditing}>
+            <ScrollView
+              style={styles.modalScroll}
+              contentContainerStyle={styles.modalScrollContent}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
+              <Pressable
+                style={[styles.modalCard, styles.editModalCard, { width: Math.min(width - 28, 520) }]}
+                onPress={(e) => e.stopPropagation()}
+              >
+                <View style={styles.modalHeader}>
+                  <View style={styles.modalTitleRow}>
+                    <View style={styles.modalIconBlue}>
+                      <Edit3 size={20} color="#FFFFFF" strokeWidth={2.4} />
+                    </View>
+                    <Text style={styles.modalTitle}>Modifier l'élève</Text>
+                  </View>
+
+                  <TouchableOpacity onPress={cancelEditing} style={styles.closeBtn}>
+                    <X size={20} color={HEADER_BG} strokeWidth={2.5} />
+                  </TouchableOpacity>
+                </View>
+
+                <View style={styles.modalBody}>
+                  <Text style={styles.label}>Prénom</Text>
+                  <TextInput
+                    placeholder="Ex : Jean"
+                    placeholderTextColor="rgba(35,53,72,0.45)"
+                    value={editedEleveName}
+                    onChangeText={setEditedEleveName}
+                    onSubmitEditing={() => editingEleve && updateEleveInSupabase(editingEleve.id)}
+                    style={styles.input}
+                    returnKeyType="done"
+                  />
+
+                  <Text style={[styles.label, { marginTop: 12 }]}>Genre</Text>
+                  <View style={styles.genderSegment}>
+                    <TouchableOpacity
+                      onPress={() => setEditedEleveGenre("M")}
+                      style={[styles.genderOption, editedEleveGenre === "M" && styles.genderOptionActive]}
+                    >
+                      <Text style={[styles.genderOptionText, editedEleveGenre === "M" && styles.genderOptionTextActive]}>
+                        Garçon
+                      </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      onPress={() => setEditedEleveGenre("F")}
+                      style={[styles.genderOption, editedEleveGenre === "F" && styles.genderOptionActive]}
+                    >
+                      <Text style={[styles.genderOptionText, editedEleveGenre === "F" && styles.genderOptionTextActive]}>
+                        Fille
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  <Text style={[styles.label, { marginTop: 12 }]}>Code</Text>
+                  <View style={styles.codeEditRow}>
+                    <View style={styles.codeEditBox}>
+                      <Text style={styles.codeEditText}>{editedEleveCode || "—"}</Text>
+                    </View>
+
+                    <TouchableOpacity
+                      onPress={resetEditedEleveCode}
+                      style={styles.resetCodeBtn}
+                      accessibilityLabel="Réinitialiser le code"
+                    >
+                      <RotateCcw size={18} color={HEADER_BG} strokeWidth={2.5} />
+                    </TouchableOpacity>
+                  </View>
+
+                  <View style={styles.modalActions}>
+                    <TouchableOpacity onPress={cancelEditing} style={styles.secondaryBtn}>
+                      <Text style={styles.secondaryBtnText}>Annuler</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      onPress={() => editingEleve && updateEleveInSupabase(editingEleve.id)}
+                      style={styles.primaryBtn}
+                    >
+                      <Save size={16} color="#FFFFFF" strokeWidth={2.4} />
+                      <Text style={styles.primaryBtnText}>Enregistrer</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </Pressable>
+            </ScrollView>
+          </Pressable>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      <Modal visible={showExportModal} animationType="fade" transparent onRequestClose={closeExportModal}>
+        <Pressable style={styles.modalOverlay} onPress={closeExportModal}>
+          <Pressable style={[styles.modalCard, { width: Math.min(width - 28, 500) }]} onPress={(e) => e.stopPropagation()}>
             <View style={styles.modalHeader}>
               <View style={styles.modalTitleRow}>
-                <Trash2 size={20} color="#dc2626" />
+                <View style={styles.modalIconBlue}>
+                  <Download size={20} color="#FFFFFF" strokeWidth={2.4} />
+                </View>
+                <Text style={styles.modalTitle}>Télécharger les codes</Text>
+              </View>
+
+              <TouchableOpacity onPress={closeExportModal} style={styles.closeBtn}>
+                <X size={20} color={HEADER_BG} strokeWidth={2.5} />
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.modalBody}>
+              <Text style={styles.exportIntro}>
+                {headerName} · {recapEleves.length} élève{recapEleves.length > 1 ? "s" : ""}
+              </Text>
+
+              <View style={styles.exportFormatGrid}>
+                <TouchableOpacity onPress={() => exportRecap("pdf")} style={styles.exportOptionBtn}>
+                  <Text style={styles.exportOptionTitle}>PDF</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity onPress={() => exportRecap("word")} style={styles.exportOptionBtn}>
+                  <Text style={styles.exportOptionTitle}>Word</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity onPress={() => exportRecap("excel")} style={styles.exportOptionBtn}>
+                  <Text style={styles.exportOptionTitle}>Excel</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal visible={!!deleteTarget} animationType="fade" transparent onRequestClose={cancelDeleteEleve}>
+        <Pressable style={styles.modalOverlay} onPress={cancelDeleteEleve}>
+          <Pressable style={[styles.modalCard, { width: Math.min(width - 28, 460) }]} onPress={(e) => e.stopPropagation()}>
+            <View style={styles.modalHeader}>
+              <View style={styles.modalTitleRow}>
+                <View style={styles.modalIconRed}>
+                  <Trash2 size={20} color="#FFFFFF" strokeWidth={2.4} />
+                </View>
                 <Text style={styles.modalTitle}>Supprimer un élève</Text>
               </View>
 
-              <TouchableOpacity onPress={cancelDeleteEleve} style={styles.modalCloseBtn}>
-                <X size={18} color={C_TEXT} />
+              <TouchableOpacity onPress={cancelDeleteEleve} style={styles.closeBtn}>
+                <X size={20} color={HEADER_BG} strokeWidth={2.5} />
               </TouchableOpacity>
             </View>
 
@@ -771,12 +1109,8 @@ const GestionEleves: React.FC<Props> = ({ setPage, professeur, selectedGroup, se
                   <Text style={styles.secondaryBtnText}>Annuler</Text>
                 </TouchableOpacity>
 
-                <TouchableOpacity
-                  onPress={confirmDeleteEleve}
-                  style={styles.deleteBtn}
-                  disabled={!!deletingId}
-                >
-                  <Trash2 size={16} color="#fff" />
+                <TouchableOpacity onPress={confirmDeleteEleve} style={styles.deleteBtn} disabled={!!deletingId}>
+                  <Trash2 size={16} color="#FFFFFF" strokeWidth={2.4} />
                   <Text style={styles.deleteBtnText}>{deletingId ? "Suppression..." : "Supprimer"}</Text>
                 </TouchableOpacity>
               </View>
@@ -794,158 +1128,193 @@ export default GestionEleves;
 
 /* ======================= Styles ======================= */
 const styles = StyleSheet.create({
-  root: {
+  safe: {
     flex: 1,
-    backgroundColor: C_BG,
+    backgroundColor: PAGE_BG,
   },
 
-  fullscreenCenter: {
+  fill: {
     flex: 1,
-    backgroundColor: C_BG,
+  },
+
+  centerScreen: {
+    flex: 1,
+    backgroundColor: PAGE_BG,
     alignItems: "center",
     justifyContent: "center",
     padding: 24,
   },
+
   centerText: {
+    marginTop: 14,
+    color: CARD_TITLE,
     fontSize: 16,
+    fontWeight: "700",
     textAlign: "center",
-    opacity: 0.9,
+  },
+
+  backBtnLarge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: HEADER_BG,
+    borderRadius: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+
+  backBtnLargeText: {
+    color: "#FFFFFF",
+    fontSize: 15,
+    fontWeight: "900",
   },
 
   header: {
-    backgroundColor: C_HEADER,
-    paddingHorizontal: 14,
-    paddingTop: Platform.select({ ios: 12, android: 12, default: 12 }),
-    paddingBottom: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: "rgba(0,0,0,0.06)",
+    backgroundColor: HEADER_BG,
+    justifyContent: "center",
+    paddingVertical: 8,
+    shadowColor: "#000",
+    shadowOpacity: 0.15,
+    shadowOffset: { width: 0, height: 3 },
+    shadowRadius: 8,
+    elevation: 6,
+  },
+
+  headerMainRow: {
     flexDirection: "row",
-    alignItems: "flex-start",
+    alignItems: "center",
     justifyContent: "space-between",
     gap: 10,
   },
-  headerCompact: {
-    paddingHorizontal: 10,
-  },
 
-  backPill: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingVertical: 8,
-    paddingHorizontal: 10,
-    borderRadius: 12,
-    backgroundColor: "rgba(255,255,255,0.22)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.35)",
-    marginTop: 2,
-  },
-  backPillText: {
-    color: "#fff",
-    fontWeight: "700",
-    marginLeft: 6,
-  },
-  backBtnText: {
-    color: "#fff",
-    marginLeft: 6,
-    fontWeight: "800",
-  },
-
-  headerTitleWrap: {
+  headerLeft: {
     flex: 1,
     minWidth: 0,
-    alignItems: "flex-start",
-  },
-  headerTitle: {
-    color: "white",
-    fontSize: 22,
-    fontWeight: "800",
-  },
-  headerSubtitle: {
-    color: "rgba(255,255,255,0.92)",
-    marginTop: 2,
+    flexDirection: "row",
+    alignItems: "center",
   },
 
-  searchIcon: {
-    padding: 8,
-    borderRadius: 10,
+  headerBackBtn: {
+    minHeight: 38,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 13,
+    backgroundColor: "#2B79B1",
+    borderWidth: 2,
+    borderColor: "rgba(255,255,255,0.28)",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 5,
+    shadowColor: "#000",
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 4,
+  },
+
+  headerBackText: {
+    color: "#FFFFFF",
+    fontSize: 13,
+    fontWeight: "800",
+  },
+
+  headerTitleBox: {
+    flex: 1,
+    minWidth: 0,
+  },
+
+  headerTitle: {
+    color: HEADER_TITLE,
+    fontWeight: "900",
+    letterSpacing: 0.8,
+    textAlign: "center",
+  },
+
+  headerSubtitle: {
+    color: "rgba(255,255,255,0.86)",
+    fontSize: 12.5,
+    fontWeight: "700",
     marginTop: 2,
+    textAlign: "center",
+  },
+
+  subHeader: {
+    backgroundColor: "#2B79B1",
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    alignItems: "center",
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255,255,255,0.14)",
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(0,0,0,0.08)",
+  },
+
+  headerActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+
+  headerActionBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    backgroundColor: HEADER_ICON_BG,
+    alignItems: "center",
+    justifyContent: "center",
   },
 
   headerSearchBar: {
-    marginTop: 8,
+    marginTop: 10,
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    width: "100%",
   },
+
   inputHeader: {
     flex: 1,
     minWidth: 0,
-    backgroundColor: "rgba(255,255,255,0.25)",
+    backgroundColor: "rgba(255,255,255,0.16)",
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.35)",
-    borderRadius: 12,
-    color: "white",
+    borderColor: "rgba(255,255,255,0.24)",
+    borderRadius: 14,
+    color: "#FFFFFF",
     paddingHorizontal: 12,
-    paddingVertical: Platform.select({ web: 10, default: 8 }),
+    paddingVertical: Platform.select({ web: 10, default: 9 }),
+    fontWeight: "700",
   },
+
   headerSearchClose: {
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderRadius: 10,
-    backgroundColor: "rgba(255,255,255,0.25)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.35)",
-  },
-  headerSearchCloseTxt: {
-    color: "white",
-    fontWeight: "800",
-  },
-
-  listTopRow: {
-    flexDirection: "row",
+    width: 40,
+    height: 40,
+    borderRadius: 13,
+    backgroundColor: HEADER_ICON_BG,
     alignItems: "center",
-    justifyContent: "space-between",
-    gap: 8,
-    marginBottom: 8,
-    flexWrap: "wrap",
+    justifyContent: "center",
   },
 
-  sectionTitle: {
-    color: C_TEXT,
-    fontWeight: "800",
-    fontSize: 18,
-    flexShrink: 1,
-  },
-
-  sortBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: "rgba(15,23,42,0.06)",
-    borderWidth: 1,
-    borderColor: C_BORDER,
-  },
-  sortBtnText: {
-    color: C_TEXT,
-    fontWeight: "800",
-    fontSize: 13,
+  contentZone: {
+    flex: 1,
+    backgroundColor: CONTENT_BG,
+    borderTopWidth: 1,
+    borderTopColor: CONTENT_BORDER,
   },
 
   emptyBox: {
-    backgroundColor: "white",
+    backgroundColor: CARD_BG,
     borderWidth: 1,
-    borderColor: C_BORDER,
-    borderRadius: 14,
+    borderColor: CARD_BORDER,
+    borderRadius: 18,
     padding: 16,
-    marginBottom: 12,
+    ...(Platform.OS === "ios" ? IOS_SHADOW : {}),
+    elevation: Platform.OS === "android" ? 2 : 0,
   },
+
   emptyText: {
-    color: "rgba(15,23,42,0.7)",
+    color: CARD_MUTED,
     textAlign: "center",
+    fontWeight: "700",
   },
 
   columnWrapper: {
@@ -953,194 +1322,129 @@ const styles = StyleSheet.create({
     gap: GRID_GAP,
     marginBottom: GRID_GAP,
   },
+
   itemOuter: {
     marginBottom: GRID_GAP,
   },
 
   studentCard: {
-    backgroundColor: "white",
     borderWidth: 1,
-    borderColor: C_BORDER,
-    borderRadius: 12,
-    padding: 8,
+    borderRadius: 18,
+    padding: 10,
     justifyContent: "space-between",
+    overflow: "hidden",
+    ...(Platform.OS === "ios" ? IOS_SHADOW : {}),
+    elevation: Platform.OS === "android" ? 2 : 0,
   },
-  studentTop: {
-    flex: 1,
-    minHeight: 0,
+  genderAccent: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 4,
   },
 
-  topMetaRow: {
+  cardHeaderLine: {
+    height: 34,
     flexDirection: "row",
-    justifyContent: "flex-start",
-    marginBottom: 4,
-  },
-  numberPill: {
-    paddingHorizontal: 7,
-    paddingVertical: 3,
-    borderRadius: 999,
-    backgroundColor: "rgba(15,23,42,0.07)",
-    alignSelf: "flex-start",
-  },
-  numberPillText: {
-    color: C_TEXT,
-    fontSize: 10,
-    fontWeight: "800",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 6,
   },
 
-  studentName: {
-    color: C_TEXT,
-    fontSize: 14,
-    fontWeight: "800",
-    lineHeight: 18,
-    minHeight: 34,
-    marginBottom: 5,
-  },
-  studentNamePhone: {
-    fontSize: 12.5,
-    lineHeight: 15,
-    minHeight: 30,
-    marginBottom: 4,
-  },
-  studentNameSmallPhone: {
-    fontSize: 11.5,
-    lineHeight: 14,
-    minHeight: 28,
-  },
-
-  genreBadge: {
-    alignSelf: "flex-start",
-    paddingHorizontal: 7,
-    paddingVertical: 3,
-    borderRadius: 999,
-    marginBottom: 5,
-    maxWidth: "100%",
-  },
-  genreBadgePhone: {
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    marginBottom: 4,
-  },
-  genreBadgeText: {
-    fontSize: 10.5,
-    fontWeight: "800",
-  },
-  genreBadgeTextPhone: {
-    fontSize: 9.5,
-  },
-
-  codeRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 5,
-  },
-  codeLabel: {
-    color: "rgba(15,23,42,0.75)",
-    fontSize: 10.5,
-    fontWeight: "700",
-  },
-  codeLabelPhone: {
-    fontSize: 9.5,
-  },
-  codeMono: {
-    flexShrink: 1,
-    color: C_TEXT,
-    fontSize: 11,
-    fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
-    backgroundColor: "rgba(0,0,0,0.04)",
-    paddingHorizontal: 6,
-    paddingVertical: 3,
-    borderRadius: 7,
-  },
-  codeMonoPhone: {
-    fontSize: 10,
-    paddingHorizontal: 5,
-    paddingVertical: 2,
-  },
-
-  actionsRow: {
+  cardTopActions: {
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-    justifyContent: "flex-end",
-    marginTop: 6,
   },
-  actionsRowPhone: {
-    gap: 5,
-    marginTop: 4,
+
+  studentMainContent: {
+    flex: 1,
+    justifyContent: "flex-end",
+    paddingTop: 8,
+  },
+
+  numberPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.72)",
+    borderWidth: 1,
+    borderColor: BLUE_BORDER,
+  },
+
+  numberPillText: {
+    color: HEADER_BG,
+    fontSize: 10.5,
+    fontWeight: "900",
+  },
+
+  studentName: {
+    color: CARD_TITLE,
+    fontSize: 15,
+    fontWeight: "900",
+    lineHeight: 19,
+    minHeight: 38,
+    marginBottom: 8,
+  },
+
+  studentNamePhone: {
+    fontSize: 13,
+    lineHeight: 16,
+    minHeight: 32,
+    marginBottom: 7,
+  },
+
+  studentNameVerySmall: {
+    fontSize: 12,
+    lineHeight: 15,
+    minHeight: 30,
+  },
+
+  codeBox: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    alignSelf: "flex-start",
+    maxWidth: "100%",
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderRadius: 12,
+    backgroundColor: "rgba(255,255,255,0.72)",
+    borderWidth: 1,
+    borderColor: "#DCE7EF",
+  },
+
+  codeLabel: {
+    color: CARD_MUTED,
+    fontSize: 10.5,
+    fontWeight: "900",
+  },
+
+  codeMono: {
+    flexShrink: 1,
+    color: CARD_TITLE,
+    fontSize: 11.5,
+    fontWeight: "900",
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
   },
 
   iconBtn: {
-    width: 30,
-    height: 30,
+    width: 31,
+    height: 31,
     borderRadius: 999,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(0,0,0,0.04)",
+    backgroundColor: "rgba(255,255,255,0.72)",
     borderWidth: 1,
-    borderColor: C_BORDER,
-  },
-  iconBtnPhone: {
-    width: 26,
-    height: 26,
+    borderColor: BLUE_BORDER,
   },
 
-  actionSave: {
-    backgroundColor: "rgba(59,130,246,0.14)",
-    borderColor: "rgba(59,130,246,0.35)",
-  },
-  actionCancel: {
-    backgroundColor: "rgba(239,68,68,0.14)",
-    borderColor: "rgba(239,68,68,0.35)",
-  },
-  actionDelete: {
-    backgroundColor: "rgba(239,68,68,0.14)",
-    borderColor: "rgba(239,68,68,0.35)",
+  actionDeleteSoft: {
+    backgroundColor: "rgba(255,255,255,0.72)",
+    borderColor: "rgba(220,38,38,0.22)",
   },
 
-  editInput: {
-    backgroundColor: "rgba(0,0,0,0.04)",
-    borderWidth: 1,
-    borderColor: C_BORDER,
-    borderRadius: 10,
-    color: C_TEXT,
-    paddingHorizontal: 10,
-    paddingVertical: Platform.select({ web: 8, default: 7 }),
-    fontSize: 13,
-    marginBottom: 8,
-  },
-  editInputPhone: {
-    fontSize: 12,
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-    marginBottom: 6,
-  },
-
-  editPickerBlock: {
-    marginTop: 2,
-  },
-  smallLabel: {
-    color: "rgba(15,23,42,0.7)",
-    fontSize: 11,
-    marginBottom: 4,
-    fontWeight: "700",
-  },
-  pickerWrapSmall: {
-    backgroundColor: "rgba(0,0,0,0.04)",
-    borderWidth: 1,
-    borderColor: C_BORDER,
-    borderRadius: 10,
-    overflow: "hidden",
-  },
-  pickerSmall: {
-    color: C_TEXT,
-    height: 38,
-  },
-  pickerSmallPhone: {
-    height: 34,
-  },
-
-  /* ===== Bouton flottant style GestionBalises ===== */
   fabWrap: {
     position: "absolute",
     bottom: BOTTOM_BAR_HEIGHT + 24,
@@ -1148,121 +1452,258 @@ const styles = StyleSheet.create({
     right: 0,
     alignItems: "center",
   },
+
   fab: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
     paddingHorizontal: 18,
-    paddingVertical: 12,
+    paddingVertical: 13,
     borderRadius: 999,
-    backgroundColor: "#10b981",
+    backgroundColor: GREEN,
     shadowColor: "#000",
     shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.2,
     shadowRadius: 12,
     elevation: 6,
   },
+
   fabText: {
-    color: "#fff",
-    fontWeight: "800",
+    color: "#FFFFFF",
+    fontWeight: "900",
   },
 
-  /* ===== Modales ===== */
+  modalKeyboardView: {
+    flex: 1,
+  },
+
   modalOverlay: {
     flex: 1,
-    backgroundColor: "rgba(2,6,23,0.38)",
+    backgroundColor: "rgba(11,31,48,0.48)",
     alignItems: "center",
     justifyContent: "center",
-    padding: 14,
-  },
-  modalCard: {
-    backgroundColor: "#fff",
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: C_BORDER,
-    overflow: "hidden",
-    shadowColor: "#000",
-    shadowOpacity: 0.18,
-    shadowRadius: 20,
-    shadowOffset: { width: 0, height: 10 },
-    elevation: 8,
-  },
-  modalHeader: {
-    paddingHorizontal: 16,
-    paddingTop: 16,
-    paddingBottom: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: "rgba(0,0,0,0.06)",
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  modalTitleRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    flex: 1,
-    minWidth: 0,
-  },
-  modalTitle: {
-    color: C_TEXT,
-    fontSize: 18,
-    fontWeight: "800",
-    flexShrink: 1,
-  },
-  modalCloseBtn: {
-    width: 34,
-    height: 34,
-    borderRadius: 999,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(0,0,0,0.04)",
-    borderWidth: 1,
-    borderColor: C_BORDER,
-  },
-  modalBody: {
-    padding: 16,
+    paddingHorizontal: 18,
   },
 
+  modalScroll: {
+    alignSelf: "stretch",
+    width: "100%",
+  },
+
+  modalScrollContent: {
+    flexGrow: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 18,
+  },
+
+  modalCard: {
+    backgroundColor: "#FFFFFF",
+    borderRadius: 26,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: "#D5E1EA",
+    ...(Platform.OS === "ios" ? IOS_SHADOW : {}),
+    elevation: Platform.OS === "android" ? 4 : 0,
+  },
+
+  editModalCard: {
+    maxHeight: "92%",
+  },
+
+  modalHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 14,
+  },
+
+  modalTitleRow: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+
+  modalIconBlue: {
+    width: 40,
+    height: 40,
+    borderRadius: 14,
+    backgroundColor: HEADER_BG,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  modalIconRed: {
+    width: 40,
+    height: 40,
+    borderRadius: 14,
+    backgroundColor: RED,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  modalTitle: {
+    flex: 1,
+    color: HEADER_BG,
+    fontSize: 20,
+    fontWeight: "900",
+  },
+
+  closeBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: "#EEF6FC",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  modalBody: {},
+
   label: {
-    color: "rgba(15,23,42,0.75)",
+    color: CARD_MUTED,
     fontSize: 12,
     marginBottom: 6,
-    fontWeight: "700",
+    fontWeight: "900",
   },
+
   input: {
-    backgroundColor: "rgba(0,0,0,0.04)",
+    backgroundColor: "#F6FAFD",
     borderWidth: 1,
-    borderColor: C_BORDER,
-    borderRadius: 12,
-    color: C_TEXT,
+    borderColor: BLUE_BORDER,
+    borderRadius: 14,
+    color: CARD_TITLE,
     paddingHorizontal: 12,
-    paddingVertical: Platform.select({ web: 10, default: 9 }),
+    paddingVertical: Platform.select({ web: 11, default: 10 }),
     fontSize: 15,
+    fontWeight: "800",
   },
+
   pickerWrap: {
-    backgroundColor: "rgba(0,0,0,0.04)",
+    backgroundColor: "#F6FAFD",
     borderWidth: 1,
-    borderColor: C_BORDER,
-    borderRadius: 12,
+    borderColor: BLUE_BORDER,
+    borderRadius: 14,
     overflow: "hidden",
   },
+
   picker: {
-    color: C_TEXT,
-    height: 44,
+    color: CARD_TITLE,
+    height: 46,
+  },
+
+  genderSegment: {
+    flexDirection: "row",
+    gap: 10,
+  },
+
+  genderOption: {
+    flex: 1,
+    minHeight: 48,
+    borderRadius: 14,
+    backgroundColor: "#F6FAFD",
+    borderWidth: 1,
+    borderColor: BLUE_BORDER,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 12,
+  },
+
+  genderOptionActive: {
+    backgroundColor: HEADER_BG,
+    borderColor: HEADER_BG,
+  },
+
+  genderOptionText: {
+    color: HEADER_BG,
+    fontSize: 14,
+    fontWeight: "900",
+  },
+
+  genderOptionTextActive: {
+    color: "#FFFFFF",
   },
 
   nextNumberBox: {
     marginTop: 12,
-    padding: 10,
-    borderRadius: 12,
-    backgroundColor: "rgba(15,23,42,0.05)",
+    padding: 12,
+    borderRadius: 16,
+    backgroundColor: BLUE_SOFT,
     borderWidth: 1,
-    borderColor: C_BORDER,
+    borderColor: BLUE_BORDER,
   },
+
   nextNumberText: {
-    color: C_TEXT,
-    fontWeight: "700",
+    color: HEADER_BG,
+    fontWeight: "900",
+  },
+
+  codeEditRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+
+  codeEditBox: {
+    flex: 1,
+    minHeight: 46,
+    backgroundColor: "#F6FAFD",
+    borderWidth: 1,
+    borderColor: BLUE_BORDER,
+    borderRadius: 14,
+    justifyContent: "center",
+    paddingHorizontal: 12,
+  },
+
+  codeEditText: {
+    color: CARD_TITLE,
+    fontSize: 16,
+    fontWeight: "900",
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
+  },
+
+  resetCodeBtn: {
+    width: 46,
+    height: 46,
+    borderRadius: 14,
+    backgroundColor: BLUE_SOFT,
+    borderWidth: 1,
+    borderColor: BLUE_BORDER,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  exportIntro: {
+    color: CARD_MUTED,
+    fontSize: 13,
+    fontWeight: "800",
+    marginBottom: 14,
+  },
+
+  exportFormatGrid: {
+    flexDirection: "row",
+    gap: 10,
+    flexWrap: "wrap",
+  },
+
+  exportOptionBtn: {
+    flex: 1,
+    minWidth: 112,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: BLUE_SOFT,
+    borderWidth: 1,
+    borderColor: BLUE_BORDER,
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 16,
+  },
+
+  exportOptionTitle: {
+    color: HEADER_BG,
+    fontSize: 15,
+    fontWeight: "900",
   },
 
   modalActions: {
@@ -1272,51 +1713,59 @@ const styles = StyleSheet.create({
     gap: 10,
     flexWrap: "wrap",
   },
+
   primaryBtn: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    backgroundColor: "#10b981",
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 12,
+    backgroundColor: GREEN,
+    paddingHorizontal: 15,
+    paddingVertical: 11,
+    borderRadius: 14,
   },
+
   primaryBtnText: {
-    color: "#fff",
-    fontWeight: "800",
+    color: "#FFFFFF",
+    fontWeight: "900",
   },
+
   secondaryBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 12,
-    backgroundColor: "rgba(0,0,0,0.05)",
+    paddingHorizontal: 15,
+    paddingVertical: 11,
+    borderRadius: 14,
+    backgroundColor: BLUE_SOFT,
     borderWidth: 1,
-    borderColor: C_BORDER,
+    borderColor: BLUE_BORDER,
   },
+
   secondaryBtnText: {
-    color: C_TEXT,
-    fontWeight: "800",
+    color: HEADER_BG,
+    fontWeight: "900",
   },
 
   deleteText: {
-    color: C_TEXT,
+    color: CARD_TITLE,
     fontSize: 15,
     lineHeight: 22,
+    fontWeight: "700",
   },
+
   deleteName: {
-    fontWeight: "800",
+    fontWeight: "900",
   },
+
   deleteBtn: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    backgroundColor: "#dc2626",
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 12,
+    backgroundColor: RED,
+    paddingHorizontal: 15,
+    paddingVertical: 11,
+    borderRadius: 14,
   },
+
   deleteBtnText: {
-    color: "#fff",
-    fontWeight: "800",
+    color: "#FFFFFF",
+    fontWeight: "900",
   },
 });

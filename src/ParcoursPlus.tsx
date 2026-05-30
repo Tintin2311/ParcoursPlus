@@ -33,37 +33,54 @@ type EleveType = {
   teacher_id?: string | null;
   group_id?: string | null;
   display_name?: string | null;
+  name?: string | null;
+  nom?: string | null;
+
+  // Mode groupe
+  isGroupSession?: boolean;
+  groupSessionId?: string | null;
+  groupSessionCode?: string | null;
+  groupSessionName?: string | null;
+  groupStudents?: EleveType[];
+  targetStudentIds?: string[];
+};
+
+type GroupSessionRow = {
+  id: string;
+  code: string;
+  nom?: string | null;
+  teacher_id?: string | null;
+  student_ids?: string[] | null;
+  active?: boolean | null;
+  created_at?: string | null;
 };
 
 type Props = {
   setPage: (p: PageType) => void;
   setModeConnexion: (m: "accueil" | "prof" | "eleve") => void;
-  setProfesseur?: (p: any) => void; // non utilisé ici; laissé pour compat
+  setProfesseur?: (p: any) => void;
   setEleve: (e: EleveType | null) => void;
 };
 
 /* ============================================================
-   Helpers "doublés" RPC -> fallback tables (aucune écriture)
+   Helpers "doublés" RPC -> fallback tables
    ============================================================ */
 async function getProfUserIdByCode(code: string): Promise<string | null> {
   const upper = code.trim().toUpperCase();
   if (!upper) return null;
 
-  // 1) RPC : validate_prof_code(p_code)
   let r = await supabase.rpc("validate_prof_code", { p_code: upper });
   if (!r.error && r.data) {
     const uid = extractUserId(r.data);
     if (uid) return uid;
   }
 
-  // 2) RPC alternatif (certaines bases) : validate_professeur_code(code)
   r = await supabase.rpc("validate_professeur_code", { code: upper });
   if (!r.error && r.data) {
     const uid = extractUserId(r.data);
     if (uid) return uid;
   }
 
-  // 3) Fallback lecture directe (si RLS autorise la lecture)
   const sel = await supabase
     .from("professeurs")
     .select("user_id")
@@ -72,17 +89,16 @@ async function getProfUserIdByCode(code: string): Promise<string | null> {
 
   if (!sel.error && sel.data?.user_id) return sel.data.user_id as string;
 
-  // sinon, on n’insiste pas
   return null;
 }
 
 async function getStudentByCode(
-  code: string
-): Promise<{ id: string; name: string | null; group_id: string | null } | null> {
+  code: string,
+  teacherId?: string | null
+): Promise<{ id: string; name: string | null; group_id: string | null; code?: string | null } | null> {
   const c = code.trim();
   if (!c) return null;
 
-  // 1) RPC : student_name_by_code(p_code)
   let r = await supabase.rpc("student_name_by_code", { p_code: c });
   if (!r.error && r.data) {
     const row = Array.isArray(r.data) ? r.data[0] : r.data;
@@ -91,16 +107,19 @@ async function getStudentByCode(
         id: row.id,
         name: row?.name ?? null,
         group_id: row?.group_id ?? null,
+        code: row?.code ?? c,
       };
     }
   }
 
-  // 2) Fallback lecture directe (si RLS le permet)
-  const sel = await supabase
+  let query = supabase
     .from("students")
-    .select("id,name,group_id")
-    .eq("code", c)
-    .maybeSingle<any>();
+    .select("id,name,group_id,code,teacher_id")
+    .eq("code", c);
+
+  if (teacherId) query = query.eq("teacher_id", teacherId);
+
+  const sel = await query.maybeSingle<any>();
 
   if (!sel.error && sel.data?.id) {
     const d = sel.data;
@@ -108,13 +127,74 @@ async function getStudentByCode(
       id: d.id,
       name: d.name ?? null,
       group_id: d.group_id ?? null,
+      code: d.code ?? c,
     };
   }
 
   return null;
 }
 
-// Essaie d’extraire un user_id depuis n’importe quelle forme de retour RPC
+async function getGroupSessionByCode(
+  code: string,
+  teacherId: string
+): Promise<GroupSessionRow | null> {
+  const c = code.trim().toUpperCase();
+  if (!c.startsWith("GR")) return null;
+
+  const { data, error } = await supabase
+    .from("GroupeSessionEleves")
+    .select("id, code, nom, teacher_id, student_ids, active, created_at")
+    .eq("code", c)
+    .eq("teacher_id", teacherId)
+    .eq("active", true)
+    .maybeSingle<any>();
+
+  if (error) {
+    console.error("Erreur recherche session groupe:", error.message);
+    return null;
+  }
+
+  if (!data?.id) return null;
+
+  return {
+    id: String(data.id),
+    code: String(data.code ?? c),
+    nom: data.nom ?? null,
+    teacher_id: data.teacher_id ?? null,
+    student_ids: Array.isArray(data.student_ids) ? data.student_ids.map(String) : [],
+    active: data.active ?? true,
+    created_at: data.created_at ?? null,
+  };
+}
+
+async function getStudentsByIds(ids: string[], teacherId: string): Promise<EleveType[]> {
+  const cleanIds = ids.map(String).filter(Boolean);
+  if (cleanIds.length === 0) return [];
+
+  const { data, error } = await supabase
+    .from("students")
+    .select("id,name,code,group_id,teacher_id")
+    .in("id", cleanIds)
+    .eq("teacher_id", teacherId);
+
+  if (error) {
+    console.error("Erreur chargement élèves session groupe:", error.message);
+    return [];
+  }
+
+  const rows = (data || []) as any[];
+
+  return rows.map((row) => ({
+    uuid: String(row.id),
+    id: String(row.id),
+    code: row.code ? String(row.code) : undefined,
+    teacher_id: row.teacher_id ?? teacherId,
+    group_id: row.group_id ?? null,
+    display_name: row.name ?? null,
+    name: row.name ?? null,
+  }));
+}
+
 function extractUserId(raw: any): string | null {
   if (!raw) return null;
   if (typeof raw === "string") return raw;
@@ -129,7 +209,7 @@ function extractUserId(raw: any): string | null {
 
   if (typeof raw === "object") {
     if (typeof raw.user_id === "string") return raw.user_id;
-    if (typeof raw.id === "string") return raw.id; // parfois, le RPC renvoie la ligne
+    if (typeof raw.id === "string") return raw.id;
 
     for (const v of Object.values(raw)) {
       if (typeof v === "string") return v;
@@ -143,8 +223,12 @@ function extractUserId(raw: any): string | null {
   return null;
 }
 
+function normalizeStudentCodeForSearch(value: string) {
+  return value.trim().toUpperCase().replace(/\s+/g, "");
+}
+
 /* ============================================================
-   Composant principal — React-Native (Expo) cross-platform
+   Composant principal
    ============================================================ */
 export default function ParcoursPlus({
   setPage,
@@ -168,9 +252,7 @@ export default function ParcoursPlus({
   const [phase, setPhase] = useState<"form" | "playing">("form");
   const [payloadEleve, setPayloadEleve] = useState<EleveType | null>(null);
 
-  // Vidéo (web)
   const webVideoRef = useRef<HTMLVideoElement | null>(null);
-  // Vidéo (natif)
   const nativeVideoRef = useRef<any>(null);
   const ExpoVideo = Platform.OS !== "web" ? require("expo-av").Video : null;
 
@@ -189,7 +271,6 @@ export default function ParcoursPlus({
         throw new Error(error?.message ?? "Connexion impossible");
       }
 
-      // On laisse App.tsx restaurer l’espace prof
       setModeConnexion("accueil");
       setPage("accueil");
     } catch (e: any) {
@@ -222,42 +303,70 @@ export default function ParcoursPlus({
     setErrorEleve(null);
 
     const p = codeProf.trim().toUpperCase();
-    const c = codeEleve.trim();
+    const c = normalizeStudentCodeForSearch(codeEleve);
 
     if (!p || !c) {
-      setErrorEleve("Renseigne le code professeur et ton code élève.");
+      setErrorEleve("Renseigne le code professeur et ton code élève ou groupe.");
       return;
     }
 
     setLoadingEleve(true);
     try {
-      // 1) Prof valide ?
       const profUserId = await getProfUserIdByCode(p);
       if (!profUserId) {
         setErrorEleve("Le code professeur est invalide.");
         return;
       }
 
-      // 2) Élève existant ?
-      const student = await getStudentByCode(c);
-      if (!student?.id) {
-        setErrorEleve("Code élève invalide.");
-        return;
-      }
+      let payload: EleveType | null = null;
 
-      const payload: EleveType = {
-        uuid: student.id,
-        id: student.id,
-        code: c,
-        teacher_id: profUserId,
-        group_id: student.group_id ?? null,
-        display_name: student.name ?? null,
-      };
+      if (c.startsWith("GR")) {
+        const session = await getGroupSessionByCode(c, profUserId);
+
+        if (!session?.id || !Array.isArray(session.student_ids) || session.student_ids.length === 0) {
+          setErrorEleve("Code groupe invalide.");
+          return;
+        }
+
+        const targetStudentIds = session.student_ids.map(String).filter(Boolean);
+
+payload = {
+  uuid: targetStudentIds[0],
+  id: targetStudentIds[0],
+  code: c,
+  teacher_id: profUserId,
+  group_id: null,
+  display_name: session.nom ?? `Session ${session.code}`,
+  name: session.nom ?? "Session groupe",
+  isGroupSession: true,
+  groupSessionId: session.id,
+  groupSessionCode: session.code,
+  groupSessionName: session.nom ?? null,
+  groupStudents: [],
+  targetStudentIds,
+};
+      } else {
+        const student = await getStudentByCode(c, profUserId);
+        if (!student?.id) {
+          setErrorEleve("Code élève invalide.");
+          return;
+        }
+
+        payload = {
+          uuid: student.id,
+          id: student.id,
+          code: c,
+          teacher_id: profUserId,
+          group_id: student.group_id ?? null,
+          display_name: student.name ?? null,
+          isGroupSession: false,
+          targetStudentIds: [student.id],
+        };
+      }
 
       setPayloadEleve(payload);
       setPhase("playing");
 
-      // 3) Lance la vidéo (sinon navigation directe)
       if (Platform.OS === "web") {
         try {
           await webVideoRef.current?.play();
@@ -281,7 +390,6 @@ export default function ParcoursPlus({
 
   /* -------------------- UI -------------------- */
 
-  /** Accueil (choix des espaces) **/
   if (mode === "accueil") {
     return (
       <ImageBackground
@@ -346,7 +454,6 @@ export default function ParcoursPlus({
     );
   }
 
-  /** Espace Professeur **/
   if (mode === "espaceProf") {
     return (
       <View style={{ flex: 1, padding: 16, backgroundColor: "#111827" }}>
@@ -454,11 +561,9 @@ export default function ParcoursPlus({
     );
   }
 
-  /** Espace Élève **/
   if (mode === "espaceEleve") {
     return (
       <View style={{ flex: 1 }}>
-        {/* --- Vidéo de fond, en pause tant qu’on est sur le formulaire --- */}
         {Platform.OS === "web" ? (
           <View style={{ position: "absolute", inset: 0 }}>
             <video
@@ -549,10 +654,11 @@ export default function ParcoursPlus({
 
             <View style={{ position: "relative" }}>
               <TextInput
-                placeholder="Code élève"
+                placeholder="Code élève ou groupe (ex : 123456 ou GR123456)"
                 placeholderTextColor="rgba(255,255,255,0.7)"
                 value={codeEleve}
-                onChangeText={setCodeEleve}
+                onChangeText={(t) => setCodeEleve(t.toUpperCase())}
+                autoCapitalize="characters"
                 secureTextEntry={!showStudentCode}
                 style={{
                   color: "white",
