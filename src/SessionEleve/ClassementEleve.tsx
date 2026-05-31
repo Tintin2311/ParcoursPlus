@@ -27,7 +27,7 @@ const BG_GAME =
 type Props = { setPage?: (page: string) => void };
 
 type ModePage = "classement" | "statistiques";
-type OngletClassement = "classe" | "niveau" | "college";
+type OngletClassement = "classe" | "niveau" | "classes";
 
 type EleveConnecte = {
   id?: string;
@@ -44,6 +44,16 @@ type ClassementRow = {
   classe: string;
   groupId: string | null;
   niveau: string;
+};
+
+type ClasseAverageRow = {
+  id: string;
+  classe: string;
+  niveau: string;
+  moyenne: number;
+  totalPoints: number;
+  eleves: number;
+  isCurrentClass: boolean;
 };
 
 type ClassementRpcRow = {
@@ -177,7 +187,11 @@ export default function ClassementEleve({ setPage }: Props) {
       filtered = filtered.filter((row) => row.groupId === currentGroupId);
     }
 
-    if (onglet === "niveau" && currentNiveau && currentNiveau !== "Niveau inconnu") {
+    if (
+      (onglet === "niveau" || onglet === "classes") &&
+      currentNiveau &&
+      currentNiveau !== "Niveau inconnu"
+    ) {
       filtered = filtered.filter((row) => row.niveau === currentNiveau);
     }
 
@@ -186,6 +200,55 @@ export default function ClassementEleve({ setPage }: Props) {
       return a.nom.localeCompare(b.nom, "fr");
     });
   }, [rows, onglet, currentGroupId, currentNiveau]);
+
+  const isClassRanking = onglet === "classes";
+  const niveauLabel =
+    currentNiveau && currentNiveau !== "Niveau inconnu" ? currentNiveau : "Niveau";
+
+  const classAverageRows = useMemo(() => {
+    const groups = new Map<
+      string,
+      {
+        classe: string;
+        niveau: string;
+        totalPoints: number;
+        eleves: number;
+        isCurrentClass: boolean;
+      }
+    >();
+
+    filteredRows.forEach((row) => {
+      const key = row.groupId ?? row.classe;
+      const current = groups.get(key) ?? {
+        classe: row.classe,
+        niveau: row.niveau,
+        totalPoints: 0,
+        eleves: 0,
+        isCurrentClass: false,
+      };
+
+      current.totalPoints += row.points;
+      current.eleves += 1;
+      current.isCurrentClass =
+        current.isCurrentClass || (!!currentGroupId && row.groupId === currentGroupId);
+      groups.set(key, current);
+    });
+
+    return Array.from(groups.entries())
+      .map(([id, group]) => ({
+        id,
+        classe: group.classe,
+        niveau: group.niveau,
+        totalPoints: group.totalPoints,
+        eleves: group.eleves,
+        moyenne: group.eleves > 0 ? group.totalPoints / group.eleves : 0,
+        isCurrentClass: group.isCurrentClass,
+      }))
+      .sort((a, b) => {
+        if (b.moyenne !== a.moyenne) return b.moyenne - a.moyenne;
+        return a.classe.localeCompare(b.classe, "fr");
+      });
+  }, [filteredRows, currentGroupId]);
 
   const normalizedSearch = normalizeSearch(searchTerm);
   const isSearching = normalizedSearch.length > 0;
@@ -199,14 +262,31 @@ export default function ClassementEleve({ setPage }: Props) {
     });
   }, [filteredRows, normalizedSearch]);
 
+  const visibleClassRows = useMemo(() => {
+    if (!normalizedSearch) return classAverageRows;
+
+    return classAverageRows.filter((row) => {
+      const searchable = normalizeSearch(`${row.classe} ${row.niveau}`);
+      return searchable.includes(normalizedSearch);
+    });
+  }, [classAverageRows, normalizedSearch]);
+
   const rowRankMap = useMemo(() => {
     const ranks = new Map<string, number>();
     filteredRows.forEach((row, index) => ranks.set(row.id, index + 1));
     return ranks;
   }, [filteredRows]);
 
-  const podium = isSearching ? [] : filteredRows.slice(0, 3);
+  const classRankMap = useMemo(() => {
+    const ranks = new Map<string, number>();
+    classAverageRows.forEach((row, index) => ranks.set(row.id, index + 1));
+    return ranks;
+  }, [classAverageRows]);
+
+  const podium = isSearching || isClassRanking ? [] : filteredRows.slice(0, 3);
   const remainingRows = isSearching ? visibleRows : filteredRows.slice(3);
+  const classPodium = isSearching ? [] : classAverageRows.slice(0, 3);
+  const remainingClassRows = isSearching ? visibleClassRows : classAverageRows.slice(3);
 
   const currentRank = useMemo(() => {
     if (!currentStudentId) return null;
@@ -254,7 +334,14 @@ export default function ClassementEleve({ setPage }: Props) {
     requestAnimationFrame(() => {
       updateMyVisibility();
     });
-  }, [onglet, modePage, visibleRows.length, currentStudentId, updateMyVisibility]);
+  }, [
+    onglet,
+    modePage,
+    visibleRows.length,
+    visibleClassRows.length,
+    currentStudentId,
+    updateMyVisibility,
+  ]);
 
   const registerMyRowLayout = useCallback(
     (absoluteY: number, height: number) => {
@@ -268,6 +355,7 @@ export default function ClassementEleve({ setPage }: Props) {
   const showMyFloatingRank =
     modePage === "classement" &&
     !isSearching &&
+    !isClassRanking &&
     !!currentRow &&
     !!currentRank &&
     !isMyRowVisible;
@@ -289,11 +377,6 @@ export default function ClassementEleve({ setPage }: Props) {
             <View style={styles.topTextWrap}>
               <Text numberOfLines={1} style={styles.pageTitle}>
                 SUCCÈS
-              </Text>
-              <Text numberOfLines={1} style={styles.pageSubtitle}>
-                {currentRow
-                  ? `${currentRow.nom} • ${currentRow.classe}`
-                  : "Classement des élèves"}
               </Text>
             </View>
 
@@ -342,8 +425,8 @@ export default function ClassementEleve({ setPage }: Props) {
           {modePage === "classement" && (
             <View style={styles.tabsPanel}>
               <TabButton label="Classe" active={onglet === "classe"} onPress={() => setOnglet("classe")} />
-              <TabButton label="Niveau" active={onglet === "niveau"} onPress={() => setOnglet("niveau")} />
-              <TabButton label="Collège" active={onglet === "college"} onPress={() => setOnglet("college")} />
+              <TabButton label={niveauLabel} active={onglet === "niveau"} onPress={() => setOnglet("niveau")} />
+              <TabButton label="VS Classes" active={onglet === "classes"} onPress={() => setOnglet("classes")} />
             </View>
           )}
 
@@ -353,7 +436,7 @@ export default function ClassementEleve({ setPage }: Props) {
               <TextInput
                 value={searchTerm}
                 onChangeText={setSearchTerm}
-                placeholder="Rechercher un élève"
+                placeholder={isClassRanking ? "Rechercher une classe" : "Rechercher un élève"}
                 placeholderTextColor="#7C91A5"
                 autoCapitalize="none"
                 autoCorrect={false}
@@ -402,6 +485,46 @@ export default function ClassementEleve({ setPage }: Props) {
                   <Text style={styles.stateTitle}>Erreur</Text>
                   <Text style={styles.stateText}>{screenError}</Text>
                 </View>
+              ) : isClassRanking ? (
+                classAverageRows.length === 0 ? (
+                  <View pointerEvents="none" style={styles.stateCard}>
+                    <Trophy size={44} color={C_GOLD} />
+                    <Text style={styles.stateTitle}>Aucune classe</Text>
+                    <Text style={styles.stateText}>
+                      Impossible de calculer une moyenne pour ce niveau.
+                    </Text>
+                  </View>
+                ) : visibleClassRows.length === 0 ? (
+                  <View pointerEvents="none" style={styles.stateCard}>
+                    <Search size={44} color={C_GOLD} />
+                    <Text style={styles.stateTitle}>Aucune classe trouvée</Text>
+                    <Text style={styles.stateText}>
+                      Essaie avec un autre nom de classe.
+                    </Text>
+                  </View>
+                ) : (
+                  <>
+                    {!isSearching && (
+                      <View pointerEvents="none">
+                        <ClassPodium rows={classPodium} />
+                      </View>
+                    )}
+
+                    <View pointerEvents="none" style={styles.rankingList}>
+                      {remainingClassRows.map((item, index) => (
+                        <View
+                          key={item.id}
+                          style={index > 0 && styles.rankingItemSpacing}
+                        >
+                          <ClassRankingCard
+                            row={item}
+                            rank={classRankMap.get(item.id) ?? index + 4}
+                          />
+                        </View>
+                      ))}
+                    </View>
+                  </>
+                )
               ) : filteredRows.length === 0 ? (
                 <View pointerEvents="none" style={styles.stateCard}>
                   <Trophy size={44} color={C_GOLD} />
@@ -430,6 +553,7 @@ export default function ClassementEleve({ setPage }: Props) {
                     >
                       <Podium
                         rows={podium}
+                        showClasse={onglet === "niveau"}
                         currentStudentId={currentStudentId}
                         podiumYRef={podiumYRef}
                         onCurrentLayout={registerMyRowLayout}
@@ -542,11 +666,13 @@ function TabButton({
 
 function Podium({
   rows,
+  showClasse,
   currentStudentId,
   podiumYRef,
   onCurrentLayout,
 }: {
   rows: ClassementRow[];
+  showClasse: boolean;
   currentStudentId: string | null;
   podiumYRef: React.MutableRefObject<number | null>;
   onCurrentLayout: (absoluteY: number, height: number) => void;
@@ -556,6 +682,7 @@ function Podium({
       <PodiumCard
         row={rows[1] ?? null}
         rank={2}
+        showClasse={showClasse}
         currentStudentId={currentStudentId}
         podiumYRef={podiumYRef}
         onCurrentLayout={onCurrentLayout}
@@ -563,6 +690,7 @@ function Podium({
       <PodiumCard
         row={rows[0] ?? null}
         rank={1}
+        showClasse={showClasse}
         currentStudentId={currentStudentId}
         podiumYRef={podiumYRef}
         onCurrentLayout={onCurrentLayout}
@@ -570,6 +698,7 @@ function Podium({
       <PodiumCard
         row={rows[2] ?? null}
         rank={3}
+        showClasse={showClasse}
         currentStudentId={currentStudentId}
         podiumYRef={podiumYRef}
         onCurrentLayout={onCurrentLayout}
@@ -581,12 +710,14 @@ function Podium({
 function PodiumCard({
   row,
   rank,
+  showClasse,
   currentStudentId,
   podiumYRef,
   onCurrentLayout,
 }: {
   row: ClassementRow | null;
   rank: 1 | 2 | 3;
+  showClasse: boolean;
   currentStudentId: string | null;
   podiumYRef: React.MutableRefObject<number | null>;
   onCurrentLayout: (absoluteY: number, height: number) => void;
@@ -626,6 +757,12 @@ function PodiumCard({
         <Text numberOfLines={1} style={styles.podiumName}>
           {row?.nom ?? "-"}
         </Text>
+
+        {showClasse && row && (
+          <Text numberOfLines={1} style={styles.podiumClasse}>
+            {row.classe}
+          </Text>
+        )}
 
         <Text style={styles.podiumPoints}>{row ? formatPoints(row.points) : "0"}</Text>
         <Text style={styles.podiumPtsLabel}>pts</Text>
@@ -674,6 +811,96 @@ function RankingCard({
       <View style={styles.pointsBadge}>
         <Text style={styles.pointsValue}>{formatPoints(row.points)}</Text>
         <Text style={styles.pointsLabel}>pts</Text>
+      </View>
+    </LinearGradient>
+  );
+}
+
+function ClassPodium({ rows }: { rows: ClasseAverageRow[] }) {
+  return (
+    <View style={styles.podiumWrap}>
+      <ClassPodiumCard row={rows[1] ?? null} rank={2} />
+      <ClassPodiumCard row={rows[0] ?? null} rank={1} />
+      <ClassPodiumCard row={rows[2] ?? null} rank={3} />
+    </View>
+  );
+}
+
+function ClassPodiumCard({
+  row,
+  rank,
+}: {
+  row: ClasseAverageRow | null;
+  rank: 1 | 2 | 3;
+}) {
+  const isFirst = rank === 1;
+  const medal = rank === 1 ? "🥇" : rank === 2 ? "🥈" : "🥉";
+
+  const colors: [string, string] =
+    rank === 1
+      ? ["#FBBF24", "#F97316"]
+      : rank === 2
+      ? ["#CBD5E1", "#94A3B8"]
+      : ["#FDBA74", "#C2410C"];
+
+  return (
+    <View style={[styles.podiumCardWrap, isFirst && styles.podiumCardFirstWrap]}>
+      <LinearGradient
+        colors={colors}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={[
+          styles.podiumCard,
+          styles.classPodiumCard,
+          isFirst && styles.podiumCardFirst,
+        ]}
+      >
+        <Text style={styles.podiumMedal}>{medal}</Text>
+
+        <Text numberOfLines={2} style={styles.classPodiumName}>
+          {row?.classe ?? "-"}
+        </Text>
+
+        <Text style={styles.podiumPoints}>
+          {row ? formatPoints(row.moyenne) : "0"}
+        </Text>
+        <Text style={styles.podiumPtsLabel}>moy.</Text>
+      </LinearGradient>
+    </View>
+  );
+}
+
+function ClassRankingCard({
+  row,
+  rank,
+}: {
+  row: ClasseAverageRow;
+  rank: number;
+}) {
+  return (
+    <LinearGradient
+      colors={
+        row.isCurrentClass
+          ? ["rgba(255,251,235,0.98)", "rgba(254,215,170,0.94)"]
+          : ["rgba(255,255,255,0.96)", "rgba(224,231,255,0.88)"]
+      }
+      start={{ x: 0, y: 0 }}
+      end={{ x: 1, y: 1 }}
+      style={[styles.rankCard, row.isCurrentClass && styles.rankCardCurrent]}
+    >
+      <View style={styles.rankBadge}>
+        <Text style={styles.rankBadgeText}>{rank}</Text>
+      </View>
+
+      <View style={styles.rankTextWrap}>
+        <Text numberOfLines={1} style={styles.rankName}>
+          {row.classe}
+        </Text>
+      </View>
+
+      <View style={styles.pointsBadge}>
+        <Text style={styles.pointsValue}>{formatPoints(row.moyenne)}</Text>
+        <Text style={styles.pointsLabel}>moy.</Text>
       </View>
     </LinearGradient>
   );
@@ -870,6 +1097,10 @@ const styles = StyleSheet.create({
   podiumCardFirst: { minHeight: 146 },
   podiumMedal: { fontSize: 34, marginBottom: 4 },
 
+  classPodiumCard: {
+    paddingHorizontal: 7,
+  },
+
   podiumName: {
     color: "#FFFFFF",
     fontSize: 13,
@@ -877,6 +1108,31 @@ const styles = StyleSheet.create({
     textAlign: "center",
     width: "100%",
     textShadowColor: "rgba(0,0,0,0.26)",
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+
+  classPodiumName: {
+    color: "#FFFFFF",
+    fontSize: 16,
+    fontWeight: "900",
+    lineHeight: 19,
+    textAlign: "center",
+    width: "100%",
+    minHeight: 38,
+    textShadowColor: "rgba(0,0,0,0.26)",
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+
+  podiumClasse: {
+    color: "rgba(255,255,255,0.88)",
+    fontSize: 10,
+    fontWeight: "900",
+    marginTop: 2,
+    textAlign: "center",
+    width: "100%",
+    textShadowColor: "rgba(0,0,0,0.22)",
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
   },

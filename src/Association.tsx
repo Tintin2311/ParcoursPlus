@@ -1385,7 +1385,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
         </TouchableOpacity>
 
         <View style={styles.headerCenter}>
-          <Text style={styles.headerTitle}>ASSOCIATIONS</Text>
+          <Text style={styles.headerTitle}>ASSOCIATION</Text>
           <Text style={styles.headerSubtitle}>Classes & parcours</Text>
         </View>
 

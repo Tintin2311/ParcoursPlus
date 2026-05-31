@@ -48,8 +48,6 @@ type GroupeSessionRow = {
   teacher_id?: string | null;
   group_id?: string | null;
   student_ids: string[];
-  active?: boolean | null;
-  created_at?: string | null;
 };
 
 type Props = {
@@ -169,7 +167,6 @@ const CreationGroupeSessionEleve: React.FC<Props> = ({ setPage, professeur, sele
     const ids = new Set<string>();
 
     sessions.forEach((session) => {
-      if (session.active === false) return;
       if (editingSessionId && session.id === editingSessionId) return;
       (session.student_ids || []).forEach((id) => ids.add(String(id)));
     });
@@ -308,10 +305,8 @@ const CreationGroupeSessionEleve: React.FC<Props> = ({ setPage, professeur, sele
 
       supabase
         .from("GroupeSessionEleves")
-        .select("id, code, nom, teacher_id, group_id, student_ids, active, created_at")
-        .eq("teacher_id", professeur.user_id)
-        .eq("active", true)
-        .order("created_at", { ascending: false }),
+        .select("id, code, nom, teacher_id, group_id, student_ids")
+        .eq("teacher_id", professeur.user_id),
     ]);
 
     if (studentsRes.error) {
@@ -345,8 +340,6 @@ const CreationGroupeSessionEleve: React.FC<Props> = ({ setPage, professeur, sele
       teacher_id: s.teacher_id ?? null,
       group_id: s.group_id ?? null,
       student_ids: Array.isArray(s.student_ids) ? s.student_ids.map(String) : [],
-      active: s.active ?? true,
-      created_at: s.created_at ?? null,
     }));
 
     setEleves(mappedStudents);
@@ -430,7 +423,7 @@ const CreationGroupeSessionEleve: React.FC<Props> = ({ setPage, professeur, sele
 
     const unavailable = selectedIds.filter((id) => usedStudentIds.has(id));
     if (unavailable.length > 0) {
-      Alert.alert("Élève déjà utilisé", "Un des élèves sélectionnés est déjà dans une autre session groupe active.");
+      Alert.alert("Élève déjà utilisé", "Un des élèves sélectionnés est déjà dans une autre session groupe.");
       await fetchData();
       resetDraft();
       return;
@@ -444,7 +437,6 @@ const CreationGroupeSessionEleve: React.FC<Props> = ({ setPage, professeur, sele
       teacher_id: professeur.user_id,
       group_id: isMultiClassSession ? null : groupId,
       student_ids: selectedIds,
-      active: true,
     };
 
     const query = editingSessionId
@@ -453,12 +445,12 @@ const CreationGroupeSessionEleve: React.FC<Props> = ({ setPage, professeur, sele
           .update(payload)
           .eq("id", editingSessionId)
           .eq("teacher_id", professeur.user_id)
-          .select("id, code, nom, teacher_id, group_id, student_ids, active, created_at")
+          .select("id, code, nom, teacher_id, group_id, student_ids")
           .single()
       : supabase
           .from("GroupeSessionEleves")
           .insert(payload)
-          .select("id, code, nom, teacher_id, group_id, student_ids, active, created_at")
+          .select("id, code, nom, teacher_id, group_id, student_ids")
           .single();
 
     const { data, error } = await query;
@@ -484,8 +476,6 @@ const CreationGroupeSessionEleve: React.FC<Props> = ({ setPage, professeur, sele
       teacher_id: data.teacher_id ?? professeur.user_id,
       group_id: data.group_id ?? (isMultiClassSession ? null : groupId),
       student_ids: Array.isArray(data.student_ids) ? data.student_ids.map(String) : selectedIds,
-      active: data.active ?? true,
-      created_at: data.created_at ?? editingSession?.created_at ?? null,
     };
 
     setAllElevesCache((cache) => ({
@@ -511,7 +501,6 @@ const CreationGroupeSessionEleve: React.FC<Props> = ({ setPage, professeur, sele
     sessionCode,
     sessionName,
     editingSessionId,
-    editingSession?.created_at,
     selectedEleves,
     selectedElevesCache,
   ]);
@@ -827,7 +816,7 @@ const CreationGroupeSessionEleve: React.FC<Props> = ({ setPage, professeur, sele
                 ListEmptyComponent={
                   <View style={styles.emptyBox}>
                     <Text style={styles.emptyText}>
-                      Aucun élève disponible dans cette classe, ou tous les élèves sont déjà dans une session groupe active.
+                      Aucun élève disponible dans cette classe, ou tous les élèves sont déjà dans une session groupe.
                     </Text>
                   </View>
                 }
