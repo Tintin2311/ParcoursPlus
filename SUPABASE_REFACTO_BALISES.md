@@ -110,3 +110,39 @@ Après plusieurs jours de tests :
 4. Seulement ensuite envisager la suppression de `public.balise_formats`.
 
 La suppression de `public.balise_formats` devra être une migration séparée, jamais mélangée avec cette phase.
+
+## Phase 3 préparée
+
+Objectif : sortir les informations utiles de `formats` vers des colonnes plus lisibles dans `public.balises`.
+
+Migration :
+
+```text
+supabase/migrations/20260531_03_compact_balise_format_columns.sql
+```
+
+Rollback :
+
+```text
+supabase/migrations/20260531_03_compact_balise_format_columns_rollback.sql
+```
+
+Colonnes ajoutées :
+
+- `format_types`
+- `poincon_rows`
+- `poincon_cols`
+- `poincon_cells`
+- `tableau_rows`
+- `tableau_cols`
+- `tableau_cells`
+- `qrcode_value`
+
+Cette phase garde encore :
+
+- `public.balise_formats`
+- `public.balises.formats`
+
+Le code lit d'abord les colonnes compactes. Si elles n'existent pas encore, il retombe sur `balises.formats`, puis sur `balise_formats`.
+
+Après application et tests, la prochaine phase pourra vider ou supprimer progressivement les anciens doublons.

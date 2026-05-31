@@ -1,7 +1,7 @@
 // src/CreationBalise.tsx
 // Version corrigée : sauvegarde fiable de la balise + formats dans Supabase
 // Correction principale : si un auto-save est déjà en cours, on relance une sauvegarde juste après.
-// Correction secondaire : les formats sont toujours réinsérés proprement dans balise_formats.
+// Correction secondaire : les formats sont enregistrés dans balises, avec ancien fallback si besoin.
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -587,6 +587,9 @@ const upsertFormatsInSupabase = async (baliseId: string, userId: string, formats
           : format.payload ?? {},
     }));
 
+  const savedInBalises = await updateBaliseFormatsJson(supabase, baliseId, userId, cleanFormats);
+  if (savedInBalises) return;
+
   const { error: deleteError } = await supabase
     .from("balise_formats")
     .delete()
@@ -596,10 +599,7 @@ const upsertFormatsInSupabase = async (baliseId: string, userId: string, formats
   const oldTableAvailable = !deleteError;
   if (deleteError && !isMissingBaliseFormatsTableError(deleteError)) throw deleteError;
 
-  if (!cleanFormats.length) {
-    await updateBaliseFormatsJson(supabase, baliseId, userId, []);
-    return;
-  }
+  if (!cleanFormats.length) return;
 
   let insertedFormats: any[] | null = null;
   if (oldTableAvailable) {
