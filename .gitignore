@@ -4,3 +4,6 @@ node_modules
 dist
 build
 .DS_Store
+
+# Sauvegardes locales Supabase
+backup_*_avant_refacto.sql

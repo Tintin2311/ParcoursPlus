@@ -33,6 +33,11 @@ import {
   X,
 } from "lucide-react-native";
 import { supabase } from "./supabaseClient";
+import {
+  fetchBaliseFormatsByBaliseIdCompat,
+  isMissingBaliseFormatsTableError,
+  updateBaliseFormatsJson,
+} from "./baliseFormatsCompat";
 
 /* =========================
    Types
@@ -507,15 +512,8 @@ const fetchBaliseById = async (baliseId: string, userId: string): Promise<Balise
 };
 
 const fetchFormatsByBaliseId = async (baliseId: string, userId: string): Promise<BaliseFormat[]> => {
-  const { data, error } = await supabase
-    .from("balise_formats")
-    .select("id, balise_id, user_id, format_type, label, is_default, payload, created_at")
-    .eq("balise_id", baliseId)
-    .eq("user_id", userId)
-    .order("created_at", { ascending: true });
-
-  if (error) throw error;
-  return (data || []).map(mapFormatRow);
+  const rows = await fetchBaliseFormatsByBaliseIdCompat(supabase, baliseId, userId);
+  return rows.map(mapFormatRow);
 };
 
 const getNextNumeroFromSupabase = async (userId: string): Promise<string> => {
@@ -595,12 +593,25 @@ const upsertFormatsInSupabase = async (baliseId: string, userId: string, formats
     .eq("balise_id", baliseId)
     .eq("user_id", userId);
 
-  if (deleteError) throw deleteError;
+  const oldTableAvailable = !deleteError;
+  if (deleteError && !isMissingBaliseFormatsTableError(deleteError)) throw deleteError;
 
-  if (!cleanFormats.length) return;
+  if (!cleanFormats.length) {
+    await updateBaliseFormatsJson(supabase, baliseId, userId, []);
+    return;
+  }
 
-  const { error: insertError } = await supabase.from("balise_formats").insert(cleanFormats);
-  if (insertError) throw insertError;
+  let insertedFormats: any[] | null = null;
+  if (oldTableAvailable) {
+    const { data, error: insertError } = await supabase
+      .from("balise_formats")
+      .insert(cleanFormats)
+      .select("id, balise_id, user_id, format_type, label, is_default, payload, created_at");
+    if (insertError) throw insertError;
+    insertedFormats = data;
+  }
+
+  await updateBaliseFormatsJson(supabase, baliseId, userId, insertedFormats || cleanFormats);
 };
 
 const fetchParcoursUsageForBalise = async (balise: Balise, userId: string): Promise<ParcoursRef[]> => {

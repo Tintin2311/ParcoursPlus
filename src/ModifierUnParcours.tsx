@@ -28,6 +28,7 @@ import {
   X,
 } from "lucide-react-native";
 import { supabase } from "./supabaseClient";
+import { fetchAllBaliseFormatsCompat } from "./baliseFormatsCompat";
 import BottomBar from "./ui/BottomBar";
 
 /* =======================
@@ -424,12 +425,11 @@ const fetchAllBaliseFormats = async (): Promise<BaliseFormatsFetchResult> => {
   const typeMap = new Map<string, Set<ParcoursFormatType>>();
   const payloadMap: BaliseFormatPayloadMap = new Map();
 
-  const { data, error } = await supabase
-    .from("balise_formats")
-    .select("balise_id, format_type, payload");
-
-  if (error) {
-    const msg = String(error.message || "").toLowerCase();
+  let data: any[] = [];
+  try {
+    data = await fetchAllBaliseFormatsCompat(supabase);
+  } catch (error: any) {
+    const msg = String(error?.message || "").toLowerCase();
     if (msg.includes("does not exist") || msg.includes("relation")) {
       return { typeMap, payloadMap };
     }

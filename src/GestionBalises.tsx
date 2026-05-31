@@ -28,6 +28,7 @@ import {
   Table2,
 } from "lucide-react-native";
 import { supabase } from "./supabaseClient";
+import { fetchAllBaliseFormatsCompat } from "./baliseFormatsCompat";
 import InformationBalises from "./InformationBalises";
 import BottomBar from "./ui/BottomBar";
 
@@ -363,14 +364,11 @@ const fetchBalisesFromSupabase = async (userId: string): Promise<Balise[]> => {
 const fetchBaliseFormatsFromSupabase = async (userId: string): Promise<Map<string, BaliseFormat[]>> => {
   const map = new Map<string, BaliseFormat[]>();
 
-  const { data, error } = await supabase
-    .from("balise_formats")
-    .select("id, balise_id, user_id, format_type, label, is_default, payload, created_at")
-    .eq("user_id", userId)
-    .order("created_at", { ascending: true });
-
-  if (error) {
-    const msg = String(error.message || "").toLowerCase();
+  let data: any[] = [];
+  try {
+    data = await fetchAllBaliseFormatsCompat(supabase, userId);
+  } catch (error: any) {
+    const msg = String(error?.message || "").toLowerCase();
     if (msg.includes("does not exist") || msg.includes("relation")) return map;
     console.error("❌ fetchBaliseFormatsFromSupabase:", error);
     return map;

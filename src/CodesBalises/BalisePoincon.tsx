@@ -14,6 +14,7 @@ import {
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { ArrowLeft, Save, Tag, ScanSearch, Shapes } from "lucide-react-native";
 import { supabase } from "../supabaseClient";
+import { fetchBaliseFormatByIdCompat, updateBaliseFormatByIdCompat } from "../baliseFormatsCompat";
 
 type Props = {
   setPage?: (p: any) => void;
@@ -92,15 +93,8 @@ const readFormatFromSupabase = async (
   formatId: string,
   userId: string
 ): Promise<BaliseFormat> => {
-  const { data, error } = await supabase
-    .from("balise_formats")
-    .select("id, balise_id, user_id, format_type, label, is_default, payload, created_at")
-    .eq("id", formatId)
-    .eq("user_id", userId)
-    .single();
-
-  if (error) throw error;
-  return mapFormatRow(data);
+  const row = await fetchBaliseFormatByIdCompat(supabase, formatId, userId);
+  return mapFormatRow(row);
 };
 
 const updateFormatInSupabase = async (
@@ -109,16 +103,7 @@ const updateFormatInSupabase = async (
   label: string,
   payload: Record<string, any>
 ) => {
-  const { error } = await supabase
-    .from("balise_formats")
-    .update({
-      label,
-      payload,
-    })
-    .eq("id", formatId)
-    .eq("user_id", userId);
-
-  if (error) throw error;
+  await updateBaliseFormatByIdCompat(supabase, formatId, userId, label, payload);
 };
 
 const updateBaliseFallbackCodeInSupabase = async (
