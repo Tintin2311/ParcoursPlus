@@ -720,31 +720,7 @@ const loadPoinconFormatsForBalises = async (ids: string[]): Promise<BaliseFormat
     }
   }
 
-  try {
-    const { data, error } = await supabase
-      .from("balise_formats")
-      .select("id, balise_id, user_id, format_type, payload")
-      .in("balise_id", cleanIds)
-      .eq("format_type", "poincon");
-
-    if (error) {
-      console.warn("❌ Lecture directe balise_formats impossible:", error);
-      return [];
-    }
-
-    const normalized = normalizeRpcPoinconRows(data);
-
-    console.log("🧩 Lecture directe balise_formats résultat", {
-      idsDemandes: cleanIds,
-      lignesBrutes: data,
-      lignesNormalisees: normalized,
-    });
-
-    return normalized;
-  } catch (e) {
-    console.warn("❌ Lecture directe balise_formats exception:", e);
-    return [];
-  }
+  return [];
 };
 
 const EcrireCodeBaliseEleve: React.FC<Props> = ({
@@ -2150,7 +2126,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
               <View style={styles.poinconMissingBox}>
                 <Text style={styles.poinconMissingTitle}>Réponse Supabase introuvable</Text>
                 <Text style={styles.poinconMissingText}>
-                  Aucun poinçon n'a été trouvé dans balise_formats pour cette balise.
+                  Aucun poinçon n'a été trouvé pour cette balise.
                 </Text>
               </View>
             ) : null}

@@ -146,3 +146,39 @@ Cette phase garde encore :
 Le code lit d'abord les colonnes compactes. Si elles n'existent pas encore, il retombe sur `balises.formats`, puis sur `balise_formats`.
 
 Après application et tests, la prochaine phase pourra vider ou supprimer progressivement les anciens doublons.
+
+## Phase 4 préparée
+
+Objectif : supprimer le stockage ancien maintenant que les tests réels avec élèves sont OK.
+
+Migration :
+
+```text
+supabase/migrations/20260601_04_drop_legacy_balise_formats.sql
+```
+
+Rollback :
+
+```text
+supabase/migrations/20260601_04_drop_legacy_balise_formats_rollback.sql
+```
+
+Cette phase supprime :
+
+- `public.balises.formats`
+- `public.balise_formats`
+
+Cette phase garde :
+
+- `format_types`
+- `poincon_rows`
+- `poincon_cols`
+- `poincon_cells`
+- `tableau_rows`
+- `tableau_cols`
+- `tableau_cells`
+- `qrcode_value`
+
+Avant de supprimer, la migration vérifie que le nombre de poinçons dans l'ancien JSON correspond au nombre de poinçons dans les colonnes compactes.
+
+Après cette phase, le code ne lit plus `balise_formats` ni `balises.formats`.

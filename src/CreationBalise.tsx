@@ -35,7 +35,6 @@ import {
 import { supabase } from "./supabaseClient";
 import {
   fetchBaliseFormatsByBaliseIdCompat,
-  isMissingBaliseFormatsTableError,
   updateBaliseFormatsJson,
 } from "./baliseFormatsCompat";
 
@@ -565,8 +564,6 @@ const updateBaliseInSupabase = async (b: Balise, userId: string) => {
 };
 
 const deleteBaliseInSupabase = async (baliseId: string, userId: string) => {
-  await supabase.from("balise_formats").delete().eq("balise_id", baliseId).eq("user_id", userId);
-
   const { error } = await supabase.from("balises").delete().eq("id", baliseId).eq("user_id", userId);
 
   if (error) throw error;
@@ -589,29 +586,7 @@ const upsertFormatsInSupabase = async (baliseId: string, userId: string, formats
 
   const savedInBalises = await updateBaliseFormatsJson(supabase, baliseId, userId, cleanFormats);
   if (savedInBalises) return;
-
-  const { error: deleteError } = await supabase
-    .from("balise_formats")
-    .delete()
-    .eq("balise_id", baliseId)
-    .eq("user_id", userId);
-
-  const oldTableAvailable = !deleteError;
-  if (deleteError && !isMissingBaliseFormatsTableError(deleteError)) throw deleteError;
-
-  if (!cleanFormats.length) return;
-
-  let insertedFormats: any[] | null = null;
-  if (oldTableAvailable) {
-    const { data, error: insertError } = await supabase
-      .from("balise_formats")
-      .insert(cleanFormats)
-      .select("id, balise_id, user_id, format_type, label, is_default, payload, created_at");
-    if (insertError) throw insertError;
-    insertedFormats = data;
-  }
-
-  await updateBaliseFormatsJson(supabase, baliseId, userId, insertedFormats || cleanFormats);
+  throw new Error("Les colonnes compactes des formats ne sont pas disponibles dans Supabase.");
 };
 
 const fetchParcoursUsageForBalise = async (balise: Balise, userId: string): Promise<ParcoursRef[]> => {
