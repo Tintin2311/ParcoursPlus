@@ -291,6 +291,24 @@ function getTargetGroupIds(eleve?: EleveConnecte | null) {
   return Array.from(new Set(ids));
 }
 
+function getTargetClassIds(eleve?: EleveConnecte | null) {
+  if (!eleve) return [];
+
+  const ids: string[] = [];
+
+  if (eleve.isGroupSession && Array.isArray(eleve.groupIds)) {
+    ids.push(...eleve.groupIds.map(String).filter(Boolean));
+  }
+
+  if (eleve.isGroupSession && Array.isArray(eleve.groupStudents)) {
+    ids.push(...eleve.groupStudents.map((student) => student.group_id).filter(Boolean).map(String));
+  }
+
+  if (eleve.group_id) ids.push(String(eleve.group_id));
+
+  return Array.from(new Set(ids));
+}
+
 const parseStoredStudent = (raw: string | null): EleveConnecte | null => {
   if (!raw) return null;
   try {
@@ -359,8 +377,10 @@ const EcrireResultat: React.FC<Props> = ({
   const [isRestoringScroll, setIsRestoringScroll] = useState(false);
 
   const groupIds = useMemo(() => getTargetGroupIds(resolvedEleve), [resolvedEleve]);
+  const classIds = useMemo(() => getTargetClassIds(resolvedEleve), [resolvedEleve]);
   const groupId = groupIds[0] ?? null;
   const groupKey = groupIds.join("|");
+  const classKey = classIds.join("|");
   const eleveNom = resolvedEleve?.display_name ?? "Élève";
 
   const currentFolder = useMemo(
@@ -827,10 +847,10 @@ const EcrireResultat: React.FC<Props> = ({
   const sourceDescription = useMemo(() => {
     if (!resolvedEleve) return "Aucun élève détecté";
     if (!groupId) return `${eleveNom} • Aucune classe trouvée`;
-    if (groupIds.length > 1) return `${eleveNom} • ${groupIds.length} classes`;
+    if (classIds.length > 1) return `${eleveNom} • ${classIds.length} classes`;
     if (!classeNom) return `${eleveNom} • Classe inconnue`;
     return `${eleveNom} • ${classeNom}`;
-  }, [resolvedEleve, groupId, groupKey, classeNom, eleveNom]);
+  }, [resolvedEleve, groupId, classKey, classeNom, eleveNom]);
 
   const handleOpenParcours = useCallback(
     (parcours: ParcoursRow) => {

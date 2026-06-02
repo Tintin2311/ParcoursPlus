@@ -388,6 +388,8 @@ function GroupPickerModal({
   onSelect,
   onToggle,
   onClear,
+  onSelectAll,
+  onCreateGroup,
 }: {
   visible: boolean;
   title: string;
@@ -402,12 +404,16 @@ function GroupPickerModal({
   onSelect: (id: string | null) => void;
   onToggle?: (id: string) => void;
   onClear?: () => void;
+  onSelectAll?: (ids: string[]) => void;
+  onCreateGroup?: () => void;
 }) {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const [pickerScope, setPickerScope] = useState<"classe" | "groupe" | null>(null);
 
   useEffect(() => {
     if (!visible) return;
     setExpandedFolders(new Set());
+    setPickerScope(null);
   }, [visible]);
 
   const topFolders = useMemo(
@@ -543,12 +549,53 @@ function GroupPickerModal({
 
   if (!visible) return null;
 
+  const renderScopeChoice = () => (
+    <View>
+      <TouchableOpacity
+        activeOpacity={0.92}
+        onPress={() => setPickerScope("classe")}
+        style={styles.scopeChoiceCard}
+      >
+        <View style={styles.scopeChoiceIcon}>
+          <Feather name="users" size={20} color="#1D4ED8" />
+        </View>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text style={styles.scopeChoiceTitle}>Classe</Text>
+          <Text style={styles.scopeChoiceText}>Associer à une classe entière.</Text>
+        </View>
+        <Feather name="chevron-right" size={18} color={C_MUTED} />
+      </TouchableOpacity>
+
+      <TouchableOpacity
+        activeOpacity={0.92}
+        onPress={() => setPickerScope("groupe")}
+        style={styles.scopeChoiceCard}
+      >
+        <View style={[styles.scopeChoiceIcon, { backgroundColor: "rgba(139,92,246,0.12)" }]}>
+          <Feather name="layers" size={20} color="#6D28D9" />
+        </View>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text style={styles.scopeChoiceTitle}>Groupe</Text>
+          <Text style={styles.scopeChoiceText}>Associer à un ou plusieurs groupes multi-classes.</Text>
+        </View>
+        <Feather name="chevron-right" size={18} color={C_MUTED} />
+      </TouchableOpacity>
+    </View>
+  );
+
   return (
     <Modal transparent animationType="fade" visible onRequestClose={onClose}>
       <View style={styles.modalOverlay}>
         <View style={styles.modalCard}>
           <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>{title}</Text>
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text style={styles.modalTitle}>{title}</Text>
+              {pickerScope ? (
+                <TouchableOpacity activeOpacity={0.9} onPress={() => setPickerScope(null)}>
+                  <Text style={styles.modalBackChoice}>Changer : {pickerScope === "classe" ? "Classe" : "Groupe"}</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
 
             <TouchableOpacity activeOpacity={0.9} onPress={onClose} style={styles.modalCloseBtn}>
               <Feather name="x" size={20} color={C_TEXT} />
@@ -556,7 +603,9 @@ function GroupPickerModal({
           </View>
 
           <ScrollView style={{ maxHeight: 430 }} showsVerticalScrollIndicator={false}>
-            {allowNone ? (
+            {!pickerScope ? renderScopeChoice() : null}
+
+            {pickerScope === "classe" && allowNone ? (
               <TouchableOpacity
                 activeOpacity={0.92}
                 onPress={() => {
@@ -582,14 +631,41 @@ function GroupPickerModal({
               </TouchableOpacity>
             ) : null}
 
-            {rootGroups.map((group) => renderGroupOption(group, 0))}
-            {topFolders.map((folder) => renderFolderTree(folder, 0))}
-            {sessionGroups.length > 0 ? (
-              <View style={styles.modalSectionTitleWrap}>
-                <Text style={styles.modalSectionTitle}>Groupes</Text>
+            {pickerScope === "classe" ? (
+              <>
+                {rootGroups.map((group) => renderGroupOption(group, 0))}
+                {topFolders.map((folder) => renderFolderTree(folder, 0))}
+              </>
+            ) : null}
+
+            {pickerScope === "groupe" ? (
+              <View>
+                <View style={styles.groupPickerActions}>
+                  {multiSelect ? (
+                    <>
+                      <TouchableOpacity activeOpacity={0.9} onPress={() => onSelectAll?.(sessionGroups.map((group) => group.id))} style={styles.groupPickerActionBtn}>
+                        <Text style={styles.groupPickerActionText}>Tout sélectionner</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity activeOpacity={0.9} onPress={() => onClear?.()} style={styles.groupPickerActionBtn}>
+                        <Text style={styles.groupPickerActionText}>Tout désélectionner</Text>
+                      </TouchableOpacity>
+                    </>
+                  ) : null}
+                  <TouchableOpacity activeOpacity={0.9} onPress={onCreateGroup} style={[styles.groupPickerActionBtn, styles.groupPickerCreateBtn]}>
+                    <Text style={[styles.groupPickerActionText, { color: "#FFFFFF" }]}>Créer / gérer</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {sessionGroups.length === 0 ? (
+                  <View style={styles.groupEmptyBox}>
+                    <Text style={styles.groupEmptyTitle}>Aucun groupe multi-classes</Text>
+                    <Text style={styles.groupEmptyText}>Crée d'abord un groupe avec des élèves de plusieurs classes.</Text>
+                  </View>
+                ) : (
+                  sessionGroups.map((group) => renderGroupOption(group, 0))
+                )}
               </View>
             ) : null}
-            {sessionGroups.map((group) => renderGroupOption(group, 0))}
           </ScrollView>
         </View>
       </View>
@@ -1871,6 +1947,10 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
           setSelectedSourceGroup(id);
           if (id) setSelectedTargetGroups((prev) => prev.filter((targetId) => targetId !== id));
         }}
+        onCreateGroup={() => {
+          setGroupPickerMode(null);
+          setPage("gestionGroupes");
+        }}
       />
 
       <GroupPickerModal
@@ -1892,6 +1972,15 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
           );
         }}
         onClear={() => setSelectedTargetGroups([])}
+        onSelectAll={(ids) =>
+          setSelectedTargetGroups(
+            Array.from(new Set(ids.filter((id) => id !== selectedSourceGroup)))
+          )
+        }
+        onCreateGroup={() => {
+          setGroupPickerMode(null);
+          setPage("gestionGroupes");
+        }}
       />
 
       <InformationAssociations visible={showInfo} onClose={() => setShowInfo(false)} />
@@ -1956,7 +2045,19 @@ const styles = StyleSheet.create({
   modalCard: { width: "100%", maxWidth: 520, backgroundColor: "#FFFFFF", borderRadius: 20, borderWidth: 1, borderColor: C_BORDER, padding: 14 },
   modalHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12 },
   modalTitle: { color: C_TEXT, fontSize: 17, fontWeight: "800" },
+  modalBackChoice: { color: C_MUTED, fontSize: 12, fontWeight: "800", marginTop: 3 },
   modalCloseBtn: { width: 36, height: 36, borderRadius: 12, backgroundColor: "rgba(0,0,0,0.05)", alignItems: "center", justifyContent: "center" },
+  scopeChoiceCard: { minHeight: 72, borderRadius: 16, borderWidth: 1, borderColor: C_BORDER, backgroundColor: "#FFFFFF", paddingHorizontal: 12, paddingVertical: 12, marginBottom: 10, flexDirection: "row", alignItems: "center", gap: 12 },
+  scopeChoiceIcon: { width: 42, height: 42, borderRadius: 14, backgroundColor: "rgba(59,130,246,0.12)", alignItems: "center", justifyContent: "center" },
+  scopeChoiceTitle: { color: C_TEXT, fontSize: 15, fontWeight: "900" },
+  scopeChoiceText: { color: C_MUTED, fontSize: 12, fontWeight: "700", marginTop: 2 },
+  groupPickerActions: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 10 },
+  groupPickerActionBtn: { minHeight: 36, borderRadius: 12, paddingHorizontal: 10, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(59,130,246,0.10)", borderWidth: 1, borderColor: "rgba(59,130,246,0.18)" },
+  groupPickerCreateBtn: { backgroundColor: C_HEADER, borderColor: C_HEADER },
+  groupPickerActionText: { color: "#1D4ED8", fontSize: 12, fontWeight: "900" },
+  groupEmptyBox: { borderRadius: 16, borderWidth: 1, borderColor: C_BORDER, backgroundColor: "#F8FAFC", padding: 14 },
+  groupEmptyTitle: { color: C_TEXT, fontSize: 14, fontWeight: "900", textAlign: "center" },
+  groupEmptyText: { color: C_MUTED, fontSize: 12, fontWeight: "700", textAlign: "center", marginTop: 4 },
   pickerFolderRow: { minHeight: 46, borderRadius: 12, borderWidth: 1, borderColor: C_BORDER, backgroundColor: "#F8FAFC", paddingHorizontal: 10, marginBottom: 8, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   pickerFolderLeft: { flexDirection: "row", alignItems: "center", gap: 10, flex: 1 },
   pickerFolderIcon: { width: 30, height: 30, borderRadius: 10, alignItems: "center", justifyContent: "center" },
