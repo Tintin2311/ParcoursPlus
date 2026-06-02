@@ -772,6 +772,11 @@ const [parcoursId, setParcoursId] = useState<string | null>(null);
   useEffect(() => {
     const fetchStudentParcours = async () => {
       if (eleve && modeConnexion === "eleve") {
+        if (eleve.isGroupSession) {
+          setParcoursGlobaux([]);
+          return;
+        }
+
         const visibilityIds = Array.from(
           new Set(
             [
@@ -780,7 +785,6 @@ const [parcoursId, setParcoursId] = useState<string | null>(null);
               ...(Array.isArray(eleve.groupStudents)
                 ? eleve.groupStudents.map((student) => student.group_id)
                 : []),
-              eleve.isGroupSession ? eleve.groupSessionId : null,
             ]
               .filter(Boolean)
               .map(String)

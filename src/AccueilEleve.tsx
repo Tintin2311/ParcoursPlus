@@ -231,7 +231,7 @@ function getTargetStudentIds(eleve?: EleveMin | null) {
   return singleId ? [String(singleId)] : [];
 }
 
-function getTargetGroupIds(eleve?: EleveMin | null) {
+function getTargetClassIds(eleve?: EleveMin | null) {
   if (!eleve) return [];
 
   const ids: string[] = [];
@@ -245,9 +245,13 @@ function getTargetGroupIds(eleve?: EleveMin | null) {
   }
 
   if (eleve.group_id) ids.push(String(eleve.group_id));
-  if (eleve.isGroupSession && eleve.groupSessionId) ids.push(String(eleve.groupSessionId));
 
   return Array.from(new Set(ids));
+}
+
+function getGroupSessionAssociationId(eleve?: EleveMin | null) {
+  if (!eleve?.isGroupSession || !eleve.groupSessionId) return null;
+  return String(eleve.groupSessionId);
 }
 
 function getMainStudentForDisplay(eleve?: EleveMin | null) {
@@ -415,8 +419,12 @@ const AccueilEleve: React.FC<Props> = ({
   const mainStudent = getMainStudentForDisplay(eleveConnecte);
   const studentId = getStudentId(mainStudent);
   const targetStudentIds = React.useMemo(() => getTargetStudentIds(eleveConnecte), [eleveConnecte]);
-  const groupIds = React.useMemo(() => getTargetGroupIds(eleveConnecte), [eleveConnecte]);
-  const groupKey = groupIds.join("|");
+  const classIds = React.useMemo(() => getTargetClassIds(eleveConnecte), [eleveConnecte]);
+  const sessionAssociationId = React.useMemo(
+    () => getGroupSessionAssociationId(eleveConnecte),
+    [eleveConnecte]
+  );
+  const groupKey = `${classIds.join("|")}::${sessionAssociationId ?? ""}`;
   const groupDisplayName = getGroupDisplayName(eleveConnecte);
 
   const nom = (
@@ -482,9 +490,14 @@ const AccueilEleve: React.FC<Props> = ({
 
         const stats = ((statsData as any[]) || []).filter(Boolean) as StatRow[];
         const allParcours = ((parcoursData as ParcoursRow[]) || []).filter(Boolean);
+        const effectiveGroupIds =
+          sessionAssociationId &&
+          allParcours.some((p) => isParcoursVisibleForGroup(p, sessionAssociationId))
+            ? [sessionAssociationId]
+            : classIds;
 
-        const visibleParcours = groupIds.length > 0
-          ? allParcours.filter((p) => isParcoursVisibleForGroups(p, groupIds))
+        const visibleParcours = effectiveGroupIds.length > 0
+          ? allParcours.filter((p) => isParcoursVisibleForGroups(p, effectiveGroupIds))
           : allParcours;
 
         const visibleIds = new Set(visibleParcours.map((p) => String(p.id)));
@@ -535,7 +548,7 @@ const AccueilEleve: React.FC<Props> = ({
     };
 
     loadHome();
-  }, [studentId, targetStudentIds, groupKey, isGroupSession]);
+  }, [studentId, targetStudentIds, groupKey, isGroupSession, classIds, sessionAssociationId]);
 
   const levelData = React.useMemo(() => getLevelData(score), [score]);
 

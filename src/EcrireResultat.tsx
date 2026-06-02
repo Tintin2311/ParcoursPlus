@@ -272,25 +272,6 @@ function getTargetStudentIds(eleve?: EleveConnecte | null) {
   return singleId ? [String(singleId)] : [];
 }
 
-function getTargetGroupIds(eleve?: EleveConnecte | null) {
-  if (!eleve) return [];
-
-  const ids: string[] = [];
-
-  if (eleve.isGroupSession && Array.isArray(eleve.groupIds)) {
-    ids.push(...eleve.groupIds.map(String).filter(Boolean));
-  }
-
-  if (eleve.isGroupSession && Array.isArray(eleve.groupStudents)) {
-    ids.push(...eleve.groupStudents.map((student) => student.group_id).filter(Boolean).map(String));
-  }
-
-  if (eleve.group_id) ids.push(String(eleve.group_id));
-  if (eleve.isGroupSession && eleve.groupSessionId) ids.push(String(eleve.groupSessionId));
-
-  return Array.from(new Set(ids));
-}
-
 function getTargetClassIds(eleve?: EleveConnecte | null) {
   if (!eleve) return [];
 
@@ -307,6 +288,23 @@ function getTargetClassIds(eleve?: EleveConnecte | null) {
   if (eleve.group_id) ids.push(String(eleve.group_id));
 
   return Array.from(new Set(ids));
+}
+
+function getGroupSessionAssociationId(eleve?: EleveConnecte | null) {
+  if (!eleve?.isGroupSession || !eleve.groupSessionId) return null;
+  return String(eleve.groupSessionId);
+}
+
+function hasManualGroupSessionAssociations(
+  sessionId: string | null,
+  parcoursRows: ParcoursRow[],
+  folderRows: FolderRow[]
+) {
+  if (!sessionId) return false;
+  return (
+    parcoursRows.some((p) => normalizeAssoc(p.groupes_associes).includes(sessionId)) ||
+    folderRows.some((f) => normalizeAssoc(f.groupes_associes).includes(sessionId))
+  );
 }
 
 const parseStoredStudent = (raw: string | null): EleveConnecte | null => {
@@ -376,11 +374,22 @@ const EcrireResultat: React.FC<Props> = ({
   const [searchTerm, setSearchTerm] = useState("");
   const [isRestoringScroll, setIsRestoringScroll] = useState(false);
 
-  const groupIds = useMemo(() => getTargetGroupIds(resolvedEleve), [resolvedEleve]);
   const classIds = useMemo(() => getTargetClassIds(resolvedEleve), [resolvedEleve]);
+  const classKey = classIds.join("|");
+  const sessionAssociationId = useMemo(
+    () => getGroupSessionAssociationId(resolvedEleve),
+    [resolvedEleve]
+  );
+  const usesManualGroupAssociations = useMemo(
+    () => hasManualGroupSessionAssociations(sessionAssociationId, parcoursData, foldersData),
+    [sessionAssociationId, parcoursData, foldersData]
+  );
+  const groupIds = useMemo(
+    () => (usesManualGroupAssociations && sessionAssociationId ? [sessionAssociationId] : classIds),
+    [usesManualGroupAssociations, sessionAssociationId, classKey]
+  );
   const groupId = groupIds[0] ?? null;
   const groupKey = groupIds.join("|");
-  const classKey = classIds.join("|");
   const eleveNom = resolvedEleve?.display_name ?? "Élève";
 
   const currentFolder = useMemo(
