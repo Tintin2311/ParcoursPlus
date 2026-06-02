@@ -323,23 +323,33 @@ export default function ParcoursPlus({
           return;
         }
 
-        const targetStudentIds = session.student_ids.map(String).filter(Boolean);
+        const groupStudents = await getStudentsByIds(session.student_ids, profUserId);
 
-payload = {
-  uuid: targetStudentIds[0],
-  id: targetStudentIds[0],
-  code: c,
-  teacher_id: profUserId,
-  group_id: null,
-  display_name: session.nom ?? `Session ${session.code}`,
-  name: session.nom ?? "Session groupe",
-  isGroupSession: true,
-  groupSessionId: session.id,
-  groupSessionCode: session.code,
-  groupSessionName: session.nom ?? null,
-  groupStudents: [],
-  targetStudentIds,
-};
+        if (groupStudents.length === 0) {
+          setErrorEleve("Aucun élève trouvé dans cette session groupe.");
+          return;
+        }
+
+        const firstStudent = groupStudents[0];
+
+        payload = {
+          uuid: firstStudent.id ?? firstStudent.uuid,
+          id: firstStudent.id ?? firstStudent.uuid,
+          code: c,
+          teacher_id: profUserId,
+          group_id: firstStudent.group_id ?? null,
+          display_name: session.nom ?? groupStudents.map((s) => s.display_name ?? s.name ?? "Élève").join(" / "),
+          name: session.nom ?? "Session groupe",
+          isGroupSession: true,
+          groupSessionId: session.id,
+          groupSessionCode: session.code,
+          groupSessionName: session.nom ?? null,
+          groupStudents,
+          targetStudentIds: groupStudents
+            .map((s) => s.id ?? s.uuid)
+            .filter(Boolean)
+            .map(String),
+        };
       } else {
         const student = await getStudentByCode(c, profUserId);
         if (!student?.id) {
