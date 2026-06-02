@@ -389,7 +389,6 @@ function GroupPickerModal({
   onToggle,
   onClear,
   onSelectAll,
-  onCreateGroup,
 }: {
   visible: boolean;
   title: string;
@@ -405,7 +404,6 @@ function GroupPickerModal({
   onToggle?: (id: string) => void;
   onClear?: () => void;
   onSelectAll?: (ids: string[]) => void;
-  onCreateGroup?: () => void;
 }) {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [pickerScope, setPickerScope] = useState<"classe" | "groupe" | null>(null);
@@ -652,8 +650,8 @@ function GroupPickerModal({
                       </TouchableOpacity>
                     </>
                   ) : null}
-                  <TouchableOpacity activeOpacity={0.9} onPress={onCreateGroup} style={[styles.groupPickerActionBtn, styles.groupPickerCreateBtn]}>
-                    <Text style={[styles.groupPickerActionText, { color: "#FFFFFF" }]}>Créer / gérer</Text>
+                  <TouchableOpacity activeOpacity={0.9} onPress={onClose} style={[styles.groupPickerActionBtn, styles.groupPickerCreateBtn]}>
+                    <Text style={[styles.groupPickerActionText, { color: "#FFFFFF" }]}>Valider</Text>
                   </TouchableOpacity>
                 </View>
 
@@ -1999,10 +1997,6 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
           setSelectedSourceGroup(null);
           setSelectedSourceGroups(Array.from(new Set(ids)));
         }}
-        onCreateGroup={() => {
-          setGroupPickerMode(null);
-          setPage("gestionGroupes");
-        }}
       />
 
       <GroupPickerModal
@@ -2029,10 +2023,6 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
             Array.from(new Set(ids.filter((id) => id !== selectedSourceGroup && !selectedSourceGroups.includes(id))))
           )
         }
-        onCreateGroup={() => {
-          setGroupPickerMode(null);
-          setPage("gestionGroupes");
-        }}
       />
 
       <InformationAssociations visible={showInfo} onClose={() => setShowInfo(false)} />
