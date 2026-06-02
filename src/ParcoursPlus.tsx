@@ -43,6 +43,7 @@ type EleveType = {
   groupSessionName?: string | null;
   groupStudents?: EleveType[];
   targetStudentIds?: string[];
+  groupIds?: string[];
 };
 
 type GroupSessionRow = {
@@ -331,13 +332,21 @@ export default function ParcoursPlus({
         }
 
         const firstStudent = groupStudents[0];
+        const groupIds = Array.from(
+          new Set(
+            groupStudents
+              .map((student) => student.group_id)
+              .filter(Boolean)
+              .map(String)
+          )
+        );
 
         payload = {
           uuid: firstStudent.id ?? firstStudent.uuid,
           id: firstStudent.id ?? firstStudent.uuid,
           code: c,
           teacher_id: profUserId,
-          group_id: firstStudent.group_id ?? null,
+          group_id: groupIds[0] ?? firstStudent.group_id ?? null,
           display_name: session.nom ?? groupStudents.map((s) => s.display_name ?? s.name ?? "Élève").join(" / "),
           name: session.nom ?? "Session groupe",
           isGroupSession: true,
@@ -349,6 +358,7 @@ export default function ParcoursPlus({
             .map((s) => s.id ?? s.uuid)
             .filter(Boolean)
             .map(String),
+          groupIds,
         };
       } else {
         const student = await getStudentByCode(c, profUserId);

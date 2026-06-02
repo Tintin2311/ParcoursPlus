@@ -33,6 +33,15 @@ type EleveConnecte = {
   teacher_id?: string | null;
   group_id?: string | null;
   display_name?: string | null;
+  name?: string | null;
+  nom?: string | null;
+  isGroupSession?: boolean | null;
+  groupSessionId?: string | null;
+  groupSessionCode?: string | null;
+  groupSessionName?: string | null;
+  groupStudents?: EleveConnecte[] | null;
+  targetStudentIds?: string[] | null;
+  groupIds?: string[] | null;
 };
 
 type RpcStudentRow = {
@@ -185,6 +194,12 @@ const isParcoursVisibleForGroup = (
   return normalizeAssoc(parcours.groupes_associes).includes(String(groupId));
 };
 
+const isParcoursVisibleForGroups = (parcours: ParcoursRow, groupIds: string[]) => {
+  if (groupIds.length === 0) return false;
+  const associatedGroups = normalizeAssoc(parcours.groupes_associes);
+  return groupIds.some((groupId) => associatedGroups.includes(String(groupId)));
+};
+
 const isFolderVisibleForGroup = (
   folder: FolderRow,
   groupId: string | null | undefined,
@@ -206,6 +221,74 @@ const isFolderVisibleForGroup = (
     isFolderVisibleForGroup(child, groupId, allFolders, allParcours)
   );
 };
+
+const isFolderVisibleForGroups = (
+  folder: FolderRow,
+  groupIds: string[],
+  allFolders: FolderRow[],
+  allParcours: ParcoursRow[]
+): boolean => {
+  if (groupIds.length === 0) return false;
+
+  const directAssoc = normalizeAssoc(folder.groupes_associes).some((groupId) =>
+    groupIds.includes(String(groupId))
+  );
+  if (directAssoc) return true;
+
+  const directParcoursVisible = allParcours.some(
+    (p) => (p.folder_id ?? null) === folder.id && isParcoursVisibleForGroups(p, groupIds)
+  );
+  if (directParcoursVisible) return true;
+
+  const childFolders = allFolders.filter((f) => (f.parent_folder_id ?? null) === folder.id);
+  return childFolders.some((child) =>
+    isFolderVisibleForGroups(child, groupIds, allFolders, allParcours)
+  );
+};
+
+function getStudentId(eleve?: EleveConnecte | null) {
+  return eleve?.id ?? eleve?.uuid ?? null;
+}
+
+function getTargetStudentIds(eleve?: EleveConnecte | null) {
+  if (!eleve) return [];
+
+  if (eleve.isGroupSession && Array.isArray(eleve.targetStudentIds)) {
+    return Array.from(new Set(eleve.targetStudentIds.map(String).filter(Boolean)));
+  }
+
+  if (eleve.isGroupSession && Array.isArray(eleve.groupStudents)) {
+    return Array.from(
+      new Set(
+        eleve.groupStudents
+          .map((student) => getStudentId(student))
+          .filter(Boolean)
+          .map(String)
+      )
+    );
+  }
+
+  const singleId = getStudentId(eleve);
+  return singleId ? [String(singleId)] : [];
+}
+
+function getTargetGroupIds(eleve?: EleveConnecte | null) {
+  if (!eleve) return [];
+
+  const ids: string[] = [];
+
+  if (eleve.isGroupSession && Array.isArray(eleve.groupIds)) {
+    ids.push(...eleve.groupIds.map(String).filter(Boolean));
+  }
+
+  if (eleve.isGroupSession && Array.isArray(eleve.groupStudents)) {
+    ids.push(...eleve.groupStudents.map((student) => student.group_id).filter(Boolean).map(String));
+  }
+
+  if (eleve.group_id) ids.push(String(eleve.group_id));
+
+  return Array.from(new Set(ids));
+}
 
 const parseStoredStudent = (raw: string | null): EleveConnecte | null => {
   if (!raw) return null;
@@ -274,7 +357,9 @@ const EcrireResultat: React.FC<Props> = ({
   const [searchTerm, setSearchTerm] = useState("");
   const [isRestoringScroll, setIsRestoringScroll] = useState(false);
 
-  const groupId = resolvedEleve?.group_id ?? null;
+  const groupIds = useMemo(() => getTargetGroupIds(resolvedEleve), [resolvedEleve]);
+  const groupId = groupIds[0] ?? null;
+  const groupKey = groupIds.join("|");
   const eleveNom = resolvedEleve?.display_name ?? "Élève";
 
   const currentFolder = useMemo(
@@ -299,8 +384,29 @@ const EcrireResultat: React.FC<Props> = ({
     }
 
     let rpcRow: RpcStudentRow | null = null;
+    let groupStudents = Array.isArray(baseEleve.groupStudents) ? baseEleve.groupStudents : [];
 
-    if (baseEleve.code) {
+    const baseTargetStudentIds = getTargetStudentIds(baseEleve);
+
+    if (baseEleve.isGroupSession && baseTargetStudentIds.length > 0) {
+      const { data } = await supabase
+        .from("students")
+        .select("id,name,group_id,teacher_id,code")
+        .in("id", baseTargetStudentIds);
+
+      const rows = ((data as any[]) || []).filter(Boolean);
+      if (rows.length > 0) {
+        groupStudents = rows.map((row) => ({
+          id: row.id,
+          uuid: row.id,
+          code: row.code ?? null,
+          teacher_id: row.teacher_id ?? baseEleve.teacher_id ?? null,
+          group_id: row.group_id ?? null,
+          display_name: row.name ?? null,
+          name: row.name ?? null,
+        }));
+      }
+    } else if (baseEleve.code) {
       const rpc = await supabase.rpc("student_name_and_group_by_code", {
         p_code: baseEleve.code,
       });
@@ -310,17 +416,34 @@ const EcrireResultat: React.FC<Props> = ({
       }
     }
 
-    const studentId = rpcRow?.id ?? baseEleve.id ?? baseEleve.uuid ?? null;
+    const groupIds = Array.from(
+      new Set(
+        [
+          ...(Array.isArray(baseEleve.groupIds) ? baseEleve.groupIds : []),
+          ...groupStudents.map((student) => student.group_id),
+          baseEleve.group_id,
+        ]
+          .filter(Boolean)
+          .map(String)
+      )
+    );
+    const firstGroupStudent = groupStudents[0] ?? null;
+    const studentId = rpcRow?.id ?? baseEleve.id ?? baseEleve.uuid ?? firstGroupStudent?.id ?? null;
     const studentName = rpcRow?.name ?? baseEleve.display_name ?? null;
-    const studentGroupId = rpcRow?.group_id ?? baseEleve.group_id ?? null;
+    const studentGroupId = rpcRow?.group_id ?? groupIds[0] ?? baseEleve.group_id ?? null;
     const studentGroupName = rpcRow?.group_name ?? null;
 
     const merged: EleveConnecte = {
       ...baseEleve,
       id: studentId ?? baseEleve.id,
       uuid: baseEleve.uuid,
-      display_name: studentName ?? baseEleve.display_name ?? null,
+      display_name: studentName ?? baseEleve.display_name ?? baseEleve.groupSessionName ?? firstGroupStudent?.display_name ?? null,
       group_id: studentGroupId ?? null,
+      groupStudents: groupStudents.length > 0 ? groupStudents : baseEleve.groupStudents ?? null,
+      targetStudentIds: baseEleve.isGroupSession
+        ? getTargetStudentIds({ ...baseEleve, groupStudents })
+        : getTargetStudentIds(baseEleve),
+      groupIds,
     };
 
     setResolvedEleve(merged);
@@ -533,14 +656,14 @@ const EcrireResultat: React.FC<Props> = ({
 
   const getAllVisibleParcoursInsideFolder = useCallback(
     (folderId: string): ParcoursRow[] => {
-      if (!groupId) return [];
+      if (groupIds.length === 0) return [];
 
       const directParcours = getDirectParcours(folderId).filter((p) =>
-        isParcoursVisibleForGroup(p, groupId)
+        isParcoursVisibleForGroups(p, groupIds)
       );
 
       const childFolders = getDirectFolders(folderId).filter((folder) =>
-        isFolderVisibleForGroup(folder, groupId, foldersData, parcoursData)
+        isFolderVisibleForGroups(folder, groupIds, foldersData, parcoursData)
       );
 
       const childParcours = childFolders.flatMap((child) =>
@@ -549,7 +672,7 @@ const EcrireResultat: React.FC<Props> = ({
 
       return [...directParcours, ...childParcours];
     },
-    [groupId, getDirectFolders, getDirectParcours, foldersData, parcoursData]
+    [groupKey, getDirectFolders, getDirectParcours, foldersData, parcoursData]
   );
 
   const getParcoursProgress = useCallback(
@@ -621,14 +744,14 @@ const EcrireResultat: React.FC<Props> = ({
   }, [folderHistory]);
 
   const visibleNodes = useMemo(() => {
-    if (!groupId) return [] as RenderedNode[];
+    if (groupIds.length === 0) return [] as RenderedNode[];
 
     const s = searchTerm.trim().toLowerCase();
 
     if (s) {
       const visibleFolders = foldersData
         .filter((folder) =>
-          isFolderVisibleForGroup(folder, groupId, foldersData, parcoursData)
+          isFolderVisibleForGroups(folder, groupIds, foldersData, parcoursData)
         )
         .filter((folder) => getDisplayName(folder).toLowerCase().includes(s))
         .map((folder) => ({
@@ -638,7 +761,7 @@ const EcrireResultat: React.FC<Props> = ({
         }));
 
       const visibleParcours = parcoursData
-        .filter((p) => isParcoursVisibleForGroup(p, groupId))
+        .filter((p) => isParcoursVisibleForGroups(p, groupIds))
         .filter((p) => getDisplayName(p).toLowerCase().includes(s))
         .map((p) => ({
           ...p,
@@ -651,7 +774,7 @@ const EcrireResultat: React.FC<Props> = ({
 
     const directFolders = getDirectFolders(currentFolderId)
       .filter((folder) =>
-        isFolderVisibleForGroup(folder, groupId, foldersData, parcoursData)
+        isFolderVisibleForGroups(folder, groupIds, foldersData, parcoursData)
       )
       .map((folder) => ({
         ...folder,
@@ -660,7 +783,7 @@ const EcrireResultat: React.FC<Props> = ({
       }));
 
     const directParcours = getDirectParcours(currentFolderId)
-      .filter((p) => isParcoursVisibleForGroup(p, groupId))
+      .filter((p) => isParcoursVisibleForGroups(p, groupIds))
       .map((p) => ({
         ...p,
         type: "parcours" as const,
@@ -669,7 +792,7 @@ const EcrireResultat: React.FC<Props> = ({
 
     return [...directFolders, ...directParcours];
   }, [
-    groupId,
+    groupKey,
     searchTerm,
     foldersData,
     parcoursData,
@@ -703,9 +826,10 @@ const EcrireResultat: React.FC<Props> = ({
   const sourceDescription = useMemo(() => {
     if (!resolvedEleve) return "Aucun élève détecté";
     if (!groupId) return `${eleveNom} • Aucune classe trouvée`;
+    if (groupIds.length > 1) return `${eleveNom} • ${groupIds.length} classes`;
     if (!classeNom) return `${eleveNom} • Classe inconnue`;
     return `${eleveNom} • ${classeNom}`;
-  }, [resolvedEleve, groupId, classeNom, eleveNom]);
+  }, [resolvedEleve, groupId, groupKey, classeNom, eleveNom]);
 
   const handleOpenParcours = useCallback(
     (parcours: ParcoursRow) => {

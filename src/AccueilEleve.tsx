@@ -41,6 +41,7 @@ type EleveMin = {
   groupSessionName?: string | null;
   groupStudents?: EleveMin[] | null;
   targetStudentIds?: string[] | null;
+  groupIds?: string[] | null;
 };
 
 type ParcoursRow = {
@@ -182,6 +183,12 @@ const isParcoursVisibleForGroup = (
   return normalizeAssoc(parcours.groupes_associes).includes(String(groupId));
 };
 
+const isParcoursVisibleForGroups = (parcours: ParcoursRow, groupIds: string[]) => {
+  if (groupIds.length === 0) return false;
+  const associatedGroups = normalizeAssoc(parcours.groupes_associes);
+  return groupIds.some((groupId) => associatedGroups.includes(String(groupId)));
+};
+
 const isStatCompleted = (row: StatRow) => {
   const bestScore = Number(row.best_score ?? 0);
   const lastScore = Number(row.last_score ?? 0);
@@ -206,18 +213,40 @@ function getTargetStudentIds(eleve?: EleveMin | null) {
   if (!eleve) return [];
 
   if (eleve.isGroupSession && Array.isArray(eleve.targetStudentIds)) {
-    return eleve.targetStudentIds.map(String).filter(Boolean);
+    return Array.from(new Set(eleve.targetStudentIds.map(String).filter(Boolean)));
   }
 
   if (eleve.isGroupSession && Array.isArray(eleve.groupStudents)) {
-    return eleve.groupStudents
-      .map((student) => getStudentId(student))
-      .filter(Boolean)
-      .map(String);
+    return Array.from(
+      new Set(
+        eleve.groupStudents
+          .map((student) => getStudentId(student))
+          .filter(Boolean)
+          .map(String)
+      )
+    );
   }
 
   const singleId = getStudentId(eleve);
   return singleId ? [String(singleId)] : [];
+}
+
+function getTargetGroupIds(eleve?: EleveMin | null) {
+  if (!eleve) return [];
+
+  const ids: string[] = [];
+
+  if (eleve.isGroupSession && Array.isArray(eleve.groupIds)) {
+    ids.push(...eleve.groupIds.map(String).filter(Boolean));
+  }
+
+  if (eleve.isGroupSession && Array.isArray(eleve.groupStudents)) {
+    ids.push(...eleve.groupStudents.map((student) => student.group_id).filter(Boolean).map(String));
+  }
+
+  if (eleve.group_id) ids.push(String(eleve.group_id));
+
+  return Array.from(new Set(ids));
 }
 
 function getMainStudentForDisplay(eleve?: EleveMin | null) {
@@ -385,7 +414,8 @@ const AccueilEleve: React.FC<Props> = ({
   const mainStudent = getMainStudentForDisplay(eleveConnecte);
   const studentId = getStudentId(mainStudent);
   const targetStudentIds = React.useMemo(() => getTargetStudentIds(eleveConnecte), [eleveConnecte]);
-  const groupId = mainStudent?.group_id ?? eleveConnecte?.group_id ?? null;
+  const groupIds = React.useMemo(() => getTargetGroupIds(eleveConnecte), [eleveConnecte]);
+  const groupKey = groupIds.join("|");
   const groupDisplayName = getGroupDisplayName(eleveConnecte);
 
   const nom = (
@@ -452,8 +482,8 @@ const AccueilEleve: React.FC<Props> = ({
         const stats = ((statsData as any[]) || []).filter(Boolean) as StatRow[];
         const allParcours = ((parcoursData as ParcoursRow[]) || []).filter(Boolean);
 
-        const visibleParcours = groupId
-          ? allParcours.filter((p) => isParcoursVisibleForGroup(p, groupId))
+        const visibleParcours = groupIds.length > 0
+          ? allParcours.filter((p) => isParcoursVisibleForGroups(p, groupIds))
           : allParcours;
 
         const visibleIds = new Set(visibleParcours.map((p) => String(p.id)));
@@ -504,7 +534,7 @@ const AccueilEleve: React.FC<Props> = ({
     };
 
     loadHome();
-  }, [studentId, targetStudentIds, groupId, isGroupSession]);
+  }, [studentId, targetStudentIds, groupKey, isGroupSession]);
 
   const levelData = React.useMemo(() => getLevelData(score), [score]);
 

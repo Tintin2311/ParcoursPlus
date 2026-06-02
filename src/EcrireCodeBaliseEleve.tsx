@@ -49,6 +49,15 @@ type EleveConnecte = {
   teacher_id?: string | null;
   group_id?: string | null;
   display_name?: string | null;
+  name?: string | null;
+  nom?: string | null;
+  isGroupSession?: boolean | null;
+  groupSessionId?: string | null;
+  groupSessionCode?: string | null;
+  groupSessionName?: string | null;
+  groupStudents?: EleveConnecte[] | null;
+  targetStudentIds?: string[] | null;
+  groupIds?: string[] | null;
 };
 
 type RpcStudentRow = {
@@ -170,6 +179,50 @@ const formatPointsLabel = (value: number | string | null | undefined) => {
 };
 
 const getDisplayName = (row: any) => String(row?.nom ?? row?.name ?? "Parcours");
+
+function getStudentId(eleve?: EleveConnecte | null) {
+  return eleve?.id ?? eleve?.uuid ?? null;
+}
+
+function getTargetStudentIds(eleve?: EleveConnecte | null) {
+  if (!eleve) return [];
+
+  if (eleve.isGroupSession && Array.isArray(eleve.targetStudentIds)) {
+    return Array.from(new Set(eleve.targetStudentIds.map(String).filter(Boolean)));
+  }
+
+  if (eleve.isGroupSession && Array.isArray(eleve.groupStudents)) {
+    return Array.from(
+      new Set(
+        eleve.groupStudents
+          .map((student) => getStudentId(student))
+          .filter(Boolean)
+          .map(String)
+      )
+    );
+  }
+
+  const singleId = getStudentId(eleve);
+  return singleId ? [String(singleId)] : [];
+}
+
+function getTargetGroupIds(eleve?: EleveConnecte | null) {
+  if (!eleve) return [];
+
+  const ids: string[] = [];
+
+  if (eleve.isGroupSession && Array.isArray(eleve.groupIds)) {
+    ids.push(...eleve.groupIds.map(String).filter(Boolean));
+  }
+
+  if (eleve.isGroupSession && Array.isArray(eleve.groupStudents)) {
+    ids.push(...eleve.groupStudents.map((student) => student.group_id).filter(Boolean).map(String));
+  }
+
+  if (eleve.group_id) ids.push(String(eleve.group_id));
+
+  return Array.from(new Set(ids));
+}
 
 const isUuidLike = (value: string) =>
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
@@ -749,8 +802,8 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   const [confirmLogoutVisible, setConfirmLogoutVisible] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
 
-  const [studentId, setStudentId] = useState<string | null>(eleveConnecte?.id ?? null);
-  const [studentGroupId, setStudentGroupId] = useState<string | null>(eleveConnecte?.group_id ?? null);
+  const [studentId, setStudentId] = useState<string | null>(getTargetStudentIds(eleveConnecte)[0] ?? getStudentId(eleveConnecte));
+  const [studentGroupId, setStudentGroupId] = useState<string | null>(getTargetGroupIds(eleveConnecte)[0] ?? eleveConnecte?.group_id ?? null);
 
   const [balises, setBalises] = useState<BaliseAffichee[]>([]);
   const [activeBaliseKey, setActiveBaliseKey] = useState<string | null>(null);
@@ -1027,10 +1080,23 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   }, [pagePrecedente, setPage]);
 
   const resolveStudent = useCallback(async () => {
-    let nextStudentId = eleveConnecte?.id ?? null;
-    let nextGroupId = eleveConnecte?.group_id ?? null;
+    let targetIds = getTargetStudentIds(eleveConnecte);
+    let nextStudentId = targetIds[0] ?? getStudentId(eleveConnecte);
+    let nextGroupId = getTargetGroupIds(eleveConnecte)[0] ?? eleveConnecte?.group_id ?? null;
 
-    if ((!nextStudentId || !nextGroupId) && eleveConnecte?.code) {
+    if (eleveConnecte?.isGroupSession && targetIds.length > 0 && !nextGroupId) {
+      const { data } = await supabase
+        .from("students")
+        .select("id,group_id")
+        .in("id", targetIds);
+
+      const rows = ((data as any[]) || []).filter(Boolean);
+      targetIds = Array.from(new Set(rows.map((row) => row.id).filter(Boolean).map(String)));
+      nextStudentId = targetIds[0] ?? nextStudentId;
+      nextGroupId = rows.map((row) => row.group_id).filter(Boolean).map(String)[0] ?? nextGroupId;
+    }
+
+    if ((!nextStudentId || !nextGroupId) && eleveConnecte?.code && !eleveConnecte?.isGroupSession) {
       const rpc = await supabase.rpc("student_name_by_code", {
         p_code: eleveConnecte.code,
       });
@@ -1046,7 +1112,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     setStudentGroupId(nextGroupId);
 
     return { studentId: nextStudentId, groupId: nextGroupId };
-  }, [eleveConnecte?.code, eleveConnecte?.group_id, eleveConnecte?.id]);
+  }, [eleveConnecte]);
 
   const forceParcoursBonusIfNeeded = useCallback(
     ({
@@ -1498,6 +1564,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         throw new Error("Ce parcours est déjà terminé.");
       }
 
+      const parcoursId = parcoursActif.id;
       const breakdown = computeGainBreakdown(nextResults);
 
       const codesForSave = { ...codesSaisis };
@@ -1511,17 +1578,47 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         }
       });
 
-      const result = await saveTentativeWithStats({
-        studentId,
-        parcoursId: parcoursActif.id,
-        balises,
-        validatedIds: validatedBaliseIds,
-        codesSaisis: codesForSave,
-        nextResults,
-        pointsConfig,
-        breakdown,
-        currentDisplayedTotal: savedPointsTotal,
-      });
+      const studentIdsToSave = Array.from(
+        new Set(
+          [
+            ...(eleveConnecte?.isGroupSession ? getTargetStudentIds(eleveConnecte) : []),
+            studentId,
+          ]
+            .filter(Boolean)
+            .map(String)
+        )
+      );
+
+      if (studentIdsToSave.length === 0) {
+        throw new Error("Aucun élève du groupe n'a été trouvé.");
+      }
+
+      const saveForStudent = async (targetStudentId: string) => {
+        const saved = await saveTentativeWithStats({
+          studentId: targetStudentId,
+          parcoursId,
+          balises,
+          validatedIds: validatedBaliseIds,
+          codesSaisis: codesForSave,
+          nextResults,
+          pointsConfig,
+          breakdown,
+          currentDisplayedTotal: savedPointsTotal,
+        });
+
+        const progress = await recomputeAndSyncStats({
+          studentId: targetStudentId,
+          parcoursId,
+          balises,
+          pointsConfig,
+          tentativeBaremeRows,
+        });
+
+        return { saved, progress };
+      };
+
+      const primarySave = await saveForStudent(studentId);
+      const result = primarySave.saved;
 
       const nextValidatedIds = Array.from(new Set([...validatedBaliseIds, ...result.newlyValidatedIds]));
 
@@ -1530,13 +1627,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
           ? breakdown.tentativeNumero
           : completionAttemptNumber;
 
-      const nextProgressRaw = await recomputeAndSyncStats({
-        studentId,
-        parcoursId: parcoursActif.id,
-        balises,
-        pointsConfig,
-        tentativeBaremeRows,
-      });
+      const nextProgressRaw = primarySave.progress;
 
       const normalizedNextProgressIds = normalizeValidatedIdsForOccurrences(
         nextProgressRaw.validatedIds.length ? nextProgressRaw.validatedIds : nextValidatedIds,
@@ -1583,14 +1674,37 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
             updated_at: new Date().toISOString(),
           })
           .eq("student_id", studentId)
-          .eq("parcours_id", parcoursActif.id);
+          .eq("parcours_id", parcoursId);
       }
+
+      await Promise.all(
+        studentIdsToSave
+          .filter((targetStudentId) => targetStudentId !== String(studentId))
+          .map(async (targetStudentId) => {
+            const groupSave = await saveForStudent(targetStudentId);
+
+            if (!effectiveTermine) return;
+
+            await supabase
+              .from("eleve_parcours_stats")
+              .update({
+                best_points: correctedTotal,
+                last_points: correctedTotal,
+                parcours_termine: true,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("student_id", targetStudentId)
+              .eq("parcours_id", parcoursId);
+
+            return groupSave;
+          })
+      );
 
       setAttemptsHistory((prev) => [
         ...prev,
         {
           student_id: studentId,
-          parcours_id: parcoursActif.id,
+          parcours_id: parcoursId,
           tentatives_numero: breakdown.tentativeNumero,
           score: nextProgress.validatedCount,
           total_balises: balises.length,
@@ -1652,6 +1766,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       completionAttemptNumber,
       tentativeBaremeRows,
       forceParcoursBonusIfNeeded,
+      eleveConnecte,
     ]
   );
 
