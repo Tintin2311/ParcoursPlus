@@ -440,7 +440,8 @@ function GroupPickerModal({
   };
 
   const renderGroupOption = (group: GroupRow, depth: number) => {
-    const selected = multiSelect
+    const optionMultiSelect = multiSelect && group.type === "groupe_session";
+    const selected = optionMultiSelect
       ? (selectedIds ?? []).includes(group.id)
       : selectedId === group.id;
     const disabled = forbiddenId === group.id;
@@ -453,7 +454,7 @@ function GroupPickerModal({
         disabled={disabled}
         onPress={() => {
           if (disabled) return;
-          if (multiSelect) {
+          if (optionMultiSelect) {
             onToggle?.(group.id);
             return;
           }
@@ -694,6 +695,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
   const [screenError, setScreenError] = useState<string | null>(null);
   const [savingStatus, setSavingStatus] = useState<SavingStatusMap>({});
   const [selectedSourceGroup, setSelectedSourceGroup] = useState<string | null>(null);
+  const [selectedSourceGroups, setSelectedSourceGroups] = useState<string[]>([]);
   const [selectedTargetGroups, setSelectedTargetGroups] = useState<string[]>([]);
   const [groupPickerMode, setGroupPickerMode] = useState<"source" | "target" | null>(null);
   const [isCopying, setIsCopying] = useState(false);
@@ -706,9 +708,13 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
   }, []);
 
   useEffect(() => {
-    if (!selectedSourceGroup) return;
-    setSelectedTargetGroups((prev) => prev.filter((id) => id !== selectedSourceGroup));
-  }, [selectedSourceGroup]);
+    const blocked = new Set([
+      ...(selectedSourceGroup ? [selectedSourceGroup] : []),
+      ...selectedSourceGroups,
+    ]);
+    if (blocked.size === 0) return;
+    setSelectedTargetGroups((prev) => prev.filter((id) => !blocked.has(id)));
+  }, [selectedSourceGroup, selectedSourceGroups]);
 
   const markSaving = useCallback((key: string, status: "saving" | "saved" | "error") => {
     if (saveTimersRef.current[key]) clearTimeout(saveTimersRef.current[key]);
@@ -1282,17 +1288,26 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
   );
 
   const sourceGroup = groupesData.find((g) => g.id === selectedSourceGroup) ?? null;
+  const sourceGroups = selectedSourceGroups
+    .map((id) => groupesData.find((g) => g.id === id) ?? null)
+    .filter(Boolean) as GroupRow[];
+  const sourceIds = selectedSourceGroups.length > 0
+    ? selectedSourceGroups
+    : selectedSourceGroup
+    ? [selectedSourceGroup]
+    : [];
   const targetGroups = selectedTargetGroups
     .map((id) => groupesData.find((g) => g.id === id) ?? null)
     .filter(Boolean) as GroupRow[];
 
   const showTargetColumn = targetGroups.length > 0;
-  const showCopyCard = targetGroups.length > 0 && !!sourceGroup;
+  const showCopyCard = targetGroups.length > 0 && sourceIds.length > 0;
 
   const handleCopyAssociations = useCallback(async () => {
-    const targetIds = selectedTargetGroups.filter((id) => id !== selectedSourceGroup);
+    const blockedSourceIds = new Set(sourceIds);
+    const targetIds = selectedTargetGroups.filter((id) => !blockedSourceIds.has(id));
 
-    if (!selectedSourceGroup || targetIds.length === 0) {
+    if (sourceIds.length === 0 || targetIds.length === 0) {
       setCopyStatus("warning");
       setTimeout(() => setCopyStatus(null), 1800);
       return;
@@ -1304,13 +1319,19 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
     try {
       const sourceParcoursIds = new Set(
         parcoursData
-          .filter((p) => normalizeGroupesAssocies(p.groupes_associes).includes(selectedSourceGroup))
+          .filter((p) => {
+            const associations = normalizeGroupesAssocies(p.groupes_associes);
+            return sourceIds.some((id) => associations.includes(id));
+          })
           .map((p) => p.id)
       );
 
       const sourceFolderIds = new Set(
         parcoursFoldersData
-          .filter((f) => normalizeGroupesAssocies(f.groupes_associes).includes(selectedSourceGroup))
+          .filter((f) => {
+            const associations = normalizeGroupesAssocies(f.groupes_associes);
+            return sourceIds.some((id) => associations.includes(id));
+          })
           .map((f) => f.id)
       );
 
@@ -1367,7 +1388,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
     saveManySequentially,
     parcoursData,
     parcoursFoldersData,
-    selectedSourceGroup,
+    sourceIds,
     selectedTargetGroups,
     updateFolderInSupabase,
     updateParcoursInSupabase,
@@ -1650,10 +1671,16 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
     const leftPadding = 8 + item.indentation * (isPhone ? 12 : 18);
 
     const leftPalette = isFolder
-      ? pastelByStatus(selectedSourceGroup ? getFolderStatus(item, selectedSourceGroup) : "not_associated")
+      ? pastelByStatus(
+          sourceIds.length === 1
+            ? getFolderStatus(item, sourceIds[0])
+            : sourceIds.length > 1
+            ? "partial"
+            : "not_associated"
+        )
       : pastelByStatus(
-          selectedSourceGroup &&
-            normalizeGroupesAssocies(item.groupes_associes).includes(selectedSourceGroup)
+          sourceIds.length > 0 &&
+            sourceIds.some((id) => normalizeGroupesAssocies(item.groupes_associes).includes(id))
             ? "parcours_on"
             : "parcours_off"
         );
@@ -1710,7 +1737,9 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
         </TouchableOpacity>
 
         <View style={styles.tableAssocCell}>
-          {renderAssociationControl(item, selectedSourceGroup)}
+          {sourceIds.length > 1
+            ? renderAssociationControlForGroups(item, sourceIds)
+            : renderAssociationControl(item, sourceIds[0] ?? null)}
         </View>
 
         {showTargetColumn ? (
@@ -1790,7 +1819,13 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
           >
             <Feather name="users" size={14} color="#1D4ED8" />
             <Text style={styles.selectorValue} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75}>
-              {sourceGroup ? getDisplayName(sourceGroup) : "Choisir source"}
+              {sourceGroups.length > 0
+                ? sourceGroups.length === 1
+                  ? getDisplayName(sourceGroups[0])
+                  : `${sourceGroups.length} groupes`
+                : sourceGroup
+                ? getDisplayName(sourceGroup)
+                : "Choisir source"}
             </Text>
             <Feather name="chevron-down" size={14} color="#1D4ED8" />
           </TouchableOpacity>
@@ -1821,10 +1856,10 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
           <TouchableOpacity
             activeOpacity={0.92}
             onPress={handleCopyAssociations}
-            disabled={isCopying || !selectedSourceGroup || selectedTargetGroups.length === 0}
+            disabled={isCopying || sourceIds.length === 0 || selectedTargetGroups.length === 0}
             style={[
               styles.copyBarCard,
-              (isCopying || !selectedSourceGroup || selectedTargetGroups.length === 0) && {
+              (isCopying || sourceIds.length === 0 || selectedTargetGroups.length === 0) && {
                 opacity: 0.55,
               },
             ]}
@@ -1941,11 +1976,28 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
         groups={groupesData}
         folders={groupFoldersData}
         selectedId={selectedSourceGroup}
+        selectedIds={selectedSourceGroups}
         forbiddenId={null}
+        multiSelect
         onClose={() => setGroupPickerMode(null)}
         onSelect={(id) => {
           setSelectedSourceGroup(id);
+          setSelectedSourceGroups([]);
           if (id) setSelectedTargetGroups((prev) => prev.filter((targetId) => targetId !== id));
+        }}
+        onToggle={(id) => {
+          setSelectedSourceGroup(null);
+          setSelectedSourceGroups((prev) =>
+            prev.includes(id) ? prev.filter((sourceId) => sourceId !== id) : [...prev, id]
+          );
+        }}
+        onClear={() => {
+          setSelectedSourceGroup(null);
+          setSelectedSourceGroups([]);
+        }}
+        onSelectAll={(ids) => {
+          setSelectedSourceGroup(null);
+          setSelectedSourceGroups(Array.from(new Set(ids)));
         }}
         onCreateGroup={() => {
           setGroupPickerMode(null);
@@ -1966,7 +2018,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
         onClose={() => setGroupPickerMode(null)}
         onSelect={() => null}
         onToggle={(id) => {
-          if (id === selectedSourceGroup) return;
+          if (id === selectedSourceGroup || selectedSourceGroups.includes(id)) return;
           setSelectedTargetGroups((prev) =>
             prev.includes(id) ? prev.filter((targetId) => targetId !== id) : [...prev, id]
           );
@@ -1974,7 +2026,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
         onClear={() => setSelectedTargetGroups([])}
         onSelectAll={(ids) =>
           setSelectedTargetGroups(
-            Array.from(new Set(ids.filter((id) => id !== selectedSourceGroup)))
+            Array.from(new Set(ids.filter((id) => id !== selectedSourceGroup && !selectedSourceGroups.includes(id))))
           )
         }
         onCreateGroup={() => {
