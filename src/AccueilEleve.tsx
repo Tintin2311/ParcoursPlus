@@ -245,6 +245,7 @@ function getTargetGroupIds(eleve?: EleveMin | null) {
   }
 
   if (eleve.group_id) ids.push(String(eleve.group_id));
+  if (eleve.isGroupSession && eleve.groupSessionId) ids.push(String(eleve.groupSessionId));
 
   return Array.from(new Set(ids));
 }

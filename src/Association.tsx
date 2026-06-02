@@ -52,6 +52,9 @@ type GroupRow = {
   name?: string | null;
   folder_id?: string | null;
   created_at?: string | null;
+  type?: "classe" | "groupe_session";
+  code?: string | null;
+  student_ids?: string[] | null;
   [key: string]: any;
 };
 
@@ -97,25 +100,25 @@ const INFO_PAGES = [
   {
     title: "À quoi sert cette page ?",
     body: [
-      "Cette page permet de choisir quels dossiers et parcours sont visibles pour une classe.",
-      "Tu peux comparer une classe source avec une classe cible.",
-      "Tu peux copier rapidement la configuration d'une classe vers une autre.",
+      "Cette page permet de choisir quels dossiers et parcours sont visibles pour une classe ou un groupe.",
+      "Tu peux comparer une source avec une cible.",
+      "Tu peux copier rapidement la configuration d'une classe ou d'un groupe vers un autre.",
     ],
   },
   {
     title: "Lecture rapide du tableau",
     body: [
-      "🟦 Parcours coché = visible pour la classe.",
+      "🟦 Parcours coché = visible pour la classe ou le groupe.",
       "🟩 Dossier complet = tous ses parcours sont visibles.",
       "🟧 Dossier partiel = seulement une partie des parcours est visible.",
       "⬜ Non coché = retiré.",
     ],
   },
   {
-    title: "Choix des classes",
+    title: "Choix des classes et groupes",
     body: [
       "Les classes sont rangées dans leurs dossiers et sous-dossiers.",
-      "La même classe ne peut pas être choisie à la fois en source et en cible.",
+      "La même source ne peut pas être choisie à la fois en source et en cible.",
       "Les dossiers du picker sont fermés par défaut.",
     ],
   },
@@ -362,7 +365,7 @@ const groupPalette = (id: string) => {
   }
 };
 
-/* ======================= Picker hiérarchique des classes ======================= */
+/* ======================= Picker hiérarchique des classes et groupes ======================= */
 function GroupPickerModal({
   visible,
   title,
@@ -443,13 +446,20 @@ function GroupPickerModal({
             style={styles.modalOptionAvatar}
           >
             <Text style={[styles.modalOptionAvatarText, { color: palette.text }]}> 
-              {shortCode(getDisplayName(group))}
+              {group.type === "groupe_session" ? "GR" : shortCode(getDisplayName(group))}
             </Text>
           </LinearGradient>
 
-          <Text style={styles.modalOptionText} numberOfLines={1}>
-            {getDisplayName(group)}
-          </Text>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={styles.modalOptionText} numberOfLines={1}>
+              {getDisplayName(group)}
+            </Text>
+            {group.type === "groupe_session" ? (
+              <Text style={styles.modalOptionSubText} numberOfLines={1}>
+                Groupe · {group.student_ids?.length ?? 0} élèves
+              </Text>
+            ) : null}
+          </View>
         </View>
 
         {disabled ? (
@@ -499,7 +509,15 @@ function GroupPickerModal({
     );
   };
 
-  const rootGroups = useMemo(() => getGroupsInFolder(null), [getGroupsInFolder]);
+  const rootGroups = useMemo(
+    () => getGroupsInFolder(null).filter((group) => group.type !== "groupe_session"),
+    [getGroupsInFolder]
+  );
+
+  const sessionGroups = useMemo(
+    () => groups.filter((group) => group.type === "groupe_session"),
+    [groups]
+  );
 
   if (!visible) return null;
 
@@ -538,6 +556,12 @@ function GroupPickerModal({
 
             {rootGroups.map((group) => renderGroupOption(group, 0))}
             {topFolders.map((folder) => renderFolderTree(folder, 0))}
+            {sessionGroups.length > 0 ? (
+              <View style={styles.modalSectionTitleWrap}>
+                <Text style={styles.modalSectionTitle}>Groupes</Text>
+              </View>
+            ) : null}
+            {sessionGroups.map((group) => renderGroupOption(group, 0))}
           </ScrollView>
         </View>
       </View>
@@ -821,7 +845,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
     setScreenError(null);
 
     try {
-      const [parcoursRes, groupsRes, parcoursFoldersRes, groupFoldersRes] = await Promise.all([
+      const [parcoursRes, groupsRes, groupSessionsRes, parcoursFoldersRes, groupFoldersRes] = await Promise.all([
         supabase
           .from("parcours")
           .select("*")
@@ -833,6 +857,11 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
           .select("*")
           .eq("teacher_id", professeurId)
           .order("created_at", { ascending: true }),
+
+        supabase
+          .from("GroupeSessionEleves")
+          .select("id, code, nom, teacher_id, group_id, student_ids")
+          .eq("teacher_id", professeurId),
 
         supabase
           .from("parcours_folders")
@@ -849,6 +878,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
 
       if (parcoursRes.error) throw parcoursRes.error;
       if (groupsRes.error) throw groupsRes.error;
+      if (groupSessionsRes.error) throw groupSessionsRes.error;
       if (parcoursFoldersRes.error) throw parcoursFoldersRes.error;
       if (groupFoldersRes.error) throw groupFoldersRes.error;
 
@@ -865,6 +895,18 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
         id: String(g.id),
         folder_id: cleanId(g.folder_id),
         nom: getDisplayName(g),
+        type: "classe" as const,
+      }));
+
+      const groupSessions = (groupSessionsRes.data ?? []).map((session: any) => ({
+        ...session,
+        id: String(session.id),
+        folder_id: null,
+        nom: `${session.nom ?? "Groupe"} · ${session.code ?? ""}`.trim(),
+        name: `${session.nom ?? "Groupe"} · ${session.code ?? ""}`.trim(),
+        code: session.code ?? null,
+        student_ids: Array.isArray(session.student_ids) ? session.student_ids.map(String) : [],
+        type: "groupe_session" as const,
       }));
 
       const parcoursFolders = (parcoursFoldersRes.data ?? []).map((f) => ({
@@ -885,7 +927,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
       }));
 
       setParcoursData(parcours);
-      setGroupesData(groupes);
+      setGroupesData([...groupes, ...groupSessions]);
       setParcoursFoldersData(parcoursFolders);
       setGroupFoldersData(groupFolders);
 
@@ -1206,7 +1248,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
     if (isCopying) return "Copie...";
     if (copyStatus === "success") return "Copié";
     if (copyStatus === "error") return "Erreur";
-    if (copyStatus === "warning") return "2 classes différentes";
+    if (copyStatus === "warning") return "2 sources différentes";
     return "Copier source → cible";
   };
 
@@ -1386,7 +1428,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
 
         <View style={styles.headerCenter}>
           <Text style={styles.headerTitle}>ASSOCIATION</Text>
-          <Text style={styles.headerSubtitle}>Classes & parcours</Text>
+          <Text style={styles.headerSubtitle}>Classes, groupes & parcours</Text>
         </View>
 
         <View style={styles.topActions}>
@@ -1506,7 +1548,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
           <View style={styles.stateCard}>
             <ActivityIndicator size="large" color="#2563EB" />
             <Text style={styles.stateTitle}>Chargement des données...</Text>
-            <Text style={styles.stateText}>Récupération des parcours, dossiers et classes.</Text>
+            <Text style={styles.stateText}>Récupération des parcours, dossiers, classes et groupes.</Text>
           </View>
         ) : screenError ? (
           <View style={styles.stateCard}>
@@ -1526,7 +1568,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
             </LinearGradient>
             <Text style={styles.stateTitle}>Données insuffisantes</Text>
             <Text style={styles.stateText}>
-              Il faut au moins un parcours et une classe dans Supabase pour commencer.
+              Il faut au moins un parcours et une classe ou un groupe dans Supabase pour commencer.
             </Text>
             <TouchableOpacity activeOpacity={0.92} onPress={() => setPage("gestionParcours")} style={styles.retryBtn}>
               <Text style={styles.retryBtnText}>Retour</Text>
@@ -1569,7 +1611,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
               { label: "Dossiers non associés", value: totalUnassociatedFolders },
               { label: "Parcours non associés", value: totalUnassociatedParcours },
               { label: "Parcours associés", value: totalAssociatedParcours },
-              { label: "Classes", value: groupesData.length },
+              { label: "Classes / groupes", value: groupesData.length },
             ].map(({ label, value }) => (
               <View key={label} style={styles.statsMiniBlock}>
                 <Text style={styles.statsMiniLabel} numberOfLines={2} adjustsFontSizeToFit minimumFontScale={0.65}>
@@ -1584,7 +1626,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
 
       <GroupPickerModal
         visible={groupPickerMode === "source"}
-        title="Choisir la classe source"
+        title="Choisir la source"
         groups={groupesData}
         folders={groupFoldersData}
         selectedId={selectedSourceGroup}
@@ -1598,7 +1640,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
 
       <GroupPickerModal
         visible={groupPickerMode === "target"}
-        title="Choisir la classe cible"
+        title="Choisir la cible"
         groups={groupesData}
         folders={groupFoldersData}
         selectedId={selectedTargetGroup}
@@ -1683,6 +1725,9 @@ const styles = StyleSheet.create({
   modalOptionAvatar: { width: 34, height: 34, borderRadius: 11, alignItems: "center", justifyContent: "center" },
   modalOptionAvatarText: { fontSize: 11, fontWeight: "900" },
   modalOptionText: { color: C_TEXT, fontSize: 14, fontWeight: "700", flex: 1 },
+  modalOptionSubText: { color: C_MUTED, fontSize: 11, fontWeight: "700", marginTop: 2 },
+  modalSectionTitleWrap: { paddingTop: 8, paddingBottom: 6 },
+  modalSectionTitle: { color: C_MUTED, fontSize: 11, fontWeight: "900", textTransform: "uppercase" },
 });
 
 const infoStyles = StyleSheet.create({

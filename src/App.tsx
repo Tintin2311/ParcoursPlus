@@ -138,6 +138,10 @@ type EleveType = {
   teacher_id?: string | null;
   group_id?: string | null;
   display_name?: string | null;
+  isGroupSession?: boolean | null;
+  groupSessionId?: string | null;
+  groupIds?: string[] | null;
+  groupStudents?: EleveType[] | null;
 };
 
 type Professeur = {
@@ -768,8 +772,22 @@ const [parcoursId, setParcoursId] = useState<string | null>(null);
   useEffect(() => {
     const fetchStudentParcours = async () => {
       if (eleve && modeConnexion === "eleve") {
-        const gid = eleve.group_id ?? null;
-        if (!gid) {
+        const visibilityIds = Array.from(
+          new Set(
+            [
+              eleve.group_id,
+              ...(Array.isArray(eleve.groupIds) ? eleve.groupIds : []),
+              ...(Array.isArray(eleve.groupStudents)
+                ? eleve.groupStudents.map((student) => student.group_id)
+                : []),
+              eleve.isGroupSession ? eleve.groupSessionId : null,
+            ]
+              .filter(Boolean)
+              .map(String)
+          )
+        );
+
+        if (visibilityIds.length === 0) {
           setParcoursGlobaux([]);
           return;
         }
@@ -778,7 +796,7 @@ const [parcoursId, setParcoursId] = useState<string | null>(null);
           const { data, error } = await supabase
             .from("parcours")
             .select("*")
-            .contains("groupes_associes", [gid]);
+            .overlaps("groupes_associes", visibilityIds);
 
           if (error) {
             setParcoursGlobaux([]);
