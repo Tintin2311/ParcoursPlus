@@ -51,8 +51,6 @@ type GroupSessionRow = {
   nom?: string | null;
   teacher_id?: string | null;
   student_ids?: string[] | null;
-  active?: boolean | null;
-  created_at?: string | null;
 };
 
 type Props = {
@@ -143,10 +141,9 @@ async function getGroupSessionByCode(
 
   const { data, error } = await supabase
     .from("GroupeSessionEleves")
-    .select("id, code, nom, teacher_id, student_ids, active, created_at")
+    .select("id, code, nom, teacher_id, student_ids")
     .eq("code", c)
     .eq("teacher_id", teacherId)
-    .eq("active", true)
     .maybeSingle<any>();
 
   if (error) {
@@ -162,8 +159,6 @@ async function getGroupSessionByCode(
     nom: data.nom ?? null,
     teacher_id: data.teacher_id ?? null,
     student_ids: Array.isArray(data.student_ids) ? data.student_ids.map(String) : [],
-    active: data.active ?? true,
-    created_at: data.created_at ?? null,
   };
 }
 
