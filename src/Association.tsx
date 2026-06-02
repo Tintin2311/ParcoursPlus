@@ -267,6 +267,14 @@ const withOrWithoutGroup = (currentValue: any, groupeId: string, shouldAdd: bool
     : current.filter((id) => id !== groupeId);
 };
 
+const withOrWithoutGroups = (currentValue: any, groupeIds: string[], shouldAdd: boolean) => {
+  const current = normalizeGroupesAssocies(currentValue);
+  const ids = [...new Set(groupeIds.map(String).filter(Boolean))];
+  return shouldAdd
+    ? [...new Set([...current, ...ids])]
+    : current.filter((id) => !ids.includes(id));
+};
+
 const pastelByStatus = (status: AssocStatus) => {
   switch (status) {
     case "full":
@@ -372,20 +380,28 @@ function GroupPickerModal({
   groups,
   folders,
   selectedId,
+  selectedIds,
   forbiddenId,
   allowNone,
+  multiSelect,
   onClose,
   onSelect,
+  onToggle,
+  onClear,
 }: {
   visible: boolean;
   title: string;
   groups: GroupRow[];
   folders: FolderRow[];
   selectedId: string | null;
+  selectedIds?: string[];
   forbiddenId?: string | null;
   allowNone?: boolean;
+  multiSelect?: boolean;
   onClose: () => void;
   onSelect: (id: string | null) => void;
+  onToggle?: (id: string) => void;
+  onClear?: () => void;
 }) {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
 
@@ -418,7 +434,9 @@ function GroupPickerModal({
   };
 
   const renderGroupOption = (group: GroupRow, depth: number) => {
-    const selected = selectedId === group.id;
+    const selected = multiSelect
+      ? (selectedIds ?? []).includes(group.id)
+      : selectedId === group.id;
     const disabled = forbiddenId === group.id;
     const palette = groupPalette(group.id);
 
@@ -429,6 +447,10 @@ function GroupPickerModal({
         disabled={disabled}
         onPress={() => {
           if (disabled) return;
+          if (multiSelect) {
+            onToggle?.(group.id);
+            return;
+          }
           onSelect(group.id);
           onClose();
         }}
@@ -538,19 +560,25 @@ function GroupPickerModal({
               <TouchableOpacity
                 activeOpacity={0.92}
                 onPress={() => {
-                  onSelect(null);
+                  if (multiSelect) {
+                    onClear?.();
+                  } else {
+                    onSelect(null);
+                  }
                   onClose();
                 }}
                 style={[
                   styles.modalOption,
-                  selectedId == null && {
+                  (multiSelect ? (selectedIds ?? []).length === 0 : selectedId == null) && {
                     borderColor: "rgba(59,130,246,0.28)",
                     backgroundColor: "rgba(59,130,246,0.08)",
                   },
                 ]}
               >
                 <Text style={styles.modalOptionText}>Aucune</Text>
-                {selectedId == null ? <Feather name="check" size={18} color="#2563EB" /> : null}
+                {(multiSelect ? (selectedIds ?? []).length === 0 : selectedId == null) ? (
+                  <Feather name="check" size={18} color="#2563EB" />
+                ) : null}
               </TouchableOpacity>
             ) : null}
 
@@ -590,7 +618,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
   const [screenError, setScreenError] = useState<string | null>(null);
   const [savingStatus, setSavingStatus] = useState<SavingStatusMap>({});
   const [selectedSourceGroup, setSelectedSourceGroup] = useState<string | null>(null);
-  const [selectedTargetGroup, setSelectedTargetGroup] = useState<string | null>(null);
+  const [selectedTargetGroups, setSelectedTargetGroups] = useState<string[]>([]);
   const [groupPickerMode, setGroupPickerMode] = useState<"source" | "target" | null>(null);
   const [isCopying, setIsCopying] = useState(false);
   const [copyStatus, setCopyStatus] = useState<null | "success" | "error" | "warning">(null);
@@ -602,10 +630,9 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
   }, []);
 
   useEffect(() => {
-    if (selectedSourceGroup && selectedTargetGroup && selectedSourceGroup === selectedTargetGroup) {
-      setSelectedTargetGroup(null);
-    }
-  }, [selectedSourceGroup, selectedTargetGroup]);
+    if (!selectedSourceGroup) return;
+    setSelectedTargetGroups((prev) => prev.filter((id) => id !== selectedSourceGroup));
+  }, [selectedSourceGroup]);
 
   const markSaving = useCallback((key: string, status: "saving" | "saved" | "error") => {
     if (saveTimersRef.current[key]) clearTimeout(saveTimersRef.current[key]);
@@ -845,7 +872,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
     setScreenError(null);
 
     try {
-      const [parcoursRes, groupsRes, groupSessionsRes, parcoursFoldersRes, groupFoldersRes] = await Promise.all([
+      const [parcoursRes, groupsRes, groupSessionsRes, studentsRes, parcoursFoldersRes, groupFoldersRes] = await Promise.all([
         supabase
           .from("parcours")
           .select("*")
@@ -864,6 +891,11 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
           .eq("teacher_id", professeurId),
 
         supabase
+          .from("students")
+          .select("id, group_id, teacher_id")
+          .eq("teacher_id", professeurId),
+
+        supabase
           .from("parcours_folders")
           .select("*")
           .eq("user_id", professeurId)
@@ -879,6 +911,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
       if (parcoursRes.error) throw parcoursRes.error;
       if (groupsRes.error) throw groupsRes.error;
       if (groupSessionsRes.error) throw groupSessionsRes.error;
+      if (studentsRes.error) throw studentsRes.error;
       if (parcoursFoldersRes.error) throw parcoursFoldersRes.error;
       if (groupFoldersRes.error) throw groupFoldersRes.error;
 
@@ -898,16 +931,33 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
         type: "classe" as const,
       }));
 
-      const groupSessions = (groupSessionsRes.data ?? []).map((session: any) => ({
-        ...session,
-        id: String(session.id),
-        folder_id: null,
-        nom: `${session.nom ?? "Groupe"} · ${session.code ?? ""}`.trim(),
-        name: `${session.nom ?? "Groupe"} · ${session.code ?? ""}`.trim(),
-        code: session.code ?? null,
-        student_ids: Array.isArray(session.student_ids) ? session.student_ids.map(String) : [],
-        type: "groupe_session" as const,
-      }));
+      const studentClassById = new Map(
+        ((studentsRes.data ?? []) as any[]).map((student) => [
+          String(student.id),
+          cleanId(student.group_id),
+        ])
+      );
+
+      const groupSessions = (groupSessionsRes.data ?? [])
+        .map((session: any) => {
+          const studentIds: string[] = Array.isArray(session.student_ids) ? session.student_ids.map(String) : [];
+          const classIds = Array.from(
+            new Set(studentIds.map((id) => studentClassById.get(id)).filter(Boolean).map(String))
+          );
+
+          return {
+            ...session,
+            id: String(session.id),
+            folder_id: null,
+            nom: `${session.nom ?? "Groupe"} · ${session.code ?? ""}`.trim(),
+            name: `${session.nom ?? "Groupe"} · ${session.code ?? ""}`.trim(),
+            code: session.code ?? null,
+            student_ids: studentIds,
+            class_ids: classIds,
+            type: "groupe_session" as const,
+          };
+        })
+        .filter((session) => session.class_ids.length > 1);
 
       const parcoursFolders = (parcoursFoldersRes.data ?? []).map((f) => ({
         ...f,
@@ -926,8 +976,10 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
         nom: getDisplayName(f),
       }));
 
+      const selectableGroups = [...groupes, ...groupSessions];
+
       setParcoursData(parcours);
-      setGroupesData([...groupes, ...groupSessions]);
+      setGroupesData(selectableGroups);
       setParcoursFoldersData(parcoursFolders);
       setGroupFoldersData(groupFolders);
 
@@ -936,10 +988,9 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
         return groupes[0]?.id ?? null;
       });
 
-      setSelectedTargetGroup((prev) => {
-        if (prev && groupes.some((g) => g.id === prev)) return prev;
-        return null;
-      });
+      setSelectedTargetGroups((prev) =>
+        prev.filter((id) => selectableGroups.some((group) => group.id === id))
+      );
     } catch (err: any) {
       console.error("Erreur chargement associations :", err);
       setScreenError(`Impossible de charger les données : ${err?.message ?? "erreur inconnue"}.`);
@@ -1155,15 +1206,17 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
   );
 
   const sourceGroup = groupesData.find((g) => g.id === selectedSourceGroup) ?? null;
-  const targetGroup = selectedTargetGroup
-    ? groupesData.find((g) => g.id === selectedTargetGroup) ?? null
-    : null;
+  const targetGroups = selectedTargetGroups
+    .map((id) => groupesData.find((g) => g.id === id) ?? null)
+    .filter(Boolean) as GroupRow[];
 
-  const showTargetColumn = !!targetGroup;
-  const showCopyCard = !!targetGroup && !!sourceGroup;
+  const showTargetColumn = targetGroups.length > 0;
+  const showCopyCard = targetGroups.length > 0 && !!sourceGroup;
 
   const handleCopyAssociations = useCallback(async () => {
-    if (!selectedSourceGroup || !selectedTargetGroup || selectedSourceGroup === selectedTargetGroup) {
+    const targetIds = selectedTargetGroups.filter((id) => id !== selectedSourceGroup);
+
+    if (!selectedSourceGroup || targetIds.length === 0) {
       setCopyStatus("warning");
       setTimeout(() => setCopyStatus(null), 1800);
       return;
@@ -1188,8 +1241,8 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
       const nextParcours = parcoursData.map((p) => {
         const current = normalizeGroupesAssocies(p.groupes_associes);
         const next = sourceParcoursIds.has(p.id)
-          ? [...new Set([...current, selectedTargetGroup])]
-          : current.filter((id) => id !== selectedTargetGroup);
+          ? [...new Set([...current, ...targetIds])]
+          : current.filter((id) => !targetIds.includes(id));
 
         return {
           ...p,
@@ -1201,8 +1254,8 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
       const nextFolders = parcoursFoldersData.map((f) => {
         const current = normalizeGroupesAssocies(f.groupes_associes);
         const next = sourceFolderIds.has(f.id)
-          ? [...new Set([...current, selectedTargetGroup])]
-          : current.filter((id) => id !== selectedTargetGroup);
+          ? [...new Set([...current, ...targetIds])]
+          : current.filter((id) => !targetIds.includes(id));
 
         return {
           ...f,
@@ -1239,7 +1292,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
     parcoursData,
     parcoursFoldersData,
     selectedSourceGroup,
-    selectedTargetGroup,
+    selectedTargetGroups,
     updateFolderInSupabase,
     updateParcoursInSupabase,
   ]);
@@ -1338,6 +1391,184 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
     );
   };
 
+  const handleFolderGroupAssociations = useCallback(
+    async (folder: FolderRow, groupeIds: string[], isChecked: boolean) => {
+      const ids = groupeIds.filter(Boolean);
+      if (ids.length === 0) return;
+
+      const folderIds = [folder.id, ...getAllNestedFolders(folder.id).map((f) => f.id)];
+      const folderIdSet = new Set(folderIds.map(String));
+
+      const parcoursIds = getAllNestedParcours(folder.id).map((p) => p.id);
+      const parcoursIdSet = new Set(parcoursIds.map(String));
+
+      if (parcoursIdSet.size === 0) {
+        Alert.alert("Aucun parcours trouvé", "Ce dossier ne contient aucun parcours récupéré par l'application.");
+        return;
+      }
+
+      const updatedFoldersLocal = parcoursFoldersData.map((f) => {
+        if (!folderIdSet.has(String(f.id))) return f;
+
+        const current = normalizeGroupesAssocies(f.groupes_associes);
+        const next = withOrWithoutGroups(current, ids, isChecked);
+
+        return { ...f, groupes_associes: next, __changed: !sameStringArray(current, next) };
+      });
+
+      const updatedParcoursLocal = parcoursData.map((p) => {
+        if (!parcoursIdSet.has(String(p.id))) return p;
+
+        const current = normalizeGroupesAssocies(p.groupes_associes);
+        const next = withOrWithoutGroups(current, ids, isChecked);
+
+        return { ...p, groupes_associes: next, __changed: !sameStringArray(current, next) };
+      });
+
+      setParcoursFoldersData(updatedFoldersLocal.map(({ __changed, ...f }: any) => f));
+      setParcoursData(updatedParcoursLocal.map(({ __changed, ...p }: any) => p));
+
+      try {
+        await saveManySequentially(updatedParcoursLocal.filter((p: any) => p.__changed), updateParcoursInSupabase);
+        await saveManySequentially(updatedFoldersLocal.filter((f: any) => f.__changed), updateFolderInSupabase);
+
+        for (const groupeId of ids) {
+          await syncFolderAncestorsForGroup(folder.id, groupeId, updatedParcoursLocal);
+        }
+      } catch (err: any) {
+        Alert.alert("Erreur d'enregistrement", err?.message ?? "L'association n'a pas pu être enregistrée.");
+        fetchData();
+      }
+    },
+    [
+      fetchData,
+      getAllNestedFolders,
+      getAllNestedParcours,
+      parcoursData,
+      parcoursFoldersData,
+      saveManySequentially,
+      syncFolderAncestorsForGroup,
+      updateFolderInSupabase,
+      updateParcoursInSupabase,
+    ]
+  );
+
+  const handleParcoursGroupAssociations = useCallback(
+    async (parcours: ParcoursRow, groupeIds: string[]) => {
+      const ids = groupeIds.filter(Boolean);
+      if (ids.length === 0) return;
+
+      const currentTarget = parcoursData.find((p) => sameId(p.id, parcours.id)) ?? parcours;
+      const currentAssociations = normalizeGroupesAssocies(currentTarget.groupes_associes);
+      const shouldAdd = !ids.every((id) => currentAssociations.includes(id));
+
+      const updatedParcoursLocal = parcoursData.map((p) => {
+        if (!sameId(p.id, parcours.id)) return p;
+
+        return {
+          ...p,
+          groupes_associes: withOrWithoutGroups(p.groupes_associes, ids, shouldAdd),
+        };
+      });
+
+      setParcoursData(updatedParcoursLocal);
+
+      const updatedTarget = updatedParcoursLocal.find((p) => sameId(p.id, parcours.id));
+      if (!updatedTarget) return;
+
+      try {
+        await updateParcoursInSupabase(updatedTarget.id, normalizeGroupesAssocies(updatedTarget.groupes_associes));
+
+        for (const groupeId of ids) {
+          await syncFolderAncestorsForGroup(updatedTarget.folder_id, groupeId, updatedParcoursLocal);
+        }
+      } catch (err: any) {
+        Alert.alert("Erreur", err?.message ?? "Impossible d'enregistrer la modification.");
+        fetchData();
+      }
+    },
+    [fetchData, parcoursData, syncFolderAncestorsForGroup, updateParcoursInSupabase]
+  );
+
+  const renderAssociationControlForGroups = (item: RenderedItem, groupeIds: string[]) => {
+    const ids = groupeIds.filter(Boolean);
+    if (ids.length === 0) return null;
+
+    const keyPrefix = item.type === "dossier" ? "dossier" : "parcours";
+    const statusKey = `${keyPrefix}-${item.id}`;
+
+    let status: AssocStatus = "not_associated";
+    let iconName: keyof typeof Feather.glyphMap = "square";
+    let shouldAdd = true;
+    let disabled = false;
+
+    if (item.type === "parcours") {
+      const associations = normalizeGroupesAssocies(item.groupes_associes);
+      const checkedCount = ids.filter((id) => associations.includes(id)).length;
+      if (checkedCount === ids.length) {
+        status = "parcours_on";
+        iconName = "check-square";
+        shouldAdd = false;
+      } else if (checkedCount > 0) {
+        status = "partial";
+        iconName = "minus-square";
+      } else {
+        status = "parcours_off";
+      }
+    } else {
+      const statuses = ids.map((id) => getFolderStatus(item, id));
+      disabled = statuses.every((s) => s === "empty");
+      if (statuses.every((s) => s === "full")) {
+        status = "full";
+        iconName = "check-square";
+        shouldAdd = false;
+      } else if (statuses.some((s) => s === "full" || s === "partial")) {
+        status = "partial";
+        iconName = "minus-square";
+      } else if (disabled) {
+        status = "empty";
+        iconName = "slash";
+      }
+    }
+
+    const palette = pastelByStatus(status);
+
+    return (
+      <View style={styles.associationControlWrap}>
+        <TouchableOpacity
+          activeOpacity={0.92}
+          disabled={disabled}
+          onPress={() => {
+            if (item.type === "dossier") {
+              handleFolderGroupAssociations(item, ids, shouldAdd);
+            } else {
+              handleParcoursGroupAssociations(item, ids);
+            }
+          }}
+          style={[
+            styles.associationButtonCompact,
+            {
+              borderColor: palette.borderTint,
+              backgroundColor: palette.bgTint,
+              opacity: disabled ? 0.45 : 1,
+            },
+          ]}
+        >
+          <LinearGradient
+            colors={[palette.from, palette.to]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.associationBadgeCompact}
+          >
+            <Feather name={iconName} size={isPhone ? 14 : 16} color={palette.iconColor} />
+          </LinearGradient>
+        </TouchableOpacity>
+
+        {getSaveStatePill(savingStatus[statusKey])}
+      </View>
+    );
+  };
+
   const renderRow = (item: RenderedItem) => {
     const isFolder = item.type === "dossier";
     const leftPadding = 8 + item.indentation * (isPhone ? 12 : 18);
@@ -1408,7 +1639,7 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
 
         {showTargetColumn ? (
           <View style={styles.tableAssocCell}>
-            {renderAssociationControl(item, targetGroup?.id ?? null)}
+            {renderAssociationControlForGroups(item, selectedTargetGroups)}
           </View>
         ) : null}
       </View>
@@ -1500,7 +1731,11 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
               adjustsFontSizeToFit
               minimumFontScale={0.75}
             >
-              {targetGroup ? getDisplayName(targetGroup) : "Aucune"}
+              {targetGroups.length === 0
+                ? "Aucune"
+                : targetGroups.length === 1
+                ? getDisplayName(targetGroups[0])
+                : `${targetGroups.length} cibles`}
             </Text>
             <Feather name="chevron-down" size={14} color="#6D28D9" />
           </TouchableOpacity>
@@ -1510,10 +1745,10 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
           <TouchableOpacity
             activeOpacity={0.92}
             onPress={handleCopyAssociations}
-            disabled={isCopying || !selectedSourceGroup || !selectedTargetGroup || selectedSourceGroup === selectedTargetGroup}
+            disabled={isCopying || !selectedSourceGroup || selectedTargetGroups.length === 0}
             style={[
               styles.copyBarCard,
-              (isCopying || !selectedSourceGroup || !selectedTargetGroup || selectedSourceGroup === selectedTargetGroup) && {
+              (isCopying || !selectedSourceGroup || selectedTargetGroups.length === 0) && {
                 opacity: 0.55,
               },
             ]}
@@ -1630,11 +1865,11 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
         groups={groupesData}
         folders={groupFoldersData}
         selectedId={selectedSourceGroup}
-        forbiddenId={selectedTargetGroup}
+        forbiddenId={null}
         onClose={() => setGroupPickerMode(null)}
         onSelect={(id) => {
           setSelectedSourceGroup(id);
-          if (id && id === selectedTargetGroup) setSelectedTargetGroup(null);
+          if (id) setSelectedTargetGroups((prev) => prev.filter((targetId) => targetId !== id));
         }}
       />
 
@@ -1643,14 +1878,20 @@ export default function GestionAssociationsParcours({ professeur, setPage }: Pro
         title="Choisir la cible"
         groups={groupesData}
         folders={groupFoldersData}
-        selectedId={selectedTargetGroup}
+        selectedId={null}
+        selectedIds={selectedTargetGroups}
         forbiddenId={selectedSourceGroup}
         allowNone
+        multiSelect
         onClose={() => setGroupPickerMode(null)}
-        onSelect={(id) => {
-          if (id && id === selectedSourceGroup) return;
-          setSelectedTargetGroup(id);
+        onSelect={() => null}
+        onToggle={(id) => {
+          if (id === selectedSourceGroup) return;
+          setSelectedTargetGroups((prev) =>
+            prev.includes(id) ? prev.filter((targetId) => targetId !== id) : [...prev, id]
+          );
         }}
+        onClear={() => setSelectedTargetGroups([])}
       />
 
       <InformationAssociations visible={showInfo} onClose={() => setShowInfo(false)} />
