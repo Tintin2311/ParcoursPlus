@@ -1,6 +1,6 @@
 // PersonnalisationParcoursTermines.tsx
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -14,6 +14,7 @@ import {
   View,
   useWindowDimensions,
 } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Feather } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
 import { supabase } from "../../../../supabaseClient";
@@ -28,7 +29,11 @@ type FolderRow = {
   name?: string | null;
   nom?: string | null;
   parent_folder_id?: string | null;
+  parent_parcours_folders_id?: string | null;
   user_id?: string | null;
+  teacher_id?: string | null;
+  professeur_id?: string | null;
+  groupes_associes?: any;
   ordre?: number | null;
 };
 
@@ -36,10 +41,22 @@ type ParcoursRow = {
   id: string;
   nom?: string | null;
   folder_id?: string | null;
+  parent_parcours_folders_id?: string | null;
   user_id?: string | null;
+  teacher_id?: string | null;
+  professeur_id?: string | null;
   ordre?: number | null;
   groupes_associes?: any;
   bonus_points_personnalise?: number | null;
+};
+
+type GroupRow = {
+  id: string;
+  nom?: string | null;
+  name?: string | null;
+  teacher_id?: string | null;
+  professeur_id?: string | null;
+  user_id?: string | null;
 };
 
 type GroupConfigRow = {
@@ -49,11 +66,24 @@ type GroupConfigRow = {
   modes?: any;
   points_par_parcours?: number | string | null;
   parcours_bonus_mode?: "general" | "personnalise" | null;
+  parcours_bonus_overrides?: any;
+  tentative_source_assignments?: any;
+  config?: any;
+  settings_json?: any;
   updated_at?: string | null;
   [key: string]: any;
 };
 
 type BonusMode = "general" | "personnalise";
+
+type ParcoursTermineBonusRow = {
+  id?: string;
+  professeur_id: string;
+  group_id: string;
+  parcours_id: string;
+  points_personnalises: number | string;
+  updated_at?: string | null;
+};
 
 const C_BG = "#EEF7F3";
 const C_HEADER = "#1F5B86";
@@ -68,10 +98,14 @@ const ORANGE_1 = "#FFF3D6";
 const ORANGE_2 = "#FFD58F";
 
 const DEFAULT_GLOBAL_BONUS = 10;
+const LS_POINTS_SELECTED_GROUP_ID = "gestionPoints.selectedGroupId";
+const TABLE_PARCOURS_TERMINE_BONUSES = "personnaliser_parcours_termines";
 
 const folderName = (f: FolderRow) => String(f.name || f.nom || "Sans nom").trim();
 const parcoursName = (p: ParcoursRow) => String(p.nom || "Sans nom").trim();
 const onlyDigits = (value: string) => value.replace(/[^0-9]/g, "");
+const folderParentId = (f: FolderRow) => f.parent_folder_id ?? f.parent_parcours_folders_id ?? null;
+const parcoursFolderId = (p: ParcoursRow) => p.folder_id ?? p.parent_parcours_folders_id ?? null;
 
 const normalizeSearch = (value: string) =>
   String(value || "")
@@ -91,11 +125,33 @@ const parseJsonObject = (value: any): any => {
   }
 };
 
+const extractIdFromAny = (value: any): string[] => {
+  if (value == null) return [];
+  if (typeof value === "string" || typeof value === "number") {
+    const id = String(value).trim();
+    return id ? [id] : [];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap(extractIdFromAny);
+  }
+  if (typeof value === "object") {
+    return uniqueIds([
+      value.id,
+      value.group_id,
+      value.groupId,
+      value.classe_id,
+      value.classeId,
+      value.value,
+    ]);
+  }
+  return [];
+};
+
 const extractGroupIds = (value: any): string[] => {
   if (!value) return [];
 
   if (Array.isArray(value)) {
-    return value.map((v) => String(v).trim()).filter(Boolean);
+    return uniqueIds(value.flatMap(extractIdFromAny));
   }
 
   if (typeof value === "string") {
@@ -104,9 +160,7 @@ const extractGroupIds = (value: any): string[] => {
 
     try {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        return parsed.map((v) => String(v).trim()).filter(Boolean);
-      }
+      return uniqueIds(extractIdFromAny(parsed));
     } catch {
       // format texte simple
     }
@@ -118,7 +172,7 @@ const extractGroupIds = (value: any): string[] => {
       .filter(Boolean);
   }
 
-  return [];
+  return uniqueIds(extractIdFromAny(value));
 };
 
 const modeParcoursIsActive = (modesValue: any) => {
@@ -126,23 +180,116 @@ const modeParcoursIsActive = (modesValue: any) => {
   return !!modes?.parcours;
 };
 
+const ensureParcoursMode = (modesValue: any) => {
+  const modes = parseJsonObject(modesValue) ?? {};
+  return {
+    tentatives: !!modes.tentatives,
+    balises: modes.balises !== false,
+    parcours: true,
+  };
+};
+
 const numberOrFallback = (value: any, fallback: number) => {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
 };
 
-const getBestConfigForParcours = (p: ParcoursRow, configs: GroupConfigRow[]) => {
-  const groupIds = extractGroupIds(p.groupes_associes);
-  if (!groupIds.length) return null;
+const isMissingTableError = (error: any) => {
+  const code = String(error?.code ?? "");
+  const message = String(error?.message ?? "").toLowerCase();
+  return code === "42P01" || code === "PGRST205" || message.includes("could not find the table");
+};
 
-  return configs
-    .filter((cfg) => cfg.group_id && groupIds.includes(String(cfg.group_id)))
-    .filter((cfg) => modeParcoursIsActive(cfg.modes))
+const sanitizePointOverrides = (value: any): Record<string, number> => {
+  const obj = parseJsonObject(value);
+  const source =
+    obj && typeof obj === "object" && !Array.isArray(obj)
+      ? obj.parcours_bonus_overrides ?? obj
+      : null;
+
+  if (!source || typeof source !== "object" || Array.isArray(source)) return {};
+
+  const out: Record<string, number> = {};
+  Object.entries(source).forEach(([k, v]) => {
+    const n = Number(v);
+    if (k && Number.isFinite(n) && n >= 0) out[k] = n;
+  });
+
+  return out;
+};
+
+const readParcoursBonusOverrides = (row?: GroupConfigRow | null): Record<string, number> => {
+  if (!row) return {};
+  const config = parseJsonObject(row.config);
+  const settings = parseJsonObject(row.settings_json);
+  const sourceAssignments = parseJsonObject(row.tentative_source_assignments);
+
+  return {
+    ...sanitizePointOverrides(settings?.parcours_bonus_overrides),
+    ...sanitizePointOverrides(config?.parcours_bonus_overrides),
+    ...sanitizePointOverrides(row.parcours_bonus_overrides),
+    ...sanitizePointOverrides(sourceAssignments?.parcours_bonus_overrides),
+  };
+};
+
+const readParcoursBonusMode = (row?: GroupConfigRow | null): BonusMode => {
+  if (!row) return "general";
+  const config = parseJsonObject(row.config);
+  const settings = parseJsonObject(row.settings_json);
+  const mode =
+    row.parcours_bonus_mode ??
+    config?.parcours_bonus_mode ??
+    settings?.parcours_bonus_mode;
+
+  return mode === "personnalise" ? "personnalise" : "general";
+};
+
+const getConfigForGroup = (groupId: string | null, configs: GroupConfigRow[]) => {
+  if (!groupId) return null;
+
+  const groupRows = configs
+    .filter((cfg) => cfg.group_id && String(cfg.group_id) === String(groupId));
+
+  const rowPool = groupRows.some((cfg) => modeParcoursIsActive(cfg.modes))
+    ? groupRows.filter((cfg) => modeParcoursIsActive(cfg.modes))
+    : groupRows;
+
+  return rowPool
     .sort((a, b) => {
       const ta = a.updated_at ? new Date(a.updated_at).getTime() : 0;
       const tb = b.updated_at ? new Date(b.updated_at).getTime() : 0;
       return tb - ta;
     })[0] ?? null;
+};
+
+const parcoursBelongsToGroup = (
+  p: ParcoursRow,
+  groupId: string | null,
+  _folderRows: FolderRow[] = []
+) => {
+  if (!groupId) return true;
+  return extractGroupIds(p.groupes_associes).includes(String(groupId));
+};
+
+const rowBelongsToTeacher = (row: any, teacherId: string | null) => {
+  if (!teacherId) return false;
+  const owners = uniqueIds([row?.teacher_id, row?.professeur_id, row?.user_id]);
+  if (owners.length === 0) return true;
+  return owners.includes(String(teacherId));
+};
+
+const uniqueIds = (values: Array<string | null | undefined>) =>
+  Array.from(new Set(values.map((value) => String(value ?? "").trim()).filter(Boolean)));
+
+const readStoredGroupId = async () => {
+  const asyncValue = await AsyncStorage.getItem(LS_POINTS_SELECTED_GROUP_ID);
+  if (asyncValue) return asyncValue;
+
+  if (Platform.OS === "web" && typeof window !== "undefined") {
+    return window.localStorage.getItem(LS_POINTS_SELECTED_GROUP_ID);
+  }
+
+  return null;
 };
 
 export default function PersonnalisationParcoursTermines({ setPage }: Props) {
@@ -151,11 +298,15 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
   const [loading, setLoading] = useState(true);
   const [savingId, setSavingId] = useState<string | null>(null);
   const [saveTimeouts] = useState<Record<string, any>>({});
+  const folderSaveSeqRef = useRef<Record<string, number>>({});
 
   const [ownerId, setOwnerId] = useState<string | null>(null);
+  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
+  const [groups, setGroups] = useState<GroupRow[]>([]);
   const [folders, setFolders] = useState<FolderRow[]>([]);
   const [parcours, setParcours] = useState<ParcoursRow[]>([]);
   const [groupConfigs, setGroupConfigs] = useState<GroupConfigRow[]>([]);
+  const [bonusRows, setBonusRows] = useState<ParcoursTermineBonusRow[]>([]);
 
   const [generalBonusByParcours, setGeneralBonusByParcours] = useState<Record<string, number>>({});
   const [modeByParcours, setModeByParcours] = useState<Record<string, BonusMode>>({});
@@ -188,30 +339,38 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
   );
 
   const computeDerivedState = useCallback(
-    (nextParcours: ParcoursRow[], nextConfigs: GroupConfigRow[]) => {
+    (
+      nextParcours: ParcoursRow[],
+      nextConfigs: GroupConfigRow[],
+      nextBonusRows: ParcoursTermineBonusRow[],
+      targetGroupId: string | null
+    ) => {
       const nextGeneral: Record<string, number> = {};
       const nextModes: Record<string, BonusMode> = {};
       const nextBonus: Record<string, string> = {};
-      const backfillRows: ParcoursRow[] = [];
+      const groupConfig = getConfigForGroup(targetGroupId, nextConfigs);
+      const legacyOverrides = readParcoursBonusOverrides(groupConfig);
+      const tableOverrides = new Map(
+        nextBonusRows
+          .filter((row) => String(row.group_id) === String(targetGroupId))
+          .map((row) => [String(row.parcours_id), numberOrFallback(row.points_personnalises, DEFAULT_GLOBAL_BONUS)])
+      );
 
       const normalizedParcours = nextParcours.map((p) => {
-        const bestConfig = getBestConfigForParcours(p, nextConfigs);
-        const general = numberOrFallback(bestConfig?.points_par_parcours, DEFAULT_GLOBAL_BONUS);
-        const mode: BonusMode = bestConfig?.parcours_bonus_mode === "personnalise" ? "personnalise" : "general";
-        const value = p.bonus_points_personnalise ?? general;
+        const general = numberOrFallback(groupConfig?.points_par_parcours, DEFAULT_GLOBAL_BONUS);
+        const tableValue = tableOverrides.get(p.id);
+        const legacyValue = legacyOverrides[p.id];
+        const hasCustom = tableValue != null || legacyValue != null;
+        const customValue = tableValue ?? legacyValue ?? p.bonus_points_personnalise ?? general;
 
         nextGeneral[p.id] = general;
-        nextModes[p.id] = mode;
-        nextBonus[p.id] = String(mode === "personnalise" ? value : general);
+        nextModes[p.id] = hasCustom ? "personnalise" : readParcoursBonusMode(groupConfig);
+        nextBonus[p.id] = String(hasCustom ? customValue : general);
 
-        if (p.bonus_points_personnalise == null) {
-          backfillRows.push({ ...p, bonus_points_personnalise: general });
-        }
-
-        return { ...p, bonus_points_personnalise: value };
+        return { ...p, bonus_points_personnalise: customValue };
       });
 
-      return { normalizedParcours, nextGeneral, nextModes, nextBonus, backfillRows };
+      return { normalizedParcours, nextGeneral, nextModes, nextBonus };
     },
     []
   );
@@ -227,71 +386,101 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
       if (!connectedUserId) throw new Error("Professeur non connecté.");
 
       setOwnerId(connectedUserId);
+      const storedGroupId = await readStoredGroupId();
 
-      const [foldersRes, parcoursRes, configsRes] = await Promise.all([
+      const [groupsRes, foldersRes, parcoursRes, configsRes, bonusRes] = await Promise.all([
+        supabase
+          .from("groups")
+          .select("*")
+          .order("created_at", { ascending: true }),
         supabase
           .from("parcours_folders")
           .select("*")
-          .eq("user_id", connectedUserId)
           .order("ordre", { ascending: true }),
         supabase
           .from("parcours")
           .select("*")
-          .eq("user_id", connectedUserId)
           .order("ordre", { ascending: true }),
         supabase
           .from("group_points_configs")
           .select("*")
           .eq("professeur_id", connectedUserId)
           .order("updated_at", { ascending: false, nullsFirst: false }),
+        supabase
+          .from(TABLE_PARCOURS_TERMINE_BONUSES)
+          .select("*")
+          .eq("professeur_id", connectedUserId)
+          .order("updated_at", { ascending: false, nullsFirst: false }),
       ]);
 
+      if (groupsRes.error) throw groupsRes.error;
       if (foldersRes.error) throw foldersRes.error;
       if (parcoursRes.error) throw parcoursRes.error;
       if (configsRes.error) throw configsRes.error;
+      if (bonusRes.error && !isMissingTableError(bonusRes.error)) throw bonusRes.error;
 
-      const nextFolders = (foldersRes.data || []) as FolderRow[];
-      const rawParcours = (parcoursRes.data || []) as ParcoursRow[];
+      const nextGroups = ((groupsRes.data || []) as GroupRow[]).filter((g) =>
+        rowBelongsToTeacher(g, connectedUserId)
+      );
+      const storedGroupIsValid =
+        !!storedGroupId && nextGroups.some((g) => String(g.id) === String(storedGroupId));
+      const targetGroupId =
+        storedGroupIsValid
+          ? storedGroupId
+          : nextGroups[0]?.id ?? null;
+      const nextFolders = ((foldersRes.data || []) as FolderRow[]).filter((f) =>
+        rowBelongsToTeacher(f, connectedUserId)
+      );
+      const rawParcours = ((parcoursRes.data || []) as ParcoursRow[])
+        .filter((p) => rowBelongsToTeacher(p, connectedUserId))
+        .filter((p) => parcoursBelongsToGroup(p, targetGroupId, nextFolders));
       const nextConfigs = (configsRes.data || []) as GroupConfigRow[];
+      const nextBonusRows = bonusRes.error ? [] : (bonusRes.data || []) as ParcoursTermineBonusRow[];
 
-      const { normalizedParcours, nextGeneral, nextModes, nextBonus, backfillRows } =
-        computeDerivedState(rawParcours, nextConfigs);
+      const { normalizedParcours, nextGeneral, nextModes, nextBonus } =
+        computeDerivedState(rawParcours, nextConfigs, nextBonusRows, targetGroupId);
 
       const nextFolderBonus: Record<string, string> = {};
       nextFolders.forEach((f) => {
-        const firstChild = normalizedParcours.find((p) => p.folder_id === f.id);
-        if (!firstChild) {
+        const childIds = new Set<string>();
+        const walk = (folderId: string) => {
+          childIds.add(folderId);
+          nextFolders
+            .filter((child) => folderParentId(child) === folderId)
+            .forEach((child) => walk(child.id));
+        };
+        walk(f.id);
+
+        const children = normalizedParcours.filter((p) => {
+          const folderId = parcoursFolderId(p);
+          return !!folderId && childIds.has(folderId);
+        });
+
+        if (children.length === 0) {
           nextFolderBonus[f.id] = String(DEFAULT_GLOBAL_BONUS);
           return;
         }
-        nextFolderBonus[f.id] = String(
-          nextModes[firstChild.id] === "personnalise"
-            ? firstChild.bonus_points_personnalise ?? nextGeneral[firstChild.id]
-            : nextGeneral[firstChild.id]
+
+        const values = children.map((p) =>
+          nextModes[p.id] === "personnalise"
+            ? numberOrFallback(p.bonus_points_personnalise, nextGeneral[p.id])
+            : nextGeneral[p.id]
         );
+        const firstValue = values[0] ?? DEFAULT_GLOBAL_BONUS;
+        nextFolderBonus[f.id] = String(firstValue);
       });
 
+      setGroups(nextGroups);
+      setSelectedGroupId(targetGroupId);
       setFolders(nextFolders);
       setParcours(normalizedParcours);
       setGroupConfigs(nextConfigs);
+      setBonusRows(nextBonusRows);
       setGeneralBonusByParcours(nextGeneral);
       setModeByParcours(nextModes);
       setBonusByParcours(nextBonus);
       setBonusByFolder(nextFolderBonus);
 
-      // Remplit les anciennes lignes NULL avec le bonus général calculé dans ton logiciel.
-      // Le mode reste dans group_points_configs, pas dans parcours.
-      if (backfillRows.length) {
-        await Promise.all(
-          backfillRows.map((p) =>
-            supabase
-              .from("parcours")
-              .update({ bonus_points_personnalise: p.bonus_points_personnalise ?? nextGeneral[p.id] ?? DEFAULT_GLOBAL_BONUS })
-              .eq("id", p.id)
-              .eq("user_id", connectedUserId)
-          )
-        );
-      }
     } catch (e: any) {
       console.error("❌ PersonnalisationParcoursTermines load:", e);
       Alert.alert("Erreur", e?.message || "Impossible de charger les données.");
@@ -319,12 +508,17 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
     [folders, selectedFolderId]
   );
 
+  const selectedGroupName = useMemo(() => {
+    const group = groups.find((g) => String(g.id) === String(selectedGroupId));
+    return group ? String(group.nom ?? group.name ?? "Classe") : "Classe cible";
+  }, [groups, selectedGroupId]);
+
   const getAllFolderIdsInside = useCallback(
     (folderId: string): string[] => {
       const result = [folderId];
       const walk = (parentId: string) => {
         folders
-          .filter((f) => f.parent_folder_id === parentId)
+          .filter((f) => folderParentId(f) === parentId)
           .forEach((child) => {
             result.push(child.id);
             walk(child.id);
@@ -343,8 +537,9 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
       let current = folders.find((f) => f.id === folderId) || null;
       while (current) {
         names.unshift(folderName(current));
-        current = current.parent_folder_id
-          ? folders.find((f) => f.id === current?.parent_folder_id) || null
+        const parentId = folderParentId(current);
+        current = parentId
+          ? folders.find((f) => f.id === parentId) || null
           : null;
       }
       return names.join(" / ") || "Dossier";
@@ -355,13 +550,19 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
   const parcoursInSelectedFolder = useMemo(() => {
     if (!selectedFolderId) return [];
     const ids = getAllFolderIdsInside(selectedFolderId);
-    return parcours.filter((p) => p.folder_id && ids.includes(p.folder_id));
+    return parcours.filter((p) => {
+      const folderId = parcoursFolderId(p);
+      return !!folderId && ids.includes(folderId);
+    });
   }, [selectedFolderId, parcours, getAllFolderIdsInside]);
 
   const getFolderCount = useCallback(
     (folderId: string) => {
       const ids = getAllFolderIdsInside(folderId);
-      return parcours.filter((p) => p.folder_id && ids.includes(p.folder_id)).length;
+      return parcours.filter((p) => {
+        const folderId = parcoursFolderId(p);
+        return !!folderId && ids.includes(folderId);
+      }).length;
     },
     [getAllFolderIdsInside, parcours]
   );
@@ -371,7 +572,8 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
     return [...folders]
       .sort((a, b) => folderName(a).localeCompare(folderName(b)))
       .filter((f) => {
-        const inCurrentFolder = currentFolderId ? f.parent_folder_id === currentFolderId : !f.parent_folder_id;
+        const parentId = folderParentId(f);
+        const inCurrentFolder = currentFolderId ? parentId === currentFolderId : !parentId;
         if (!q) return inCurrentFolder;
         return normalizeSearch(folderName(f)).includes(q);
       });
@@ -382,7 +584,8 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
     return [...parcours]
       .sort((a, b) => parcoursName(a).localeCompare(parcoursName(b)))
       .filter((p) => {
-        const inCurrentFolder = currentFolderId ? p.folder_id === currentFolderId : !p.folder_id;
+        const folderId = parcoursFolderId(p);
+        const inCurrentFolder = currentFolderId ? folderId === currentFolderId : !folderId;
         if (!q) return inCurrentFolder;
         return normalizeSearch(parcoursName(p)).includes(q);
       });
@@ -403,22 +606,347 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
     setBonusByParcours((prev) => ({ ...prev, [parcoursId]: displayValue }));
   };
 
+  const fetchGroupParcoursRows = async (groupId: string): Promise<ParcoursRow[]> => {
+    const { data, error } = await supabase
+      .from("parcours")
+      .select("id,nom,folder_id,parent_parcours_folders_id,groupes_associes,user_id,professeur_id,ordre");
+
+    if (error) throw error;
+
+    return ((data ?? []) as ParcoursRow[])
+      .filter((p) => rowBelongsToTeacher(p, ownerId))
+      .filter((p) => parcoursBelongsToGroup(p, groupId, folders));
+  };
+
+  const fetchFolderParcoursRows = async (folderId: string): Promise<ParcoursRow[]> => {
+    if (!selectedGroupId) return [];
+    const folderIds = getAllFolderIdsInside(folderId);
+
+    const { data, error } = await supabase
+      .from("parcours")
+      .select("id,nom,folder_id,parent_parcours_folders_id,groupes_associes,user_id,professeur_id,ordre");
+
+    if (error) throw error;
+
+    return ((data ?? []) as ParcoursRow[])
+      .filter((p) => {
+        const childFolderId = parcoursFolderId(p);
+        return !!childFolderId && folderIds.includes(childFolderId);
+      })
+      .filter((p) => rowBelongsToTeacher(p, ownerId))
+      .filter((p) => parcoursBelongsToGroup(p, selectedGroupId, folders));
+  };
+
+  const updateGroupConfigLocal = (
+    groupId: string,
+    patch: Partial<GroupConfigRow> & { parcours_bonus_overrides?: Record<string, number> }
+  ) => {
+    setGroupConfigs((prev) => {
+      const now = new Date().toISOString();
+      const found = prev.some((cfg) => String(cfg.group_id) === String(groupId));
+      const next = prev.map((cfg) =>
+        String(cfg.group_id) === String(groupId)
+          ? { ...cfg, ...patch, updated_at: now }
+          : cfg
+      );
+
+      if (found) return next;
+
+      return [
+        ...next,
+        {
+          group_id: groupId,
+          professeur_id: ownerId,
+          modes: { balises: true, parcours: true, tentatives: false },
+          points_par_parcours: DEFAULT_GLOBAL_BONUS,
+          parcours_bonus_mode: "personnalise",
+          ...patch,
+          updated_at: now,
+        },
+      ];
+    });
+  };
+
+  const syncCompletedStatsForBonusChange = async ({
+    groupId,
+    previousMode,
+    nextMode,
+    previousOverrides,
+    nextOverrides,
+    previousGeneralBonus,
+    nextGeneralBonus,
+  }: {
+    groupId: string;
+    previousMode: BonusMode;
+    nextMode: BonusMode;
+    previousOverrides: Record<string, number>;
+    nextOverrides: Record<string, number>;
+    previousGeneralBonus: number;
+    nextGeneralBonus: number;
+  }) => {
+    let targetParcoursIds = uniqueIds(
+      parcours
+        .filter((p) => parcoursBelongsToGroup(p, groupId, folders))
+        .map((p) => p.id)
+    );
+
+    try {
+      const dbParcoursRows = await fetchGroupParcoursRows(groupId);
+      const dbParcoursIds = uniqueIds(dbParcoursRows.map((p) => p.id));
+      if (dbParcoursIds.length > 0) targetParcoursIds = dbParcoursIds;
+    } catch (e) {
+      console.warn("Chargement des parcours de la classe pour recalcul impossible :", e);
+    }
+
+    const overrideIds = uniqueIds([
+      ...Object.keys(previousOverrides),
+      ...Object.keys(nextOverrides),
+    ]);
+
+    const allowedIds = new Set(targetParcoursIds);
+    targetParcoursIds = uniqueIds([
+      ...targetParcoursIds,
+      ...overrideIds.filter((id) => allowedIds.size === 0 || allowedIds.has(id)),
+    ]);
+
+    if (targetParcoursIds.length === 0) return;
+
+    const changedParcoursIds = targetParcoursIds
+      .filter((parcoursId) => {
+        const oldBonus =
+          previousMode === "personnalise"
+            ? previousOverrides[parcoursId] ?? previousGeneralBonus
+            : previousGeneralBonus;
+        const newBonus =
+          nextMode === "personnalise"
+            ? nextOverrides[parcoursId] ?? nextGeneralBonus
+            : nextGeneralBonus;
+        return oldBonus !== newBonus;
+      });
+
+    const recalcParcoursIds = uniqueIds([
+      ...changedParcoursIds,
+      ...overrideIds.filter((id) => allowedIds.size === 0 || allowedIds.has(id)),
+    ]);
+
+    if (recalcParcoursIds.length === 0) return;
+
+    const { data: studentsData, error: studentsError } = await supabase
+      .from("students")
+      .select("id")
+      .eq("group_id", groupId);
+
+    if (studentsError) throw studentsError;
+
+    const studentIds = ((studentsData ?? []) as any[])
+      .map((row) => row.id)
+      .filter(Boolean)
+      .map(String);
+
+    if (studentIds.length === 0) return;
+
+    const { data: statsData, error: statsError } = await supabase
+      .from("eleve_parcours_stats")
+      .select("student_id, parcours_id")
+      .in("student_id", studentIds)
+      .in("parcours_id", recalcParcoursIds);
+
+    if (statsError) throw statsError;
+
+    const { data: attemptsData, error: attemptsError } = await supabase
+      .from("eleve_parcours_tentatives")
+      .select("student_id, parcours_id")
+      .in("student_id", studentIds)
+      .in("parcours_id", recalcParcoursIds);
+
+    if (attemptsError) throw attemptsError;
+
+    const pairs = new Map<string, { student_id: string; parcours_id: string }>();
+    [...((statsData ?? []) as any[]), ...((attemptsData ?? []) as any[])].forEach((row) => {
+      if (!row?.student_id || !row?.parcours_id) return;
+      const pair = {
+        student_id: String(row.student_id),
+        parcours_id: String(row.parcours_id),
+      };
+      pairs.set(`${pair.student_id}:${pair.parcours_id}`, pair);
+    });
+
+    await Promise.all(
+      Array.from(pairs.values()).map(async (row) => {
+        const { error } = await supabase.rpc("recalculer_stats_eleve_parcours", {
+          p_student_id: row.student_id,
+          p_parcours_id: row.parcours_id,
+        });
+
+        if (error) throw error;
+      })
+    );
+  };
+
+  const ensureGroupParcoursMode = async (groupId: string) => {
+    const current = getConfigForGroup(groupId, groupConfigs);
+    const nextModes = ensureParcoursMode(current?.modes);
+
+    const payload = {
+      group_id: groupId,
+      professeur_id: ownerId,
+      modes: nextModes,
+      points_par_parcours: current?.points_par_parcours ?? DEFAULT_GLOBAL_BONUS,
+      parcours_bonus_mode: "personnalise" as const,
+      tentative_page_mode: current?.tentative_page_mode ?? "general",
+      tentative_page_default: current?.tentative_page_default ?? null,
+      tentative_page_assignments: current?.tentative_page_assignments ?? {},
+      tentative_source_parcours_id: current?.tentative_source_parcours_id ?? null,
+      tentative_source_assignments: current?.tentative_source_assignments ?? {},
+      updated_at: new Date().toISOString(),
+    };
+
+    const { data, error } = await supabase
+      .from("group_points_configs")
+      .update(payload)
+      .eq("group_id", groupId)
+      .eq("professeur_id", ownerId)
+      .select("*");
+
+    if (error) throw error;
+
+    if (!data || data.length === 0) {
+      const { error: insertError } = await supabase.from("group_points_configs").insert(payload);
+      if (insertError) throw insertError;
+    }
+
+    updateGroupConfigLocal(groupId, {
+      modes: payload.modes,
+      points_par_parcours: payload.points_par_parcours,
+      parcours_bonus_mode: payload.parcours_bonus_mode,
+      tentative_source_assignments: payload.tentative_source_assignments,
+    });
+  };
+
+  const getStoredOverridesForGroup = useCallback(
+    (groupId: string) => {
+      const current = getConfigForGroup(groupId, groupConfigs);
+      const overrides = readParcoursBonusOverrides(current);
+
+      bonusRows
+        .filter((row) => String(row.group_id) === String(groupId))
+        .forEach((row) => {
+          overrides[String(row.parcours_id)] = numberOrFallback(
+            row.points_personnalises,
+            DEFAULT_GLOBAL_BONUS
+          );
+        });
+
+      return overrides;
+    },
+    [bonusRows, groupConfigs]
+  );
+
+  const upsertParcoursBonusRows = async (
+    groupId: string,
+    parcoursRows: ParcoursRow[],
+    points: number
+  ) => {
+    if (!ownerId || parcoursRows.length === 0) return;
+
+    const targetRows = parcoursRows.filter((p) => parcoursBelongsToGroup(p, groupId, folders));
+    if (targetRows.length === 0) return;
+
+    const current = getConfigForGroup(groupId, groupConfigs);
+    const previousOverrides = getStoredOverridesForGroup(groupId);
+    const nextOverrides = { ...previousOverrides };
+    targetRows.forEach((p) => {
+      nextOverrides[p.id] = points;
+    });
+
+    await ensureGroupParcoursMode(groupId);
+
+    const payload = targetRows.map((p) => ({
+      professeur_id: ownerId,
+      group_id: groupId,
+      parcours_id: p.id,
+      points_personnalises: points,
+      updated_at: new Date().toISOString(),
+    }));
+
+    const { data, error } = await supabase
+      .from(TABLE_PARCOURS_TERMINE_BONUSES)
+      .upsert(payload, { onConflict: "professeur_id,group_id,parcours_id" })
+      .select("*");
+
+    if (error) throw error;
+
+    await syncCompletedStatsForBonusChange({
+      groupId,
+      previousMode: "personnalise",
+      nextMode: "personnalise",
+      previousOverrides,
+      nextOverrides,
+      previousGeneralBonus: numberOrFallback(current?.points_par_parcours, DEFAULT_GLOBAL_BONUS),
+      nextGeneralBonus: numberOrFallback(current?.points_par_parcours, DEFAULT_GLOBAL_BONUS),
+    });
+
+    setBonusRows((prev) => {
+      const replaced = new Set(targetRows.map((p) => String(p.id)));
+      return [
+        ...prev.filter(
+          (row) =>
+            String(row.group_id) !== String(groupId) ||
+            !replaced.has(String(row.parcours_id))
+        ),
+        ...(((data as ParcoursTermineBonusRow[]) ?? []) || []),
+      ];
+    });
+  };
+
+  const deleteParcoursBonusRow = async (groupId: string, parcoursId: string) => {
+    if (!ownerId) return;
+
+    const current = getConfigForGroup(groupId, groupConfigs);
+    const previousOverrides = getStoredOverridesForGroup(groupId);
+    const nextOverrides = { ...previousOverrides };
+    delete nextOverrides[parcoursId];
+
+    const { error } = await supabase
+      .from(TABLE_PARCOURS_TERMINE_BONUSES)
+      .delete()
+      .eq("professeur_id", ownerId)
+      .eq("group_id", groupId)
+      .eq("parcours_id", parcoursId);
+
+    if (error) throw error;
+
+    await syncCompletedStatsForBonusChange({
+      groupId,
+      previousMode: "personnalise",
+      nextMode: "personnalise",
+      previousOverrides,
+      nextOverrides,
+      previousGeneralBonus: numberOrFallback(current?.points_par_parcours, DEFAULT_GLOBAL_BONUS),
+      nextGeneralBonus: numberOrFallback(current?.points_par_parcours, DEFAULT_GLOBAL_BONUS),
+    });
+
+    setBonusRows((prev) =>
+      prev.filter(
+        (row) =>
+          String(row.group_id) !== String(groupId) ||
+          String(row.parcours_id) !== String(parcoursId)
+      )
+    );
+  };
+
   const saveParcoursValue = async (parcoursId: string, valueToSave: string) => {
     try {
-      if (!ownerId) return;
+      if (!ownerId || !selectedGroupId) return;
       const general = getGeneralBonus(parcoursId);
       const points = numberOrFallback(valueToSave, general);
+      const targetParcours = parcours.find((p) => p.id === parcoursId);
+      if (!targetParcours) return;
 
       setSavingId(`parcours:${parcoursId}`);
-
-      const { error } = await supabase
-        .from("parcours")
-        .update({ bonus_points_personnalise: points })
-        .eq("id", parcoursId)
-        .eq("user_id", ownerId);
-
-      if (error) throw error;
+      await upsertParcoursBonusRows(selectedGroupId, [targetParcours], points);
       updateParcoursLocal(parcoursId, points, String(points));
+      setModeByParcours((prev) => ({ ...prev, [parcoursId]: "personnalise" }));
     } catch (e) {
       console.error("❌ save parcours bonus:", e);
     } finally {
@@ -434,53 +962,35 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
 
   const getGroupIdsForParcours = (parcoursId: string) => {
     const p = parcours.find((row) => row.id === parcoursId);
-    return p ? extractGroupIds(p.groupes_associes) : [];
+    if (!p) return [];
+    return extractGroupIds(p.groupes_associes);
   };
 
   const saveModeForParcoursGroups = async (parcoursId: string, mode: BonusMode) => {
     try {
-      if (!ownerId) return;
-
-      const groupIds = getGroupIdsForParcours(parcoursId);
-      if (!groupIds.length) {
+      if (!ownerId || !selectedGroupId) return;
+      if (!getGroupIdsForParcours(parcoursId).includes(String(selectedGroupId))) {
         Alert.alert(
           "Classe introuvable",
-          "Ce parcours n'est associé à aucune classe. Le mode général/personnalisé doit être enregistré dans la configuration d'une classe."
+          "Ce parcours n'est pas associé à la classe cible."
         );
         return;
       }
 
       setSavingId(`parcours:${parcoursId}`);
-
-      const results = await Promise.all(
-        groupIds.map((groupId) =>
-          supabase
-            .from("group_points_configs")
-            .update({
-              parcours_bonus_mode: mode,
-              updated_at: new Date().toISOString(),
-            })
-            .eq("group_id", groupId)
-            .eq("professeur_id", ownerId)
-        )
-      );
-
-      const firstError = results.find((r) => r.error)?.error;
-      if (firstError) throw firstError;
-
-      setGroupConfigs((prev) =>
-        prev.map((cfg) =>
-          cfg.group_id && groupIds.includes(String(cfg.group_id))
-            ? { ...cfg, parcours_bonus_mode: mode, updated_at: new Date().toISOString() }
-            : cfg
-        )
-      );
-
-      setModeByParcours((prev) => ({ ...prev, [parcoursId]: mode }));
-
       if (mode === "general") {
         const general = getGeneralBonus(parcoursId);
+        await deleteParcoursBonusRow(selectedGroupId, parcoursId);
+        setModeByParcours((prev) => ({ ...prev, [parcoursId]: "general" }));
         setBonusByParcours((prev) => ({ ...prev, [parcoursId]: String(general) }));
+      } else {
+        const currentValue = numberOrFallback(bonusByParcours[parcoursId], getGeneralBonus(parcoursId));
+        const targetParcours = parcours.find((p) => p.id === parcoursId);
+        if (targetParcours) {
+          await upsertParcoursBonusRows(selectedGroupId, [targetParcours], currentValue);
+          updateParcoursLocal(parcoursId, currentValue, String(currentValue));
+        }
+        setModeByParcours((prev) => ({ ...prev, [parcoursId]: "personnalise" }));
       }
     } catch (e: any) {
       console.error("❌ save parcours bonus mode:", e);
@@ -490,20 +1000,78 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
     }
   };
 
-  const applyFolderBonusToChildren = (folderId: string, value: string) => {
+  const saveManyParcoursValues = async (parcoursRows: ParcoursRow[], valueToSave: string) => {
+    try {
+      if (!ownerId || !selectedGroupId || parcoursRows.length === 0) return;
+
+      const points = numberOrFallback(valueToSave, DEFAULT_GLOBAL_BONUS);
+
+      setSavingId(`folder:${parcoursRows[0].folder_id ?? parcoursRows[0].parent_parcours_folders_id ?? "root"}`);
+      await upsertParcoursBonusRows(selectedGroupId, parcoursRows, points);
+
+      parcoursRows.forEach((p) => {
+        updateParcoursLocal(p.id, points, String(points));
+      });
+      setModeByParcours((prev) => {
+        const next = { ...prev };
+        parcoursRows.forEach((p) => {
+          next[p.id] = "personnalise";
+        });
+        return next;
+      });
+    } catch (e) {
+      console.error("❌ save folder parcours bonus:", e);
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  const applyFolderBonusToChildren = async (folderId: string, value: string) => {
+    const nextSeq = (folderSaveSeqRef.current[folderId] ?? 0) + 1;
+    folderSaveSeqRef.current[folderId] = nextSeq;
     const ids = getAllFolderIdsInside(folderId);
-    const childParcours = parcours.filter((p) => p.folder_id && ids.includes(p.folder_id));
     const points = numberOrFallback(value, DEFAULT_GLOBAL_BONUS);
 
     setSelectedFolderId(folderId);
     setBonusByFolder((prev) => ({ ...prev, [folderId]: value }));
 
-    childParcours.forEach((p) => {
+    const localChildParcours = parcours.filter((p) => {
+      const folderId = parcoursFolderId(p);
+      return !!folderId && ids.includes(folderId);
+    });
+    localChildParcours.forEach((p) => {
       setModeByParcours((prev) => ({ ...prev, [p.id]: "personnalise" }));
       updateParcoursLocal(p.id, points, value);
-      triggerAutoSaveParcours(p.id, value);
-      saveModeForParcoursGroups(p.id, "personnalise");
     });
+
+    let childParcours = localChildParcours;
+    try {
+      const fetched = await fetchFolderParcoursRows(folderId);
+      if (fetched.length > 0) {
+        childParcours = fetched;
+        setParcours((prev) => {
+          const known = new Set(prev.map((p) => p.id));
+          const additions = fetched.filter((p) => !known.has(p.id));
+          if (additions.length === 0) return prev;
+          return [...prev, ...additions];
+        });
+        fetched.forEach((p) => {
+          setModeByParcours((prev) => ({ ...prev, [p.id]: "personnalise" }));
+          updateParcoursLocal(p.id, points, value);
+        });
+      }
+    } catch (e) {
+      console.warn("Chargement des parcours du dossier impossible :", e);
+    }
+
+    if (folderSaveSeqRef.current[folderId] !== nextSeq) return;
+
+    const key = `folder:${folderId}`;
+    if (saveTimeouts[key]) clearTimeout(saveTimeouts[key]);
+    saveTimeouts[key] = setTimeout(async () => {
+      setSavingId(key);
+      await saveManyParcoursValues(childParcours, value);
+    }, 400);
   };
 
   return (
@@ -513,7 +1081,7 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
           style={styles.backBtn}
           onPress={() => {
             if (currentFolderId) {
-              const parentId = currentFolder?.parent_folder_id || null;
+              const parentId = currentFolder ? folderParentId(currentFolder) : null;
               setCurrentFolderId(parentId);
               setSelectedFolderId(parentId);
               setSelectedParcoursId(null);
@@ -529,7 +1097,7 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
         <View style={{ flex: 1 }}>
           <Text style={styles.headerTitle}>Parcours terminés</Text>
           <Text style={styles.headerSub}>
-            {currentFolderId && currentFolder ? folderName(currentFolder) : "Bonus personnalisés"}
+            {currentFolderId && currentFolder ? folderName(currentFolder) : `${selectedGroupName} • Bonus personnalisés`}
           </Text>
         </View>
 
@@ -574,7 +1142,7 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
           <View style={styles.card}>
             <Text style={styles.cardTitle}>Bonus de fin personnalisé</Text>
             <Text style={styles.cardText}>
-              Le mode général/personnalisé est enregistré dans la configuration de la classe. La valeur personnalisée reste stockée dans le parcours.
+              Le mode et les valeurs personnalisées sont enregistrés dans la configuration de la classe cible.
             </Text>
           </View>
 
@@ -597,9 +1165,12 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
                 const count = getFolderCount(f.id);
                 const value = bonusByFolder[f.id] ?? String(DEFAULT_GLOBAL_BONUS);
                 const ids = getAllFolderIdsInside(f.id);
-                const savingThis = parcours.some(
-                  (p) => p.folder_id && ids.includes(p.folder_id) && savingId === `parcours:${p.id}`
-                );
+                const savingThis =
+                  savingId === `folder:${f.id}` ||
+                  parcours.some((p) => {
+                    const folderId = parcoursFolderId(p);
+                    return !!folderId && ids.includes(folderId) && savingId === `parcours:${p.id}`;
+                  });
 
                 return (
                   <TouchableOpacity
@@ -618,7 +1189,7 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
 
                     <View style={styles.selectionBody}>
                       <Text style={styles.selectionTitle}>{folderName(f)}</Text>
-                      <Text style={styles.selectionSub}>{getFolderPath(f.parent_folder_id)}</Text>
+                      <Text style={styles.selectionSub}>{getFolderPath(folderParentId(f))}</Text>
                       <Text style={styles.selectionSub}>
                         {count} parcours concerné{count > 1 ? "s" : ""} • clique pour ouvrir
                       </Text>
@@ -691,7 +1262,7 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
 
                       <View style={styles.selectionBody}>
                         <Text style={styles.selectionTitle}>{parcoursName(p)}</Text>
-                        <Text style={styles.selectionSub}>{getFolderPath(p.folder_id)}</Text>
+                        <Text style={styles.selectionSub}>{getFolderPath(parcoursFolderId(p))}</Text>
                         <Text style={custom ? styles.savedText : styles.defaultText}>
                           {custom
                             ? `Mode personnalisé : +${p.bonus_points_personnalise ?? general} pts`
@@ -727,10 +1298,11 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
                               value={value}
                               onChangeText={(t) => {
                                 const nextValue = onlyDigits(t);
+                                const points = numberOrFallback(nextValue, getGeneralBonus(p.id));
                                 setBonusByParcours((prev) => ({ ...prev, [p.id]: nextValue }));
                                 setModeByParcours((prev) => ({ ...prev, [p.id]: "personnalise" }));
+                                updateParcoursLocal(p.id, points, nextValue);
                                 triggerAutoSaveParcours(p.id, nextValue);
-                                saveModeForParcoursGroups(p.id, "personnalise");
                               }}
                               keyboardType="numeric"
                               style={styles.inlineInput}

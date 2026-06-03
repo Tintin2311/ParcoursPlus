@@ -14,6 +14,7 @@ import {
   View,
   type DimensionValue,
 } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { LinearGradient } from "expo-linear-gradient";
 import { Feather } from "@expo/vector-icons";
 import BottomBar from "./ui/BottomBar";
@@ -77,6 +78,8 @@ type TentativePageMode = "general" | "personnalise";
 type PerGroupConfig = {
   modes: ModesActifs;
   pointsParParcours: number | null;
+  parcoursBonusMode: "general" | "personnalise";
+  parcoursBonusOverrides: Record<string, number>;
   tentativePageMode: TentativePageMode;
   tentativePageDefault: number | null;
   tentativePageAssignments: Record<string, number>;
@@ -97,6 +100,7 @@ const HEADER_ICON_BG = "#2D6C97";
 const HEADER_TITLE = "#FFFFFF";
 const TEXT_BG = "#E8F1FD";
 const BOTTOM_BAR_HEIGHT = 78;
+const LS_POINTS_SELECTED_GROUP_ID = "gestionPoints.selectedGroupId";
 
 const BLUE_FROM = "#D8ECFF";
 const BLUE_TO = "#A8D8F5";
@@ -175,6 +179,48 @@ const sanitizeAssignments = (value: any): Record<string, number> => {
   });
 
   return out;
+};
+
+const sanitizePointOverrides = (value: any): Record<string, number> => {
+  const obj = parseJsonObject(value);
+  const source =
+    obj && typeof obj === "object" && !Array.isArray(obj)
+      ? obj.parcours_bonus_overrides ?? obj
+      : null;
+
+  if (!source || typeof source !== "object" || Array.isArray(source)) return {};
+
+  const out: Record<string, number> = {};
+  Object.entries(source).forEach(([k, v]) => {
+    const n = Number(v);
+    if (k && Number.isFinite(n) && n >= 0) out[k] = n;
+  });
+
+  return out;
+};
+
+const readParcoursBonusOverrides = (row: any): Record<string, number> => {
+  const config = parseJsonObject(row?.config);
+  const settings = parseJsonObject(row?.settings_json);
+  const sourceAssignments = parseJsonObject(row?.tentative_source_assignments);
+
+  return {
+    ...sanitizePointOverrides(settings?.parcours_bonus_overrides),
+    ...sanitizePointOverrides(config?.parcours_bonus_overrides),
+    ...sanitizePointOverrides(row?.parcours_bonus_overrides),
+    ...sanitizePointOverrides(sourceAssignments?.parcours_bonus_overrides),
+  };
+};
+
+const readParcoursBonusMode = (row: any): "general" | "personnalise" => {
+  const config = parseJsonObject(row?.config);
+  const settings = parseJsonObject(row?.settings_json);
+  const mode =
+    row?.parcours_bonus_mode ??
+    config?.parcours_bonus_mode ??
+    settings?.parcours_bonus_mode;
+
+  return mode === "personnalise" ? "personnalise" : "general";
 };
 
 async function resolveTeacherId(): Promise<string | null> {
@@ -633,6 +679,8 @@ export default function GestionPoints({ setPage }: Props) {
             modes: normalizeModes(row.modes),
             pointsParParcours:
               row.points_par_parcours == null ? null : Number(row.points_par_parcours) || 0,
+            parcoursBonusMode: readParcoursBonusMode(row),
+            parcoursBonusOverrides: readParcoursBonusOverrides(row),
             tentativePageMode:
               row.tentative_page_mode === "personnalise" ? "personnalise" : "general",
             tentativePageDefault:
@@ -669,6 +717,7 @@ export default function GestionPoints({ setPage }: Props) {
 
   useEffect(() => {
     if (!selectedGroupId) return;
+    AsyncStorage.setItem(LS_POINTS_SELECTED_GROUP_ID, selectedGroupId).catch(() => null);
     const cfg = perGroupConfigs[selectedGroupId];
 
     if (cfg) {
@@ -838,6 +887,11 @@ export default function GestionPoints({ setPage }: Props) {
           parcours: !!modesActifs.parcours,
         },
         points_par_parcours: modesActifs.parcours ? Number(pointsParParcours) || 0 : 0,
+        parcours_bonus_mode:
+          perGroupConfigs[selectedGroupId]?.parcoursBonusMode ??
+          (Object.keys(perGroupConfigs[selectedGroupId]?.parcoursBonusOverrides ?? {}).length
+            ? "personnalise"
+            : "general"),
         tentative_page_mode: modesActifs.tentatives ? tentativePageMode : "general",
         tentative_page_default:
           modesActifs.tentatives && tentativePageMode === "general"
@@ -848,7 +902,9 @@ export default function GestionPoints({ setPage }: Props) {
             ? cleanedAssignments
             : {},
         tentative_source_parcours_id: null,
-        tentative_source_assignments: {},
+        tentative_source_assignments: {
+          parcours_bonus_overrides: perGroupConfigs[selectedGroupId]?.parcoursBonusOverrides ?? {},
+        },
         updated_at: new Date().toISOString(),
       };
 
@@ -868,6 +924,8 @@ export default function GestionPoints({ setPage }: Props) {
         [selectedGroupId]: {
           modes: normalizeModes(payload.modes),
           pointsParParcours: payload.points_par_parcours,
+          parcoursBonusMode: payload.parcours_bonus_mode as "general" | "personnalise",
+          parcoursBonusOverrides: perGroupConfigs[selectedGroupId]?.parcoursBonusOverrides ?? {},
           tentativePageMode: payload.tentative_page_mode,
           tentativePageDefault: payload.tentative_page_default,
           tentativePageAssignments: sanitizeAssignments(payload.tentative_page_assignments),
@@ -1065,7 +1123,12 @@ export default function GestionPoints({ setPage }: Props) {
 
                     <TouchableOpacity
                       activeOpacity={0.9}
-                      onPress={() => setPage(getPersonalisationPage(selectedMode))}
+                      onPress={() => {
+                        if (selectedGroupId) {
+                          AsyncStorage.setItem(LS_POINTS_SELECTED_GROUP_ID, selectedGroupId).catch(() => null);
+                        }
+                        setPage(getPersonalisationPage(selectedMode));
+                      }}
                       style={styles.customizeModeBtn}
                     >
                       <Feather name="sliders" size={14} color={HEADER_TITLE} />

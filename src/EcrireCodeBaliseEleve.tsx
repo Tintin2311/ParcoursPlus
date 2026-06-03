@@ -614,6 +614,39 @@ const getNumberFromRow = (row: any, keys: string[], fallback = 0) => {
   return fallback;
 };
 
+const sanitizePointOverrides = (value: any): Record<string, number> => {
+  const parsed = parseJsonObject(value);
+  const source =
+    parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed.parcours_bonus_overrides ?? parsed.parcoursBonusOverrides ?? parsed
+      : null;
+
+  if (!source || typeof source !== "object" || Array.isArray(source)) return {};
+
+  const out: Record<string, number> = {};
+  Object.entries(source).forEach(([k, v]) => {
+    const n = Number(v);
+    if (k && Number.isFinite(n) && n >= 0) out[k] = n;
+  });
+
+  return out;
+};
+
+const getParcoursBonusOverridesFromRow = (row: any): Record<string, number> => {
+  const config = parseJsonObject(row?.config);
+  const settings = parseJsonObject(row?.settings_json);
+  const sourceAssignments = parseJsonObject(
+    row?.tentative_source_assignments ?? row?.tentativeSourceAssignments
+  );
+
+  return {
+    ...sanitizePointOverrides(settings?.parcours_bonus_overrides ?? settings?.parcoursBonusOverrides),
+    ...sanitizePointOverrides(config?.parcours_bonus_overrides ?? config?.parcoursBonusOverrides),
+    ...sanitizePointOverrides(row?.parcours_bonus_overrides ?? row?.parcoursBonusOverrides),
+    ...sanitizePointOverrides(sourceAssignments?.parcours_bonus_overrides ?? sourceAssignments?.parcoursBonusOverrides),
+  };
+};
+
 const scoreConfigRow = (row: any) => {
   const modes = getModesFromRow(row);
   const pointsParParcours = getNumberFromRow(row, ["points_par_parcours", "pointsParParcours"], 0);
@@ -627,6 +660,43 @@ const scoreConfigRow = (row: any) => {
     pointsParParcours +
     (Number.isFinite(updated) ? updated / 1_000_000_000_000 : 0)
   );
+};
+
+const loadParcoursTermineBonus = async (
+  groupId: string | null,
+  parcoursId: string | undefined,
+  professeurId?: string | null
+) => {
+  if (!groupId || !parcoursId) return null;
+
+  const buildQuery = (withTeacher: boolean) => {
+    let query = supabase
+      .from("personnaliser_parcours_termines")
+      .select("points_personnalises")
+      .eq("group_id", groupId)
+      .eq("parcours_id", parcoursId)
+      .order("updated_at", { ascending: false, nullsFirst: false })
+      .limit(1);
+
+    if (withTeacher && professeurId) query = query.eq("professeur_id", professeurId);
+    return query;
+  };
+
+  let { data, error } = await buildQuery(true);
+
+  if (!error && (!data || (data as any[]).length === 0) && professeurId) {
+    const fallback = await buildQuery(false);
+    data = fallback.data;
+    error = fallback.error;
+  }
+
+  if (error) {
+    console.warn("Lecture bonus parcours terminé personnalisés impossible :", error);
+    return null;
+  }
+
+  const n = Number((data as any[])?.[0]?.points_personnalises);
+  return Number.isFinite(n) && n >= 0 ? n : null;
 };
 
 const mergeConfigWithBestSupabaseRow = async (
@@ -650,11 +720,25 @@ const mergeConfigWithBestSupabaseRow = async (
   const bestRow = [...data].sort((a, b) => scoreConfigRow(b) - scoreConfigRow(a))[0];
   const rowModes = getModesFromRow(bestRow);
 
-  const pointsParParcours = getNumberFromRow(
+  const basePointsParParcours = getNumberFromRow(
     bestRow,
     ["points_par_parcours", "pointsParParcours"],
     baseConfig.pointsParParcours
   );
+  const config = parseJsonObject(bestRow?.config);
+  const settings = parseJsonObject(bestRow?.settings_json);
+  const bonusMode =
+    bestRow?.parcours_bonus_mode ??
+    bestRow?.parcoursBonusMode ??
+    config?.parcours_bonus_mode ??
+    config?.parcoursBonusMode ??
+    settings?.parcours_bonus_mode ??
+    settings?.parcoursBonusMode;
+  const bonusOverrides = getParcoursBonusOverridesFromRow(bestRow);
+  const pointsParParcours =
+    bonusMode === "personnalise" && parcoursId && bonusOverrides[parcoursId] != null
+      ? bonusOverrides[parcoursId]
+      : basePointsParParcours;
 
   const pointsParBalise = getNumberFromRow(
     bestRow,
@@ -681,10 +765,19 @@ const mergeConfigWithBestSupabaseRow = async (
   const assignments = parseAssignments(
     bestRow?.tentative_page_assignments ?? bestRow?.tentativePageAssignments
   );
+  const tableBonus =
+    bonusMode === "personnalise"
+      ? await loadParcoursTermineBonus(
+          groupId,
+          parcoursId,
+          bestRow?.professeur_id ?? bestRow?.teacher_id ?? bestRow?.user_id ?? null
+        )
+      : null;
+  const resolvedPointsParParcours = tableBonus ?? pointsParParcours;
 
   const modes = {
     balises: rowModes.balises || baseConfig.modes.balises,
-    parcours: rowModes.parcours || baseConfig.modes.parcours || pointsParParcours > 0,
+    parcours: rowModes.parcours || baseConfig.modes.parcours || resolvedPointsParParcours > 0,
     tentatives: rowModes.tentatives || baseConfig.modes.tentatives,
   };
 
@@ -695,7 +788,7 @@ const mergeConfigWithBestSupabaseRow = async (
   return {
     ...baseConfig,
     modes,
-    pointsParParcours,
+    pointsParParcours: resolvedPointsParParcours,
     pointsParBalise,
     pointsPerCorrect,
     tentativePageMode,
