@@ -7,3 +7,8 @@ build
 
 # Sauvegardes locales Supabase
 backup_*_avant_refacto.sql
+
+.expo-local/
+.supabase-home/
+supabase/.temp/
+test_before_baremes.sql
