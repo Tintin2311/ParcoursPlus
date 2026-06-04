@@ -14,6 +14,7 @@ export type BaliseFormatCompat = {
 const FORMAT_TYPES: BaliseFormatType[] = ["code", "poincon", "qrcode", "tableau"];
 const COMPACT_BALISE_SELECT =
   "id, user_id, code, format_types, poincon_rows, poincon_cols, poincon_cells, tableau_rows, tableau_cols, tableau_cells, qrcode_value";
+const LEGACY_FORMAT_SELECT = "id, balise_id, user_id, format_type, label, is_default, payload, created_at";
 
 const makeSyntheticFormatId = (baliseId: string, formatType: BaliseFormatType) =>
   `balise:${baliseId}:${formatType}`;
@@ -31,6 +32,65 @@ const isMissingCompactFormatColumnsError = (error: any) => {
       msg.includes("qrcode_value")) &&
     (msg.includes("column") || msg.includes("schema cache"))
   );
+};
+
+const isMissingLegacyFormatsError = (error: any) => {
+  const msg = String(error?.message || error?.details || "").toLowerCase();
+  return (
+    (msg.includes("balise_formats") || msg.includes("relation")) &&
+    (msg.includes("does not exist") || msg.includes("schema cache") || msg.includes("not found"))
+  );
+};
+
+const mapLegacyFormatRow = (row: any): BaliseFormatCompat | null => {
+  const formatType = String(row?.format_type ?? "") as BaliseFormatType;
+  if (!isBaliseFormatType(formatType)) return null;
+
+  return {
+    id: row?.id ? String(row.id) : null,
+    balise_id: row?.balise_id ? String(row.balise_id) : null,
+    user_id: row?.user_id ?? null,
+    format_type: formatType,
+    label: row?.label ?? null,
+    is_default: !!row?.is_default,
+    payload: row?.payload && typeof row.payload === "object" ? row.payload : {},
+    created_at: row?.created_at ?? null,
+  };
+};
+
+const mergeFormats = (primary: BaliseFormatCompat[], fallback: BaliseFormatCompat[]) => {
+  const map = new Map<string, BaliseFormatCompat>();
+
+  fallback.forEach((row) => {
+    const key = `${row.balise_id ?? ""}:${row.format_type}`;
+    if (row.balise_id && row.format_type) map.set(key, row);
+  });
+
+  primary.forEach((row) => {
+    const key = `${row.balise_id ?? ""}:${row.format_type}`;
+    if (row.balise_id && row.format_type) map.set(key, row);
+  });
+
+  return Array.from(map.values());
+};
+
+const fetchLegacyBaliseFormats = async (
+  supabase: any,
+  userId?: string | null,
+  baliseIds?: string[]
+): Promise<BaliseFormatCompat[]> => {
+  let query = supabase.from("balise_formats").select(LEGACY_FORMAT_SELECT);
+  if (userId) query = query.eq("user_id", userId);
+  if (baliseIds?.length) query = query.in("balise_id", baliseIds);
+
+  const { data, error } = await query;
+
+  if (error) {
+    if (isMissingLegacyFormatsError(error)) return [];
+    throw error;
+  }
+
+  return (data || []).map(mapLegacyFormatRow).filter(Boolean) as BaliseFormatCompat[];
 };
 
 const clampGridSize = (value: any, fallback = 4) => {
@@ -59,6 +119,12 @@ const dotsToCells = (dots: Record<string, any>, rows: number, cols: number) =>
   Array.from({ length: rows }, (_, r) =>
     Array.from({ length: cols }, (_, c) => !!dots?.[makeCellKey(r, c)])
   );
+
+const hasPoinconCells = (cells: any) =>
+  Array.isArray(cells) && cells.some((row) => Array.isArray(row) && row.some(Boolean));
+
+const hasTableauCells = (cells: any) =>
+  cells && typeof cells === "object" && !Array.isArray(cells) && Object.values(cells).some((value) => String(value ?? "").trim());
 
 const normalizePoinconPayload = (payload: Record<string, any> = {}) => {
   const rows = clampGridSize(payload.rows, 4);
@@ -151,6 +217,9 @@ const rowsFromBalisesCompactColumns = (balises: any[]): BaliseFormatCompat[] => 
     });
 
     if (String(balise.code ?? "").trim()) typeSet.add("code");
+    if (hasPoinconCells(balise.poincon_cells)) typeSet.add("poincon");
+    if (hasTableauCells(balise.tableau_cells)) typeSet.add("tableau");
+    if (String(balise.qrcode_value ?? "").trim()) typeSet.add("qrcode");
 
     FORMAT_TYPES.forEach((formatType) => {
       if (!typeSet.has(formatType)) return;
@@ -267,12 +336,36 @@ export const fetchAllBaliseFormatsCompat = async (
   if (userId) balisesQuery = balisesQuery.eq("user_id", userId);
 
   const balisesResult = await balisesQuery;
+  const legacyRows = await fetchLegacyBaliseFormats(supabase, userId);
+
   if (!balisesResult.error) {
-    return rowsFromBalisesCompactColumns(balisesResult.data || []);
+    return mergeFormats(rowsFromBalisesCompactColumns(balisesResult.data || []), legacyRows);
   }
 
-  if (isMissingCompactFormatColumnsError(balisesResult.error)) return [];
+  if (isMissingCompactFormatColumnsError(balisesResult.error)) return legacyRows;
   throw balisesResult.error;
+};
+
+export const fetchBaliseFormatsByBaliseIdsCompat = async (
+  supabase: any,
+  baliseIds: string[]
+): Promise<BaliseFormatCompat[]> => {
+  const cleanIds = Array.from(
+    new Set(baliseIds.map((id) => String(id ?? "").trim()).filter(Boolean))
+  );
+
+  if (!cleanIds.length) return [];
+
+  const legacyRows = await fetchLegacyBaliseFormats(supabase, null, cleanIds);
+
+  const { data, error } = await supabase
+    .from("balises")
+    .select(COMPACT_BALISE_SELECT)
+    .in("id", cleanIds);
+
+  if (!error) return mergeFormats(rowsFromBalisesCompactColumns(data || []), legacyRows);
+  if (isMissingCompactFormatColumnsError(error)) return legacyRows;
+  throw error;
 };
 
 export const fetchBaliseFormatsByBaliseIdCompat = async (
@@ -287,13 +380,15 @@ export const fetchBaliseFormatsByBaliseIdCompat = async (
     .eq("user_id", userId)
     .maybeSingle();
 
+  const legacyRows = await fetchLegacyBaliseFormats(supabase, userId, [baliseId]);
+
   if (!baliseError && baliseData) {
-    return rowsFromBalisesCompactColumns([baliseData]);
+    return mergeFormats(rowsFromBalisesCompactColumns([baliseData]), legacyRows);
   }
 
-  if (baliseError && isMissingCompactFormatColumnsError(baliseError)) return [];
+  if (baliseError && isMissingCompactFormatColumnsError(baliseError)) return legacyRows;
   if (baliseError) throw baliseError;
-  return [];
+  return legacyRows;
 };
 
 export const fetchBaliseFormatByIdCompat = async (

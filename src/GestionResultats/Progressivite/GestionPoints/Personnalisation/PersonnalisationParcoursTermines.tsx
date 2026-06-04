@@ -493,19 +493,9 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
     load();
   }, [load]);
 
-  const selectedParcours = useMemo(
-    () => parcours.find((p) => p.id === selectedParcoursId) || null,
-    [parcours, selectedParcoursId]
-  );
-
   const currentFolder = useMemo(
     () => folders.find((f) => f.id === currentFolderId) || null,
     [folders, currentFolderId]
-  );
-
-  const selectedFolder = useMemo(
-    () => folders.find((f) => f.id === selectedFolderId) || null,
-    [folders, selectedFolderId]
   );
 
   const selectedGroupName = useMemo(() => {
@@ -547,15 +537,6 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
     [folders]
   );
 
-  const parcoursInSelectedFolder = useMemo(() => {
-    if (!selectedFolderId) return [];
-    const ids = getAllFolderIdsInside(selectedFolderId);
-    return parcours.filter((p) => {
-      const folderId = parcoursFolderId(p);
-      return !!folderId && ids.includes(folderId);
-    });
-  }, [selectedFolderId, parcours, getAllFolderIdsInside]);
-
   const getFolderCount = useCallback(
     (folderId: string) => {
       const ids = getAllFolderIdsInside(folderId);
@@ -590,12 +571,6 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
         return normalizeSearch(parcoursName(p)).includes(q);
       });
   }, [parcours, currentFolderId, searchTerm]);
-
-  const selectedPreviewBonus = useMemo(() => {
-    if (selectedParcours) return String(getDisplayBonus(selectedParcours));
-    if (selectedFolderId) return bonusByFolder[selectedFolderId] || String(DEFAULT_GLOBAL_BONUS);
-    return String(DEFAULT_GLOBAL_BONUS);
-  }, [selectedParcours, selectedFolderId, bonusByFolder, getDisplayBonus]);
 
   const updateParcoursLocal = (parcoursId: string, points: number, displayValue: string) => {
     setParcours((prev) =>
@@ -1102,11 +1077,23 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
         </View>
 
         <TouchableOpacity
-          style={styles.refreshBtn}
+          style={styles.topIconBtn}
           onPress={() => setSearchVisible((v) => !v)}
           activeOpacity={0.9}
         >
           <Feather name="search" size={18} color="white" />
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.topIconBtn}
+          onPress={() =>
+            Alert.alert(
+              "Parcours terminés",
+              "Choisis un bonus par dossier. Ouvre un dossier pour modifier un parcours précis."
+            )
+          }
+          activeOpacity={0.9}
+        >
+          <Feather name="info" size={18} color="white" />
         </TouchableOpacity>
       </View>
 
@@ -1139,13 +1126,6 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>Bonus de fin personnalisé</Text>
-            <Text style={styles.cardText}>
-              Le mode et les valeurs personnalisées sont enregistrés dans la configuration de la classe cible.
-            </Text>
-          </View>
-
           <View style={styles.card}>
             <Text style={styles.sectionTitle}>
               {currentFolderId ? "Dossiers dans ce dossier" : "Dossiers"}
@@ -1188,19 +1168,14 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
                     </LinearGradient>
 
                     <View style={styles.selectionBody}>
-                      <Text style={styles.selectionTitle}>{folderName(f)}</Text>
-                      <Text style={styles.selectionSub}>{getFolderPath(folderParentId(f))}</Text>
-                      <Text style={styles.selectionSub}>
-                        {count} parcours concerné{count > 1 ? "s" : ""} • clique pour ouvrir
-                      </Text>
-                      <Text style={styles.defaultText}>
-                        Modifier ce bonus passe les classes associées en mode personnalisé.
+                      <Text style={styles.selectionTitle} numberOfLines={1}>{folderName(f)}</Text>
+                      <Text style={styles.selectionSub} numberOfLines={1}>
+                        {count} parcours
                       </Text>
                     </View>
 
                     <TouchableOpacity activeOpacity={1} onPress={(e: any) => e?.stopPropagation?.()}>
-                      <View style={styles.inlineBonusBoxFolder}>
-                        <Text style={styles.inlineBonusLabel}>Bonus dossier</Text>
+                      <View style={styles.inlineBonusControl}>
                         <View style={styles.inlineInputRow}>
                           <TextInput
                             value={value}
@@ -1212,23 +1187,9 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
                           />
                           <Text style={styles.inlinePts}>pts</Text>
                         </View>
-                        <View style={styles.autoSaveWrap}>
-                          {savingThis ? (
-                            <>
-                              <ActivityIndicator size="small" color={C_HEADER} />
-                              <Text style={styles.autoSaveText}>Enregistrement...</Text>
-                            </>
-                          ) : (
-                            <>
-                              <Feather name="check-circle" size={14} color="#059669" />
-                              <Text style={styles.autoSaveDoneText}>Auto</Text>
-                            </>
-                          )}
-                        </View>
+                        {savingThis ? <ActivityIndicator size="small" color={C_HEADER} /> : null}
                       </View>
                     </TouchableOpacity>
-
-                    <Feather name="chevron-right" size={18} color={C_SUB} />
                   </TouchableOpacity>
                 );
               })
@@ -1247,7 +1208,6 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
                   const value = bonusByParcours[p.id] ?? String(getGeneralBonus(p.id));
                   const savingThis = savingId === `parcours:${p.id}`;
                   const custom = getMode(p.id) === "personnalise";
-                  const general = getGeneralBonus(p.id);
 
                   return (
                     <TouchableOpacity
@@ -1261,19 +1221,11 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
                       </LinearGradient>
 
                       <View style={styles.selectionBody}>
-                        <Text style={styles.selectionTitle}>{parcoursName(p)}</Text>
-                        <Text style={styles.selectionSub}>{getFolderPath(parcoursFolderId(p))}</Text>
-                        <Text style={custom ? styles.savedText : styles.defaultText}>
-                          {custom
-                            ? `Mode personnalisé : +${p.bonus_points_personnalise ?? general} pts`
-                            : `Mode général : +${general} pts`}
-                        </Text>
+                        <Text style={styles.selectionTitle} numberOfLines={1}>{parcoursName(p)}</Text>
                       </View>
 
                       <TouchableOpacity activeOpacity={1} onPress={(e: any) => e?.stopPropagation?.()}>
-                        <View style={styles.inlineBonusBox}>
-                          <Text style={styles.inlineBonusLabel}>Mode classe</Text>
-
+                        <View style={styles.inlineParcoursControl}>
                           <View style={styles.modeSwitchRow}>
                             <TouchableOpacity
                               activeOpacity={0.9}
@@ -1292,7 +1244,6 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
                             </TouchableOpacity>
                           </View>
 
-                          <Text style={styles.inlineBonusLabel}>Bonus</Text>
                           <View style={styles.inlineInputRow}>
                             <TextInput
                               value={value}
@@ -1311,20 +1262,7 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
                             />
                             <Text style={styles.inlinePts}>pts</Text>
                           </View>
-
-                          <View style={styles.autoSaveWrap}>
-                            {savingThis ? (
-                              <>
-                                <ActivityIndicator size="small" color={C_HEADER} />
-                                <Text style={styles.autoSaveText}>Enregistrement...</Text>
-                              </>
-                            ) : (
-                              <>
-                                <Feather name="check-circle" size={14} color="#059669" />
-                                <Text style={styles.autoSaveDoneText}>Auto</Text>
-                              </>
-                            )}
-                          </View>
+                          {savingThis ? <ActivityIndicator size="small" color={C_HEADER} /> : null}
                         </View>
                       </TouchableOpacity>
                     </TouchableOpacity>
@@ -1334,25 +1272,6 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
             </View>
           )}
 
-          <View style={styles.previewCard}>
-            <Text style={styles.previewTitle}>Aperçu de la ligne sélectionnée</Text>
-            <Text style={styles.previewText}>
-              {selectedParcours
-                ? parcoursName(selectedParcours)
-                : selectedFolder
-                ? folderName(selectedFolder)
-                : currentFolder
-                ? folderName(currentFolder)
-                : "Aucun élément sélectionné"}
-            </Text>
-            {selectedFolderId && (
-              <Text style={styles.previewSub}>
-                {parcoursInSelectedFolder.length} parcours concerné
-                {parcoursInSelectedFolder.length > 1 ? "s" : ""}
-              </Text>
-            )}
-            <Text style={styles.previewPoints}>+{selectedPreviewBonus || "0"} pts</Text>
-          </View>
         </ScrollView>
       )}
     </SafeAreaView>
@@ -1378,7 +1297,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  refreshBtn: {
+  topIconBtn: {
     width: 44,
     height: 44,
     borderRadius: 14,
@@ -1416,20 +1335,18 @@ const styles = StyleSheet.create({
   },
   loadingWrap: { flex: 1, alignItems: "center", justifyContent: "center", gap: 10 },
   loadingText: { color: C_TEXT, fontWeight: "800" },
-  content: { paddingTop: 14, paddingBottom: 80, gap: 14 },
+  content: { paddingTop: 14, paddingBottom: 80, gap: 12 },
   card: {
     backgroundColor: C_CARD,
-    borderRadius: 24,
+    borderRadius: 18,
     borderWidth: 1,
     borderColor: C_BORDER,
     padding: 16,
   },
-  cardTitle: { color: C_TEXT, fontSize: 19, fontWeight: "900", marginBottom: 8 },
-  cardText: { color: C_SUB, fontSize: 14, fontWeight: "700", lineHeight: 21 },
   sectionTitle: { color: C_TEXT, fontSize: 16, fontWeight: "900", marginBottom: 12 },
   selectionCard: {
-    minHeight: 88,
-    borderRadius: 20,
+    minHeight: 76,
+    borderRadius: 18,
     borderWidth: 1,
     borderColor: C_BORDER,
     backgroundColor: "#FFFFFF",
@@ -1443,37 +1360,39 @@ const styles = StyleSheet.create({
   selectionCardActive: { borderColor: "#8EE2BE", backgroundColor: "#F0FFF7" },
   selectionCardOrange: { borderColor: "#FFD58F", backgroundColor: "#FFF8EB" },
   selectionIcon: {
-    width: 52,
-    height: 52,
-    borderRadius: 18,
+    width: 48,
+    height: 48,
+    borderRadius: 16,
     alignItems: "center",
     justifyContent: "center",
   },
   selectionBody: { flex: 1, minWidth: 0 },
   selectionTitle: { color: C_TEXT, fontSize: 15, fontWeight: "900" },
   selectionSub: { color: C_SUB, fontSize: 12, fontWeight: "700", marginTop: 2 },
-  savedText: { color: "#047857", fontSize: 12, fontWeight: "900", marginTop: 5 },
-  defaultText: { color: C_SUB, fontSize: 12, fontWeight: "800", marginTop: 5 },
   emptyText: { color: C_SUB, fontWeight: "700", textAlign: "center", paddingVertical: 12 },
-  inlineBonusBoxFolder: {
-    width: 146,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: "rgba(31,91,134,0.14)",
-    backgroundColor: "rgba(255,255,255,0.86)",
-    padding: 8,
+  inlineBonusControl: {
+    minWidth: 96,
+    minHeight: 42,
+    paddingHorizontal: 4,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
   },
-  inlineBonusBox: {
-    width: 166,
-    borderRadius: 18,
+  inlineParcoursControl: {
+    minWidth: 150,
+    minHeight: 58,
+    borderRadius: 14,
     borderWidth: 1,
-    borderColor: "rgba(31,91,134,0.14)",
-    backgroundColor: "rgba(255,255,255,0.86)",
-    padding: 8,
+    borderColor: C_BORDER,
+    backgroundColor: "#FFFFFF",
+    padding: 6,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 5,
   },
-  modeSwitchRow: { flexDirection: "row", gap: 5, marginBottom: 7 },
+  modeSwitchRow: { flexDirection: "row", gap: 5 },
   modeMiniBtn: {
-    flex: 1,
+    width: 64,
     minHeight: 28,
     borderRadius: 10,
     backgroundColor: "rgba(35,53,72,0.06)",
@@ -1484,13 +1403,6 @@ const styles = StyleSheet.create({
   modeMiniBtnActive: { backgroundColor: C_HEADER },
   modeMiniText: { color: C_SUB, fontSize: 10, fontWeight: "900" },
   modeMiniTextActive: { color: "#FFFFFF" },
-  inlineBonusLabel: {
-    color: C_SUB,
-    fontSize: 11,
-    fontWeight: "900",
-    textAlign: "center",
-    marginBottom: 5,
-  },
   inlineInputRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -1498,49 +1410,18 @@ const styles = StyleSheet.create({
     gap: 5,
   },
   inlineInput: {
-    width: 62,
-    height: 42,
-    borderRadius: 14,
+    width: 58,
+    height: 36,
+    borderRadius: 11,
     borderWidth: 1,
-    borderColor: C_BORDER,
-    backgroundColor: "#FFFFFF",
+    borderColor: "rgba(16,185,129,0.26)",
+    backgroundColor: "#F8FFFB",
     textAlign: "center",
     color: C_TEXT,
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: "900",
     paddingHorizontal: 4,
     paddingVertical: 0,
   },
   inlinePts: { color: C_TEXT, fontSize: 12, fontWeight: "900" },
-  autoSaveWrap: {
-    marginTop: 8,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 6,
-  },
-  autoSaveText: { color: C_SUB, fontSize: 11, fontWeight: "800" },
-  autoSaveDoneText: { color: "#059669", fontSize: 11, fontWeight: "900" },
-  previewCard: {
-    backgroundColor: C_HEADER,
-    borderRadius: 26,
-    padding: 22,
-    alignItems: "center",
-  },
-  previewTitle: { color: "rgba(255,255,255,0.72)", fontSize: 13, fontWeight: "800" },
-  previewText: {
-    color: "white",
-    fontSize: 20,
-    fontWeight: "900",
-    marginTop: 8,
-    textAlign: "center",
-  },
-  previewSub: {
-    color: "rgba(255,255,255,0.78)",
-    fontSize: 13,
-    fontWeight: "800",
-    marginTop: 6,
-    textAlign: "center",
-  },
-  previewPoints: { color: "#A7F3D0", fontSize: 34, fontWeight: "900", marginTop: 8 },
 });

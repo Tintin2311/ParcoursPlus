@@ -51,6 +51,22 @@ type GroupRow = {
   [key: string]: any;
 };
 
+type GroupSessionRow = {
+  id: string;
+  nom?: string | null;
+  name?: string | null;
+  code?: string | null;
+  student_ids?: string[] | null;
+  classIds: string[];
+  teacher_id?: string | null;
+};
+
+type CopyTarget =
+  | { type: "classe"; id: string; name: string; groupIds: string[] }
+  | { type: "session"; id: string; name: string; groupIds: string[] };
+
+type CopySelection = CopyTarget;
+
 type ParcoursRow = {
   id: string;
   nom?: string | null;
@@ -83,6 +99,7 @@ type PerGroupConfig = {
   tentativePageMode: TentativePageMode;
   tentativePageDefault: number | null;
   tentativePageAssignments: Record<string, number>;
+  balisePointOverrides: Record<string, Record<string, number>>;
   updatedAt?: string | null;
   professeurId?: string | null;
 };
@@ -199,6 +216,31 @@ const sanitizePointOverrides = (value: any): Record<string, number> => {
   return out;
 };
 
+const sanitizeBalisePointOverrides = (value: any): Record<string, Record<string, number>> => {
+  const obj = parseJsonObject(value);
+  const source =
+    obj && typeof obj === "object" && !Array.isArray(obj)
+      ? obj.balise_point_overrides ?? obj.balisePointOverrides ?? obj
+      : null;
+
+  if (!source || typeof source !== "object" || Array.isArray(source)) return {};
+
+  const out: Record<string, Record<string, number>> = {};
+  Object.entries(source).forEach(([parcoursId, rawBalises]) => {
+    const balisesObj = parseJsonObject(rawBalises);
+    if (!balisesObj || typeof balisesObj !== "object" || Array.isArray(balisesObj)) return;
+
+    const row: Record<string, number> = {};
+    Object.entries(balisesObj).forEach(([baliseId, points]) => {
+      const n = Number(points);
+      if (baliseId && Number.isFinite(n) && n >= 0) row[baliseId] = n;
+    });
+    if (Object.keys(row).length > 0) out[parcoursId] = row;
+  });
+
+  return out;
+};
+
 const readParcoursBonusOverrides = (row: any): Record<string, number> => {
   const config = parseJsonObject(row?.config);
   const settings = parseJsonObject(row?.settings_json);
@@ -209,6 +251,19 @@ const readParcoursBonusOverrides = (row: any): Record<string, number> => {
     ...sanitizePointOverrides(config?.parcours_bonus_overrides),
     ...sanitizePointOverrides(row?.parcours_bonus_overrides),
     ...sanitizePointOverrides(sourceAssignments?.parcours_bonus_overrides),
+  };
+};
+
+const readBalisePointOverrides = (row: any): Record<string, Record<string, number>> => {
+  const config = parseJsonObject(row?.config);
+  const settings = parseJsonObject(row?.settings_json);
+  const sourceAssignments = parseJsonObject(row?.tentative_source_assignments);
+
+  return {
+    ...sanitizeBalisePointOverrides(settings?.balise_point_overrides ?? settings?.balisePointOverrides),
+    ...sanitizeBalisePointOverrides(config?.balise_point_overrides ?? config?.balisePointOverrides),
+    ...sanitizeBalisePointOverrides(row?.balise_point_overrides ?? row?.balisePointOverrides),
+    ...sanitizeBalisePointOverrides(sourceAssignments?.balise_point_overrides ?? sourceAssignments?.balisePointOverrides),
   };
 };
 
@@ -474,6 +529,131 @@ function GroupPickerModal({
   );
 }
 
+function CopySelectionPickerModal({
+  visible,
+  title,
+  targets,
+  selectedIds,
+  onClose,
+  onToggle,
+  onValidate,
+}: {
+  visible: boolean;
+  title: string;
+  targets: CopySelection[];
+  selectedIds: string[];
+  onClose: () => void;
+  onToggle: (target: CopySelection) => void;
+  onValidate: () => void;
+}) {
+  const [kind, setKind] = useState<CopySelection["type"]>("classe");
+  if (!visible) return null;
+
+  const visibleTargets = targets.filter((target) => target.type === kind);
+
+  return (
+    <Modal transparent animationType="fade" visible onRequestClose={onClose}>
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalCard}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>{title}</Text>
+            <TouchableOpacity activeOpacity={0.9} onPress={onClose} style={styles.modalCloseBtn}>
+              <Feather name="x" size={20} color={C_TEXT} />
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.copyKindTabs}>
+            <TouchableOpacity
+              activeOpacity={0.9}
+              onPress={() => setKind("classe")}
+              style={[styles.copyKindTab, kind === "classe" && styles.copyKindTabActive]}
+            >
+              <Feather name="users" size={14} color={kind === "classe" ? HEADER_TITLE : C_HEADER} />
+              <Text style={[styles.copyKindTabText, kind === "classe" && styles.copyKindTabTextActive]}>
+                Classes
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              activeOpacity={0.9}
+              onPress={() => setKind("session")}
+              style={[styles.copyKindTab, kind === "session" && styles.copyKindTabActive]}
+            >
+              <Feather name="layers" size={14} color={kind === "session" ? HEADER_TITLE : C_HEADER} />
+              <Text style={[styles.copyKindTabText, kind === "session" && styles.copyKindTabTextActive]}>
+                Groupes
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView style={{ maxHeight: 390 }} showsVerticalScrollIndicator={false}>
+            {visibleTargets.map((target) => {
+              const selectionId = `${target.type}:${target.id}`;
+              const isSelected = selectedIds.includes(selectionId);
+              const palette = groupPalette(target.id);
+
+              return (
+                <TouchableOpacity
+                  key={`${target.type}:${target.id}`}
+                  activeOpacity={0.92}
+                  onPress={() => {
+                    onToggle(target);
+                  }}
+                  style={[
+                    styles.modalOption,
+                    {
+                      borderColor: isSelected ? palette.borderTint : C_BORDER,
+                      backgroundColor: isSelected ? palette.bgTint : "#FFFFFF",
+                    },
+                  ]}
+                >
+                  <View style={styles.modalOptionLeft}>
+                    <LinearGradient
+                      colors={[palette.from, palette.to]}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 1 }}
+                      style={styles.modalOptionAvatar}
+                    >
+                      <Text style={[styles.modalOptionAvatarText, { color: palette.text }]}>
+                        {target.type === "session" ? "GR" : shortCode(target.name)}
+                      </Text>
+                    </LinearGradient>
+
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.modalOptionText} numberOfLines={1}>{target.name}</Text>
+                      {target.type === "session" ? (
+                        <Text style={styles.modalOptionSub} numberOfLines={1}>
+                          {target.groupIds.length} classe{target.groupIds.length > 1 ? "s" : ""}
+                        </Text>
+                      ) : null}
+                    </View>
+                  </View>
+
+                  {isSelected ? <Feather name="check" size={18} color="#059669" /> : null}
+                </TouchableOpacity>
+              );
+            })}
+
+            {visibleTargets.length === 0 ? (
+              <Text style={styles.emptyPickerText}>
+                Aucun {kind === "classe" ? "classe" : "groupe"} disponible.
+              </Text>
+            ) : null}
+          </ScrollView>
+
+          <TouchableOpacity
+            activeOpacity={0.9}
+            onPress={onValidate}
+            style={[styles.modalValidateBtn, selectedIds.length === 0 && { opacity: 0.55 }]}
+            disabled={selectedIds.length === 0}
+          >
+            <Text style={styles.modalValidateBtnText}>Valider</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 /* ======================= Bouton mode ======================= */
 function CompactModeButton({
   modeKey,
@@ -549,6 +729,7 @@ export default function GestionPoints({ setPage }: Props) {
 
   const [folders, setFolders] = useState<FolderRow[]>([]);
   const [groups, setGroups] = useState<GroupRow[]>([]);
+  const [groupSessions, setGroupSessions] = useState<GroupSessionRow[]>([]);
   const [perGroupConfigs, setPerGroupConfigs] = useState<Record<string, PerGroupConfig>>({});
   const [teacherId, setTeacherId] = useState<string | null>(null);
 
@@ -558,6 +739,7 @@ export default function GestionPoints({ setPage }: Props) {
   const [isLoading, setIsLoading] = useState(true);
   const [screenError, setScreenError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [isCopying, setIsCopying] = useState(false);
   const [isLoadingParcours, setIsLoadingParcours] = useState(false);
 
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
@@ -570,6 +752,9 @@ export default function GestionPoints({ setPage }: Props) {
 
   const [showInfo, setShowInfo] = useState(false);
   const [showGroupPicker, setShowGroupPicker] = useState(false);
+  const [showCopyTargetPicker, setShowCopyTargetPicker] = useState(false);
+  const [showTentativePagePicker, setShowTentativePagePicker] = useState(false);
+  const [copyTargetsSelected, setCopyTargetsSelected] = useState<CopyTarget[]>([]);
 
   const folderById = useMemo(
     () => Object.fromEntries(folders.map((f) => [String(f.id), f] as const)),
@@ -618,7 +803,7 @@ export default function GestionPoints({ setPage }: Props) {
         return;
       }
 
-      const [groupsRes, foldersRes, configsRes, pagesRes] = await Promise.all([
+      const [groupsRes, foldersRes, configsRes, pagesRes, sessionsRes, studentsRes] = await Promise.all([
         supabase
           .from("groups")
           .select("*")
@@ -635,12 +820,22 @@ export default function GestionPoints({ setPage }: Props) {
           .select("id, teacher_id, page_number, page_name, created_at")
           .eq("teacher_id", authTeacherId)
           .order("page_number", { ascending: true }),
+        supabase
+          .from("GroupeSessionEleves")
+          .select("*")
+          .eq("teacher_id", authTeacherId),
+        supabase
+          .from("students")
+          .select("id, group_id, teacher_id")
+          .eq("teacher_id", authTeacherId),
       ]);
 
       if (groupsRes.error) throw groupsRes.error;
       if (foldersRes.error) throw foldersRes.error;
       if (configsRes.error) throw configsRes.error;
       if (pagesRes.error) throw pagesRes.error;
+      if (sessionsRes.error) throw sessionsRes.error;
+      if (studentsRes.error) throw studentsRes.error;
 
       const nextGroups = ((groupsRes.data ?? []) as any[])
         .filter((g) => rowBelongsToTeacher(g, authTeacherId))
@@ -663,6 +858,34 @@ export default function GestionPoints({ setPage }: Props) {
         page_name: String(p.page_name || `PAGE ${Number(p.page_number ?? 1)}`),
         created_at: p.created_at ?? null,
       })) as TentativePageRow[];
+
+      const groupIdByStudentId = new Map(
+        ((studentsRes.data ?? []) as any[])
+          .map((student) => [String(student.id ?? ""), String(student.group_id ?? "")] as const)
+          .filter(([studentId, groupId]) => !!studentId && !!groupId)
+      );
+
+      const nextSessions = ((sessionsRes.data ?? []) as any[])
+        .filter((session) => rowBelongsToTeacher(session, authTeacherId))
+        .map((session) => {
+          const studentIds: string[] = Array.isArray(session.student_ids)
+            ? session.student_ids.map(String).filter(Boolean)
+            : [];
+          const classIds = Array.from(
+            new Set(studentIds.map((studentId) => groupIdByStudentId.get(studentId)).filter(Boolean))
+          ) as string[];
+
+          return {
+            ...session,
+            id: String(session.id),
+            nom: getDisplayName(session),
+            name: getDisplayName(session),
+            code: session.code ?? null,
+            student_ids: studentIds,
+            classIds,
+          };
+        })
+        .filter((session) => session.classIds.length > 0) as GroupSessionRow[];
 
       const visibleGroupIds = new Set(nextGroups.map((g) => String(g.id)));
       const bestRowsByGroup = pickBestConfigRows(
@@ -688,6 +911,7 @@ export default function GestionPoints({ setPage }: Props) {
                 ? null
                 : Number(row.tentative_page_default) || null,
             tentativePageAssignments: sanitizeAssignments(row.tentative_page_assignments),
+            balisePointOverrides: readBalisePointOverrides(row),
             updatedAt: row.updated_at ?? null,
             professeurId: row.professeur_id ?? null,
           };
@@ -697,11 +921,23 @@ export default function GestionPoints({ setPage }: Props) {
       );
 
       setGroups(nextGroups);
+      setGroupSessions(nextSessions);
       setFolders(nextFolders);
       setPerGroupConfigs(nextConfigs);
       setAllTentativePages(nextPages);
       setSelectedGroupId((prev) =>
         prev && visibleGroupIds.has(prev) ? prev : nextGroups[0]?.id ?? null
+      );
+      setCopyTargetsSelected((prev) =>
+        prev
+          .map((target) =>
+            target.type === "classe"
+              ? visibleGroupIds.has(target.id)
+                ? target
+                : null
+              : target
+          )
+          .filter(Boolean) as CopyTarget[]
       );
     } catch (err: any) {
       console.error("Erreur chargement GestionPoints :", err);
@@ -734,6 +970,55 @@ export default function GestionPoints({ setPage }: Props) {
       setTentativePageAssignments({});
     }
   }, [selectedGroupId, perGroupConfigs, allTentativePages]);
+
+  const copyTargets = useMemo<CopyTarget[]>(() => {
+    const classTargets = groups
+      .filter((group) => String(group.id) !== String(selectedGroupId ?? ""))
+      .map((group) => ({
+      type: "classe" as const,
+      id: group.id,
+      name: getDisplayName(group),
+      groupIds: [group.id],
+    }));
+
+    const sessionTargets = groupSessions
+      .map((session) => ({
+        type: "session" as const,
+        id: session.id,
+        name: `${getDisplayName(session)}${session.code ? ` · ${session.code}` : ""}`,
+        groupIds: session.classIds.filter((groupId) => String(groupId) !== String(selectedGroupId ?? "")),
+      }))
+      .filter((target) => target.groupIds.length > 0);
+
+    return [...classTargets, ...sessionTargets];
+  }, [groupSessions, groups, selectedGroupId]);
+
+  useEffect(() => {
+    const availableKeys = new Set(copyTargets.map((target) => `${target.type}:${target.id}`));
+    setCopyTargetsSelected((prev) =>
+      prev.filter((target) => availableKeys.has(`${target.type}:${target.id}`))
+    );
+  }, [copyTargets]);
+
+  const selectedCopyTargetIds = useMemo(
+    () => copyTargetsSelected.map((target) => `${target.type}:${target.id}`),
+    [copyTargetsSelected]
+  );
+
+  const copyTargetLabel = useMemo(() => {
+    if (copyTargetsSelected.length === 0) return "Choisir";
+    if (copyTargetsSelected.length === 1) return copyTargetsSelected[0].name;
+    return `${copyTargetsSelected.length} cibles`;
+  }, [copyTargetsSelected]);
+
+  const toggleCopyTarget = useCallback((target: CopyTarget) => {
+    const key = `${target.type}:${target.id}`;
+    setCopyTargetsSelected((prev) =>
+      prev.some((item) => `${item.type}:${item.id}` === key)
+        ? prev.filter((item) => `${item.type}:${item.id}` !== key)
+        : [...prev, target]
+    );
+  }, []);
 
   const fetchGroupParcours = useCallback(
     async (groupId: string) => {
@@ -819,6 +1104,13 @@ export default function GestionPoints({ setPage }: Props) {
   );
 
   const selectedConfigured = !!(selectedGroupId && perGroupConfigs[selectedGroupId]);
+  const selectedTentativeDefaultPage = useMemo(
+    () =>
+      allTentativePages.find(
+        (page) => Number(page.page_number) === Number(tentativePageDefault)
+      ) ?? null,
+    [allTentativePages, tentativePageDefault]
+  );
 
   const canSaveTentativeConfig = useMemo(() => {
     if (!modesActifs.tentatives) return true;
@@ -904,7 +1196,9 @@ export default function GestionPoints({ setPage }: Props) {
         tentative_source_parcours_id: null,
         tentative_source_assignments: {
           parcours_bonus_overrides: perGroupConfigs[selectedGroupId]?.parcoursBonusOverrides ?? {},
+          balise_point_overrides: perGroupConfigs[selectedGroupId]?.balisePointOverrides ?? {},
         },
+        balise_point_overrides: perGroupConfigs[selectedGroupId]?.balisePointOverrides ?? {},
         updated_at: new Date().toISOString(),
       };
 
@@ -929,6 +1223,7 @@ export default function GestionPoints({ setPage }: Props) {
           tentativePageMode: payload.tentative_page_mode,
           tentativePageDefault: payload.tentative_page_default,
           tentativePageAssignments: sanitizeAssignments(payload.tentative_page_assignments),
+          balisePointOverrides: perGroupConfigs[selectedGroupId]?.balisePointOverrides ?? {},
           updatedAt: payload.updated_at,
           professeurId: payload.professeur_id,
         },
@@ -954,10 +1249,136 @@ export default function GestionPoints({ setPage }: Props) {
     selectedGroup,
     selectedGroupId,
     teacherId,
+    perGroupConfigs,
     tentativePageAssignments,
     tentativePageDefault,
     tentativePageMode,
   ]);
+
+  const handleCopyConfig = useCallback(async () => {
+    const sourceGroupId = selectedGroupId;
+    if (!teacherId || !sourceGroupId || copyTargetsSelected.length === 0) return;
+
+    const sourceConfig = perGroupConfigs[sourceGroupId];
+    if (!sourceConfig) {
+      Alert.alert("Source vide", "La classe source n'a pas encore de configuration à copier.");
+      return;
+    }
+
+    const targetGroupIds = Array.from(
+      new Set(
+        copyTargetsSelected
+          .flatMap((target) => target.groupIds)
+          .map(String)
+          .filter((id) => id && id !== sourceGroupId)
+      )
+    );
+
+    if (targetGroupIds.length === 0) {
+      Alert.alert("Cible identique", "Choisis une autre classe ou une session contenant une autre classe.");
+      return;
+    }
+
+    setIsCopying(true);
+
+    try {
+      const now = new Date().toISOString();
+      const payloads = targetGroupIds.map((groupId) => ({
+        group_id: groupId,
+        professeur_id: teacherId,
+        modes: {
+          tentatives: !!sourceConfig.modes.tentatives,
+          balises: !!sourceConfig.modes.balises,
+          parcours: !!sourceConfig.modes.parcours,
+        },
+        points_par_parcours: sourceConfig.pointsParParcours ?? 0,
+        parcours_bonus_mode: sourceConfig.parcoursBonusMode,
+        parcours_bonus_overrides: sourceConfig.parcoursBonusOverrides ?? {},
+        tentative_page_mode: sourceConfig.tentativePageMode,
+        tentative_page_default: sourceConfig.tentativePageDefault,
+        tentative_page_assignments: sourceConfig.tentativePageAssignments ?? {},
+        tentative_source_parcours_id: null,
+        tentative_source_assignments: {
+          parcours_bonus_overrides: sourceConfig.parcoursBonusOverrides ?? {},
+          balise_point_overrides: sourceConfig.balisePointOverrides ?? {},
+        },
+        balise_point_overrides: sourceConfig.balisePointOverrides ?? {},
+        updated_at: now,
+      }));
+
+      const { data: parcoursBonusRows, error: bonusReadError } = await supabase
+        .from("personnaliser_parcours_termines")
+        .select("parcours_id, points_personnalises")
+        .eq("professeur_id", teacherId)
+        .eq("group_id", sourceGroupId);
+
+      if (bonusReadError) throw bonusReadError;
+
+      for (const groupId of targetGroupIds) {
+        const { error: configDeleteError } = await supabase
+          .from("group_points_configs")
+          .delete()
+          .eq("group_id", groupId)
+          .eq("professeur_id", teacherId);
+
+        if (configDeleteError) throw configDeleteError;
+
+        const { error: bonusDeleteError } = await supabase
+          .from("personnaliser_parcours_termines")
+          .delete()
+          .eq("professeur_id", teacherId)
+          .eq("group_id", groupId);
+
+        if (bonusDeleteError) throw bonusDeleteError;
+      }
+
+      const { error: configInsertError } = await supabase
+        .from("group_points_configs")
+        .insert(payloads);
+
+      if (configInsertError) throw configInsertError;
+
+      const bonusPayloads = targetGroupIds.flatMap((groupId) =>
+        ((parcoursBonusRows ?? []) as any[]).map((row) => ({
+          professeur_id: teacherId,
+          group_id: groupId,
+          parcours_id: row.parcours_id,
+          points_personnalises: Number(row.points_personnalises ?? 0) || 0,
+          updated_at: now,
+        }))
+      );
+
+      if (bonusPayloads.length > 0) {
+        const { error: bonusInsertError } = await supabase
+          .from("personnaliser_parcours_termines")
+          .insert(bonusPayloads);
+
+        if (bonusInsertError) throw bonusInsertError;
+      }
+
+      setPerGroupConfigs((prev) => {
+        const next = { ...prev };
+        targetGroupIds.forEach((groupId) => {
+          next[groupId] = {
+            ...sourceConfig,
+            updatedAt: now,
+            professeurId: teacherId,
+          };
+        });
+        return next;
+      });
+
+      Alert.alert(
+        "Copie terminée",
+        `Les réglages ont été copiés vers ${targetGroupIds.length} classe(s).`
+      );
+    } catch (err: any) {
+      console.error("Erreur copie configuration points :", err);
+      Alert.alert("Erreur", `Impossible de copier les réglages.\n\n${err?.message ?? "Erreur inconnue"}`);
+    } finally {
+      setIsCopying(false);
+    }
+  }, [copyTargetsSelected, perGroupConfigs, selectedGroupId, teacherId]);
 
   const hasNoData = !isLoading && !screenError && groups.length === 0;
 
@@ -1023,7 +1444,7 @@ export default function GestionPoints({ setPage }: Props) {
           <>
             <View style={[styles.sectionCard, styles.compactCard]}>
               <View style={styles.sectionTopRow}>
-                <Text style={styles.sectionTitle}>Classe cible</Text>
+                <Text style={styles.sectionTitle}>Classe source</Text>
 
                 <TouchableOpacity
                   activeOpacity={0.92}
@@ -1043,6 +1464,42 @@ export default function GestionPoints({ setPage }: Props) {
                   Sélectionne une classe pour afficher sa configuration.
                 </Text>
               ) : null}
+            </View>
+
+            <View style={[styles.sectionCard, styles.compactCard]}>
+              <View style={styles.sectionTopRow}>
+                <Text style={styles.sectionTitle}>Copier</Text>
+
+                <TouchableOpacity
+                  activeOpacity={0.92}
+                  onPress={handleCopyConfig}
+                  disabled={copyTargetsSelected.length === 0 || isCopying}
+                  style={[
+                    styles.copyBtn,
+                    (copyTargetsSelected.length === 0 || isCopying) && { opacity: 0.55 },
+                  ]}
+                >
+                  {isCopying ? (
+                    <ActivityIndicator size="small" color={HEADER_TITLE} />
+                  ) : (
+                    <Feather name="copy" size={14} color={HEADER_TITLE} />
+                  )}
+                  <Text style={styles.copyBtnText}>{isCopying ? "Copie..." : "Copier"}</Text>
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.copyRow}>
+                <TouchableOpacity
+                  activeOpacity={0.9}
+                  onPress={() => setShowCopyTargetPicker(true)}
+                  style={styles.copyChip}
+                >
+                  <Text style={styles.copyChipLabel}>Classes cibles</Text>
+                  <Text style={styles.copyChipValue} numberOfLines={1}>
+                    {copyTargetLabel}
+                  </Text>
+                </TouchableOpacity>
+              </View>
             </View>
 
             <View style={[styles.sectionCard, styles.compactCard]}>
@@ -1155,6 +1612,27 @@ export default function GestionPoints({ setPage }: Props) {
                     </View>
                   </View>
                 ) : null}
+
+                {selectedMode === "tentatives" && modesActifs.tentatives ? (
+                  <View style={styles.selectedModeSettingRow}>
+                    <Text style={styles.cardInlineLabel}>Barème général</Text>
+                    {allTentativePages.length === 0 ? (
+                      <Text style={styles.warningText}>
+                        Crée d'abord une page de barème de tentatives.
+                      </Text>
+                    ) : (
+                      <TouchableOpacity
+                        activeOpacity={0.9}
+                        onPress={() => setShowTentativePagePicker(true)}
+                        style={styles.tentativePageChip}
+                      >
+                        <Text style={styles.tentativePageChipText} numberOfLines={1}>
+                          {selectedTentativeDefaultPage?.page_name || "Aucune page"}
+                        </Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                ) : null}
               </View>
 
               {!hasAtLeastOneMode ? (
@@ -1226,7 +1704,81 @@ export default function GestionPoints({ setPage }: Props) {
         onSelect={setSelectedGroupId}
       />
 
+      <CopySelectionPickerModal
+        visible={showCopyTargetPicker}
+        title="Choisir les cibles"
+        targets={copyTargets}
+        selectedIds={selectedCopyTargetIds}
+        onClose={() => setShowCopyTargetPicker(false)}
+        onToggle={toggleCopyTarget}
+        onValidate={() => setShowCopyTargetPicker(false)}
+      />
+
       <InformationPoints visible={showInfo} onClose={() => setShowInfo(false)} />
+
+      <Modal
+        transparent
+        animationType="fade"
+        visible={showTentativePagePicker}
+        onRequestClose={() => setShowTentativePagePicker(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Choisir la page de tentative</Text>
+              <TouchableOpacity
+                activeOpacity={0.9}
+                onPress={() => setShowTentativePagePicker(false)}
+                style={styles.modalCloseBtn}
+              >
+                <Feather name="x" size={18} color={C_TEXT} />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView style={styles.pagePickerList} showsVerticalScrollIndicator={false}>
+              {allTentativePages.map((page) => {
+                const active = Number(page.page_number) === Number(tentativePageDefault);
+                return (
+                  <TouchableOpacity
+                    key={page.id}
+                    activeOpacity={0.9}
+                    onPress={() => {
+                      setTentativePageDefault(page.page_number);
+                      setShowTentativePagePicker(false);
+                    }}
+                    style={[
+                      styles.pagePickerOption,
+                      active && styles.pagePickerOptionActive,
+                    ]}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text
+                        style={[
+                          styles.pagePickerOptionTitle,
+                          active && styles.pagePickerOptionTitleActive,
+                        ]}
+                        numberOfLines={1}
+                      >
+                        {page.page_name || `Page ${page.page_number}`}
+                      </Text>
+                      <Text
+                        style={[
+                          styles.pagePickerOptionSub,
+                          active && styles.pagePickerOptionTitleActive,
+                        ]}
+                      >
+                        page {page.page_number}
+                      </Text>
+                    </View>
+                    {active ? <Feather name="check" size={18} color={C_HEADER} /> : null}
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
       <BottomBar currentPage="gestionResultats" onNavigate={setPage} />
     </SafeAreaView>
   );
@@ -1313,6 +1865,37 @@ const styles = StyleSheet.create({
     fontSize: 12,
     flexShrink: 1,
   },
+
+  copyBtn: {
+    minWidth: 116,
+    minHeight: 36,
+    borderRadius: 12,
+    backgroundColor: C_HEADER,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+    paddingHorizontal: 12,
+  },
+  copyBtnText: { color: HEADER_TITLE, fontSize: 12, fontWeight: "900" },
+  copyRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  copyChip: {
+    flex: 1,
+    minHeight: 48,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: C_BORDER,
+    backgroundColor: "#F8FAFC",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    justifyContent: "center",
+  },
+  copyChipLabel: { color: C_SUB, fontSize: 10, fontWeight: "900", marginBottom: 2 },
+  copyChipValue: { color: C_TEXT, fontSize: 13, fontWeight: "900" },
 
   helperText: { color: C_SUB, fontSize: 12, fontWeight: "600" },
   warningText: {
@@ -1408,12 +1991,15 @@ const styles = StyleSheet.create({
     lineHeight: 16,
   },
   modeToggleBtn: {
+    width: 132,
+    minHeight: 38,
     borderRadius: 999,
     borderWidth: 1,
     borderColor: C_BORDER,
     backgroundColor: "#FFFFFF",
-    paddingHorizontal: 12,
-    paddingVertical: 9,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 10,
   },
   modeToggleBtnActive: {
     backgroundColor: TEXT_BG,
@@ -1428,10 +2014,10 @@ const styles = StyleSheet.create({
     color: C_HEADER,
   },
   customizeModeBtn: {
-    minHeight: 36,
+    width: 132,
+    minHeight: 38,
     borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingHorizontal: 10,
     backgroundColor: C_HEADER,
     flexDirection: "row",
     alignItems: "center",
@@ -1454,6 +2040,24 @@ const styles = StyleSheet.create({
     gap: 10,
   },
 
+  tentativePageChip: {
+    minWidth: 104,
+    maxWidth: 150,
+    minHeight: 36,
+    borderRadius: 11,
+    borderWidth: 1,
+    borderColor: "rgba(16,185,129,0.26)",
+    backgroundColor: "#FFFFFF",
+    paddingHorizontal: 10,
+    paddingVertical: Platform.OS === "web" ? 7 : 6,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  tentativePageChipText: {
+    color: C_HEADER,
+    fontSize: 13,
+    fontWeight: "900",
+  },
   inlineInputWrap: { flexDirection: "row", alignItems: "center", gap: 8 },
   inlineInput: {
     width: 64,
@@ -1629,6 +2233,76 @@ const styles = StyleSheet.create({
   },
   modalOptionAvatarText: { fontSize: 11, fontWeight: "900" },
   modalOptionText: { color: C_TEXT, fontSize: 14, fontWeight: "700" },
+  modalOptionSub: { color: C_SUB, fontSize: 11, fontWeight: "700", marginTop: 2 },
+  copyKindTabs: {
+    flexDirection: "row",
+    gap: 8,
+    marginBottom: 12,
+  },
+  copyKindTab: {
+    flex: 1,
+    minHeight: 40,
+    borderRadius: 13,
+    borderWidth: 1,
+    borderColor: C_BORDER,
+    backgroundColor: "#FFFFFF",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+  },
+  copyKindTabActive: {
+    backgroundColor: C_HEADER,
+    borderColor: C_HEADER,
+  },
+  copyKindTabText: { color: C_HEADER, fontSize: 12, fontWeight: "900" },
+  copyKindTabTextActive: { color: HEADER_TITLE },
+  emptyPickerText: { color: C_SUB, fontSize: 13, fontWeight: "700", textAlign: "center", padding: 18 },
+  modalValidateBtn: {
+    minHeight: 44,
+    borderRadius: 14,
+    backgroundColor: C_HEADER,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 10,
+  },
+  modalValidateBtnText: { color: HEADER_TITLE, fontSize: 13, fontWeight: "900" },
+
+  pagePickerList: {
+    maxHeight: 360,
+  },
+  pagePickerOption: {
+    minHeight: 58,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: C_BORDER,
+    backgroundColor: "#FFFFFF",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+  pagePickerOptionActive: {
+    borderColor: "rgba(16,185,129,0.42)",
+    backgroundColor: TEXT_BG,
+  },
+  pagePickerOptionTitle: {
+    color: C_TEXT,
+    fontSize: 14,
+    fontWeight: "900",
+  },
+  pagePickerOptionTitleActive: {
+    color: C_HEADER,
+  },
+  pagePickerOptionSub: {
+    color: C_SUB,
+    fontSize: 11,
+    fontWeight: "800",
+    marginTop: 2,
+  },
 });
 
 /* ======================= Styles modal info ======================= */

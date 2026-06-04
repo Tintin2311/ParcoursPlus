@@ -21,37 +21,45 @@ alter table public.balises
 
 create or replace function public.get_poincon_formats_by_balise_ids(p_balise_ids uuid[])
 returns table(id uuid, balise_id uuid, user_id uuid, format_type text, payload jsonb)
-language sql
+language plpgsql
 security definer
 set search_path to 'public'
 as $$
-  select
-    nullif(b.formats #>> '{poincon,id}', '')::uuid as id,
-    b.id as balise_id,
-    b.user_id,
-    'poincon'::text as format_type,
-    coalesce(b.formats #> '{poincon,payload}', '{}'::jsonb) as payload
-  from public.balises b
-  where b.id = any(p_balise_ids)
-    and b.formats ? 'poincon'
-
-  union all
-
-  select
-    bf.id,
-    bf.balise_id,
-    bf.user_id,
-    bf.format_type,
-    bf.payload
-  from public.balise_formats bf
-  where bf.format_type = 'poincon'
-    and bf.balise_id = any(p_balise_ids)
-    and not exists (
-      select 1
+begin
+  if exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'balises'
+      and column_name = 'formats'
+  ) then
+    return query execute $sql$
+      select
+        nullif(b.formats #>> '{poincon,id}', '')::uuid as id,
+        b.id as balise_id,
+        b.user_id,
+        'poincon'::text as format_type,
+        coalesce(b.formats #> '{poincon,payload}', '{}'::jsonb) as payload
       from public.balises b
-      where b.id = bf.balise_id
+      where b.id = any($1)
         and b.formats ? 'poincon'
-    );
+    $sql$ using p_balise_ids;
+  end if;
+
+  if to_regclass('public.balise_formats') is not null then
+    return query execute $sql$
+      select
+        bf.id,
+        bf.balise_id,
+        bf.user_id,
+        bf.format_type,
+        bf.payload
+      from public.balise_formats bf
+      where bf.format_type = 'poincon'
+        and bf.balise_id = any($1)
+    $sql$ using p_balise_ids;
+  end if;
+end;
 $$;
 
 commit;

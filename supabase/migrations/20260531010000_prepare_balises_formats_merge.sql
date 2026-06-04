@@ -16,28 +16,36 @@ alter table public.balises
 comment on column public.balises.formats is
   'Formats attached to this balise, keyed by format type: code, poincon, tableau, qrcode. Prepared from balise_formats before full merge.';
 
-with aggregated_formats as (
-  select
-    bf.balise_id,
-    jsonb_object_agg(
-      bf.format_type,
-      jsonb_build_object(
-        'id', bf.id,
-        'label', bf.label,
-        'is_default', bf.is_default,
-        'payload', coalesce(bf.payload, '{}'::jsonb),
-        'created_at', bf.created_at
+do $$
+begin
+  if to_regclass('public.balise_formats') is not null then
+    execute $sql$
+      with aggregated_formats as (
+        select
+          bf.balise_id,
+          jsonb_object_agg(
+            bf.format_type,
+            jsonb_build_object(
+              'id', bf.id,
+              'label', bf.label,
+              'is_default', bf.is_default,
+              'payload', coalesce(bf.payload, '{}'::jsonb),
+              'created_at', bf.created_at
+            )
+            order by bf.created_at
+          ) as formats
+        from public.balise_formats bf
+        where bf.format_type in ('code', 'poincon', 'tableau', 'qrcode')
+        group by bf.balise_id
       )
-      order by bf.created_at
-    ) as formats
-  from public.balise_formats bf
-  where bf.format_type in ('code', 'poincon', 'tableau', 'qrcode')
-  group by bf.balise_id
-)
-update public.balises b
-set formats = coalesce(af.formats, '{}'::jsonb)
-from aggregated_formats af
-where af.balise_id = b.id;
+      update public.balises b
+      set formats = coalesce(af.formats, '{}'::jsonb)
+      from aggregated_formats af
+      where af.balise_id = b.id
+    $sql$;
+  end if;
+end;
+$$;
 
 create index if not exists balises_formats_gin_idx
   on public.balises using gin (formats);
@@ -56,25 +64,8 @@ as $$
     coalesce(b.formats #> '{poincon,payload}', '{}'::jsonb) as payload
   from public.balises b
   where b.id = any(p_balise_ids)
-    and b.formats ? 'poincon'
+    and b.formats ? 'poincon';
 
-  union all
-
-  select
-    bf.id,
-    bf.balise_id,
-    bf.user_id,
-    bf.format_type,
-    bf.payload
-  from public.balise_formats bf
-  where bf.format_type = 'poincon'
-    and bf.balise_id = any(p_balise_ids)
-    and not exists (
-      select 1
-      from public.balises b
-      where b.id = bf.balise_id
-        and b.formats ? 'poincon'
-    );
 $$;
 
 -- Verification queries to run manually after the migration:

@@ -11,6 +11,7 @@
 begin;
 
 alter table public.balises
+  add column if not exists formats jsonb not null default '{}'::jsonb,
   add column if not exists format_types text[] not null default array['code']::text[],
   add column if not exists poincon_rows integer,
   add column if not exists poincon_cols integer,
@@ -29,23 +30,46 @@ comment on column public.balises.tableau_cells is
 comment on column public.balises.qrcode_value is
   'Compact QR code value.';
 
-with source_formats as (
-  select
-    b.id as balise_id,
-    coalesce(
-      nullif(b.formats, '{}'::jsonb),
-      (
-        select jsonb_object_agg(
-          bf.format_type,
-          jsonb_build_object('payload', coalesce(bf.payload, '{}'::jsonb))
-          order by bf.created_at
-        )
+create temp table if not exists balise_compact_source_formats (
+  balise_id uuid primary key,
+  formats jsonb not null
+) on commit drop;
+
+truncate table pg_temp.balise_compact_source_formats;
+
+insert into pg_temp.balise_compact_source_formats (balise_id, formats)
+select b.id, coalesce(nullif(b.formats, '{}'::jsonb), '{}'::jsonb)
+from public.balises b;
+
+do $$
+begin
+  if to_regclass('public.balise_formats') is not null then
+    execute $sql$
+      with legacy_formats as (
+        select
+          bf.balise_id,
+          jsonb_object_agg(
+            bf.format_type,
+            jsonb_build_object('payload', coalesce(bf.payload, '{}'::jsonb))
+            order by bf.created_at
+          ) as formats
         from public.balise_formats bf
-        where bf.balise_id = b.id
-      ),
-      '{}'::jsonb
-    ) as formats
-  from public.balises b
+        where bf.format_type in ('code', 'poincon', 'tableau', 'qrcode')
+        group by bf.balise_id
+      )
+      update pg_temp.balise_compact_source_formats sf
+      set formats = lf.formats
+      from legacy_formats lf
+      where lf.balise_id = sf.balise_id
+        and sf.formats = '{}'::jsonb
+    $sql$;
+  end if;
+end;
+$$;
+
+with source_formats as (
+  select balise_id, formats
+  from pg_temp.balise_compact_source_formats
 ),
 normalized as (
   select
@@ -127,28 +151,8 @@ as $$
     and not (
       'poincon' = any(b.format_types)
       and b.poincon_cells is not null
-    )
-
-  union all
-
-  select
-    bf.id,
-    bf.balise_id,
-    bf.user_id,
-    bf.format_type,
-    bf.payload
-  from public.balise_formats bf
-  where bf.format_type = 'poincon'
-    and bf.balise_id = any(p_balise_ids)
-    and not exists (
-      select 1
-      from public.balises b
-      where b.id = bf.balise_id
-        and (
-          ('poincon' = any(b.format_types) and b.poincon_cells is not null)
-          or b.formats ? 'poincon'
-        )
     );
+
 $$;
 
 -- Verification queries to run manually after the migration:

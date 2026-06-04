@@ -65,6 +65,8 @@ export type GroupPointsConfigRow = {
   tentativePageDefault?: number | string | null;
   tentative_page_assignments?: any;
   tentativePageAssignments?: any;
+  balise_point_overrides?: any;
+  balisePointOverrides?: any;
   tentative_source_assignments?: any;
   tentativeSourceAssignments?: any;
   settings_json?: any;
@@ -85,6 +87,7 @@ export type ParcoursPointsConfig = {
   pointsPerCorrect: number;
   pointsParParcours: number;
   pointsParBalise: number;
+  balisePointOverrides: Record<string, number>;
   tentativePageMode: TentativePageMode;
   tentativePageDefault: number | null;
   tentativePageAssignments: Record<string, number>;
@@ -125,6 +128,7 @@ export type GainBreakdown = {
 
 export type BaliseLite = {
   id: string;
+  originalBaliseId?: string | null;
   code?: string | null;
   points?: number | null;
   numero_balise?: number | null;
@@ -230,6 +234,55 @@ const sanitizeAssignments = (value: any): Record<string, number> => {
   });
 
   return out;
+};
+
+const sanitizeBalisePointOverrides = (value: any): Record<string, Record<string, number>> => {
+  const parsed = safeParseObject(value);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+
+  const out: Record<string, Record<string, number>> = {};
+  Object.entries(parsed).forEach(([parcoursId, rawBalises]) => {
+    const balisesObj = safeParseObject(rawBalises);
+    if (!balisesObj || typeof balisesObj !== "object" || Array.isArray(balisesObj)) return;
+
+    const values: Record<string, number> = {};
+    Object.entries(balisesObj).forEach(([baliseId, points]) => {
+      const n = Number(points);
+      if (baliseId && Number.isFinite(n) && n >= 0) values[baliseId] = n;
+    });
+
+    if (Object.keys(values).length > 0) out[parcoursId] = values;
+  });
+
+  return out;
+};
+
+const readBalisePointOverrides = (row: GroupPointsConfigRow | null) => {
+  if (!row) return {};
+
+  const configObj = safeParseObject(row?.config);
+  const settingsObj = safeParseObject(row?.settings_json);
+  const sourceAssignments = safeParseObject(
+    row?.tentative_source_assignments ?? row?.tentativeSourceAssignments
+  );
+
+  return {
+    ...sanitizeBalisePointOverrides(settingsObj?.balise_point_overrides ?? settingsObj?.balisePointOverrides),
+    ...sanitizeBalisePointOverrides(configObj?.balise_point_overrides ?? configObj?.balisePointOverrides),
+    ...sanitizeBalisePointOverrides(row?.balise_point_overrides ?? row?.balisePointOverrides),
+    ...sanitizeBalisePointOverrides(sourceAssignments?.balise_point_overrides ?? sourceAssignments?.balisePointOverrides),
+  };
+};
+
+const getBalisePoints = (balise: BaliseLite, pointsConfig: ParcoursPointsConfig) => {
+  const ids = [balise.originalBaliseId, balise.id].map((id) => String(id ?? "").trim()).filter(Boolean);
+  for (const id of ids) {
+    const override = pointsConfig.balisePointOverrides[id];
+    if (override != null) return override;
+  }
+
+  const raw = Number(balise.points);
+  return Number.isFinite(raw) ? raw : pointsConfig.pointsParBalise;
 };
 
 const sanitizePointOverrides = (value: any): Record<string, number> => {
@@ -410,6 +463,7 @@ export const getDefaultPointsConfig = (): ParcoursPointsConfig => ({
   pointsPerCorrect: 0,
   pointsParParcours: 0,
   pointsParBalise: 0,
+  balisePointOverrides: {},
   tentativePageMode: "general",
   tentativePageDefault: null,
   tentativePageAssignments: {},
@@ -605,6 +659,7 @@ const resolveGroupPointsConfig = (
     configObj?.tentativePageAssignments ??
     settingsObj?.tentative_page_assignments ??
     settingsObj?.tentativePageAssignments;
+  const allBaliseOverrides = readBalisePointOverrides(row);
 
   const pointsConfig: ParcoursPointsConfig = {
     enabled: true,
@@ -612,6 +667,7 @@ const resolveGroupPointsConfig = (
     pointsPerCorrect: parseNumeric(rawPointsPerCorrect, 0),
     pointsParParcours,
     pointsParBalise: parseNumeric(rawPointsParBalise, 0),
+    balisePointOverrides: parcoursId ? allBaliseOverrides[parcoursId] ?? {} : {},
     tentativePageMode,
     tentativePageDefault:
       tentativePageDefaultRaw == null ? null : Number(tentativePageDefaultRaw) || null,
@@ -723,7 +779,9 @@ export const loadResolvedTentativeConfig = async (
   const resolvedAttemptPage =
     pointsConfig.tentativePageMode === "personnalise"
       ? parcoursId
-        ? pointsConfig.tentativePageAssignments[parcoursId] ?? null
+        ? pointsConfig.tentativePageAssignments[parcoursId] ??
+          pointsConfig.tentativePageDefault ??
+          null
         : null
       : pointsConfig.tentativePageDefault ?? null;
 
@@ -896,9 +954,7 @@ export const computeCurrentDisplayedScore = ({
 
   const balisesPoints = pointsConfig.modes.balises
     ? validatedBalises.reduce((sum, balise) => {
-        const raw = Number(balise.points);
-        const pts = Number.isFinite(raw) ? raw : pointsConfig.pointsParBalise;
-        return sum + pts;
+        return sum + getBalisePoints(balise, pointsConfig);
       }, 0)
     : 0;
 
@@ -994,9 +1050,7 @@ export const computeTentativeGainBreakdown = ({
 
   const balisesPoints = pointsConfig.modes.balises
     ? newlyValidatedBalises.reduce((sum, balise) => {
-        const raw = Number(balise.points);
-        const pts = Number.isFinite(raw) ? raw : pointsConfig.pointsParBalise;
-        return sum + pts;
+        return sum + getBalisePoints(balise, pointsConfig);
       }, 0)
     : 0;
 
@@ -1133,7 +1187,7 @@ export const saveTentativeWithStats = async ({
       code_saisi: alreadyValidated ? null : sanitize(codesSaisis[balise.id]),
       code_attendu: alreadyValidated ? null : sanitize(balise.code),
       correct: alreadyValidated ? true : nextResults[balise.id] === true,
-      points_balise: parseNumeric(balise.points, pointsConfig.pointsParBalise),
+      points_balise: getBalisePoints(balise, pointsConfig),
       already_validated: alreadyValidated,
       newly_validated: newlyValidated,
     };

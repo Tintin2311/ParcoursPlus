@@ -39,6 +39,7 @@ import {
   sanitize,
   saveTentativeWithStats,
 } from "./CalculPointTentatives";
+import { fetchBaliseFormatsByBaliseIdsCompat } from "./baliseFormatsCompat";
 
 type SetPageFn = (page: any) => void;
 
@@ -436,6 +437,47 @@ const parseAssignments = (value: any): Record<string, number> => {
   return out;
 };
 
+const sanitizeBalisePointOverrides = (value: any): Record<string, Record<string, number>> => {
+  const parsed = parseJsonObject(value);
+  const source =
+    parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed.balise_point_overrides ?? parsed.balisePointOverrides ?? parsed
+      : null;
+
+  if (!source || typeof source !== "object" || Array.isArray(source)) return {};
+
+  const out: Record<string, Record<string, number>> = {};
+  Object.entries(source).forEach(([parcoursId, rawBalises]) => {
+    const balises = parseJsonObject(rawBalises);
+    if (!balises || typeof balises !== "object" || Array.isArray(balises)) return;
+
+    const values: Record<string, number> = {};
+    Object.entries(balises).forEach(([baliseId, points]) => {
+      const n = Number(points);
+      if (baliseId && Number.isFinite(n) && n >= 0) values[baliseId] = n;
+    });
+
+    if (Object.keys(values).length > 0) out[parcoursId] = values;
+  });
+
+  return out;
+};
+
+const getBalisePointOverridesFromRow = (row: any): Record<string, Record<string, number>> => {
+  const config = parseJsonObject(row?.config);
+  const settings = parseJsonObject(row?.settings_json);
+  const sourceAssignments = parseJsonObject(
+    row?.tentative_source_assignments ?? row?.tentativeSourceAssignments
+  );
+
+  return {
+    ...sanitizeBalisePointOverrides(settings?.balise_point_overrides ?? settings?.balisePointOverrides),
+    ...sanitizeBalisePointOverrides(config?.balise_point_overrides ?? config?.balisePointOverrides),
+    ...sanitizeBalisePointOverrides(row?.balise_point_overrides ?? row?.balisePointOverrides),
+    ...sanitizeBalisePointOverrides(sourceAssignments?.balise_point_overrides ?? sourceAssignments?.balisePointOverrides),
+  };
+};
+
 const extractTokens = (value: any): string[] => {
   if (value == null) return [];
 
@@ -765,6 +807,7 @@ const mergeConfigWithBestSupabaseRow = async (
   const assignments = parseAssignments(
     bestRow?.tentative_page_assignments ?? bestRow?.tentativePageAssignments
   );
+  const allBalisePointOverrides = getBalisePointOverridesFromRow(bestRow);
   const tableBonus =
     bonusMode === "personnalise"
       ? await loadParcoursTermineBonus(
@@ -790,6 +833,7 @@ const mergeConfigWithBestSupabaseRow = async (
     modes,
     pointsParParcours: resolvedPointsParParcours,
     pointsParBalise,
+    balisePointOverrides: parcoursId ? allBalisePointOverrides[parcoursId] ?? {} : {},
     pointsPerCorrect,
     tentativePageMode,
     tentativePageDefault,
@@ -829,12 +873,27 @@ const normalizeRpcPoinconRows = (data: any): BaliseFormatRow[] => {
     .filter((row) => !!row.balise_id && row.format_type === "poincon");
 };
 
+const normalizeCompatPoinconRows = (data: any): BaliseFormatRow[] => {
+  const rows = Array.isArray(data) ? data : [];
+
+  return rows
+    .map((row: any) => ({
+      id: row?.id ? String(row.id) : undefined,
+      balise_id: String(row?.balise_id ?? "").trim(),
+      format_type: String(row?.format_type ?? "poincon").trim().toLowerCase() as ParcoursFormatType,
+      payload: row?.payload && typeof row.payload === "object" ? row.payload : {},
+    }))
+    .filter((row) => !!row.balise_id && row.format_type === "poincon");
+};
+
 const loadPoinconFormatsForBalises = async (ids: string[]): Promise<BaliseFormatRow[]> => {
   if (!ids.length) return [];
 
   const cleanIds = Array.from(
     new Set(ids.map((id) => String(id ?? "").trim()).filter(Boolean))
   );
+
+  const rowsByBaliseId = new Map<string, BaliseFormatRow>();
 
   const rpcNames = [
     "get_poincon_formats_by_balise_ids",
@@ -854,19 +913,40 @@ const loadPoinconFormatsForBalises = async (ids: string[]): Promise<BaliseFormat
 
       const normalized = normalizeRpcPoinconRows(data);
 
+      normalized.forEach((row) => rowsByBaliseId.set(row.balise_id, row));
+
       console.log(`🧩 RPC ${rpcName} résultat`, {
         idsDemandes: cleanIds,
         lignesBrutes: data,
         lignesNormalisees: normalized,
       });
 
-      if (normalized.length > 0) return normalized;
+      if (rowsByBaliseId.size >= cleanIds.length) return Array.from(rowsByBaliseId.values());
     } catch (e) {
       console.warn(`❌ RPC ${rpcName} exception:`, e);
     }
   }
 
-  return [];
+  const missingIds = cleanIds.filter((id) => !rowsByBaliseId.has(id));
+
+  if (missingIds.length) {
+    try {
+      const compatRows = normalizeCompatPoinconRows(
+        await fetchBaliseFormatsByBaliseIdsCompat(supabase, missingIds)
+      );
+
+      compatRows.forEach((row) => rowsByBaliseId.set(row.balise_id, row));
+
+      console.log("🧩 FORMATS POINÇON CHARGÉS PAR COLONNES COMPACTES", {
+        idsDemandes: missingIds,
+        lignesNormalisees: compatRows,
+      });
+    } catch (e) {
+      console.warn("❌ Lecture compacte des poinçons impossible:", e);
+    }
+  }
+
+  return Array.from(rowsByBaliseId.values());
 };
 
 const EcrireCodeBaliseEleve: React.FC<Props> = ({
@@ -1246,7 +1326,9 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       const fixedAttemptPage =
         fixedPointsConfig.tentativePageMode === "personnalise"
           ? resolvedParcoursId
-            ? fixedPointsConfig.tentativePageAssignments[resolvedParcoursId] ?? null
+            ? fixedPointsConfig.tentativePageAssignments[resolvedParcoursId] ??
+              fixedPointsConfig.tentativePageDefault ??
+              null
             : null
           : fixedPointsConfig.tentativePageDefault ?? baseResolvedConfig.resolvedAttemptPage;
 
@@ -2185,8 +2267,11 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       const result = alreadyValidated ? true : resultats[key];
       const isActive = activeBaliseKey === key;
 
+      const overrideKey = item.originalBaliseId ?? item.id;
       const displayBalisePoints = pointsConfig.modes.balises
-        ? Number.isFinite(Number(item.points))
+        ? pointsConfig.balisePointOverrides?.[overrideKey] != null
+          ? pointsConfig.balisePointOverrides[overrideKey]
+          : Number.isFinite(Number(item.points))
           ? Number(item.points)
           : pointsConfig.pointsParBalise
         : 0;
@@ -2263,8 +2348,11 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       const isMissingSupabaseAnswer = !!item.poinconFormatMissing;
       const gridGap = width < 430 ? 6 : 9;
 
+      const overrideKey = item.originalBaliseId ?? item.id;
       const displayBalisePoints = pointsConfig.modes.balises
-        ? Number.isFinite(Number(item.points))
+        ? pointsConfig.balisePointOverrides?.[overrideKey] != null
+          ? pointsConfig.balisePointOverrides[overrideKey]
+          : Number.isFinite(Number(item.points))
           ? Number(item.points)
           : pointsConfig.pointsParBalise
         : 0;

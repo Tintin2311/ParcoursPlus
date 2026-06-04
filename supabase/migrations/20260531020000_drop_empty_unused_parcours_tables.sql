@@ -14,21 +14,35 @@
 begin;
 
 do $$
+declare
+  has_rows boolean;
 begin
-  if exists (select 1 from public.parcours_bareme_tentatives limit 1) then
-    raise exception 'Refusing to drop public.parcours_bareme_tentatives because it is not empty';
+  if to_regclass('public.parcours_bareme_tentatives') is not null then
+    execute 'select exists (select 1 from public.parcours_bareme_tentatives limit 1)' into has_rows;
+    if has_rows then
+      raise exception 'Refusing to drop public.parcours_bareme_tentatives because it is not empty';
+    end if;
   end if;
 
-  if exists (select 1 from public.parcours_bareme_tentatives_pages limit 1) then
-    raise exception 'Refusing to drop public.parcours_bareme_tentatives_pages because it is not empty';
+  if to_regclass('public.parcours_bareme_tentatives_pages') is not null then
+    execute 'select exists (select 1 from public.parcours_bareme_tentatives_pages limit 1)' into has_rows;
+    if has_rows then
+      raise exception 'Refusing to drop public.parcours_bareme_tentatives_pages because it is not empty';
+    end if;
   end if;
 
-  if exists (select 1 from public.parcours_bonus_personnalises limit 1) then
-    raise exception 'Refusing to drop public.parcours_bonus_personnalises because it is not empty';
+  if to_regclass('public.parcours_bonus_personnalises') is not null then
+    execute 'select exists (select 1 from public.parcours_bonus_personnalises limit 1)' into has_rows;
+    if has_rows then
+      raise exception 'Refusing to drop public.parcours_bonus_personnalises because it is not empty';
+    end if;
   end if;
 
-  if exists (select 1 from public.partages_parcours limit 1) then
-    raise exception 'Refusing to drop public.partages_parcours because it is not empty';
+  if to_regclass('public.partages_parcours') is not null then
+    execute 'select exists (select 1 from public.partages_parcours limit 1)' into has_rows;
+    if has_rows then
+      raise exception 'Refusing to drop public.partages_parcours because it is not empty';
+    end if;
   end if;
 end;
 $$;

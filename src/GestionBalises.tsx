@@ -282,6 +282,7 @@ const MiniPoinconPreview = ({ payload, big = false }: { payload: Record<string, 
   const rows = clampGridSize(payload?.rows, 4);
   const cols = clampGridSize(payload?.cols, 4);
   const dots = payload?.dots || {};
+  const cells = Array.isArray(payload?.cells) ? payload.cells : null;
   const previewRows = Math.min(rows, 4);
   const previewCols = Math.min(cols, 4);
 
@@ -292,7 +293,7 @@ const MiniPoinconPreview = ({ payload, big = false }: { payload: Record<string, 
           <View key={`p-r-${r}`} style={styles.miniGridPreviewRow}>
             {Array.from({ length: previewCols }).map((__, c) => {
               const key = makeCellKey(r, c);
-              const active = !!dots[key];
+              const active = !!dots[key] || !!cells?.[r]?.[c];
               return (
                 <View key={key} style={[styles.miniGridPreviewCell, big && styles.miniGridPreviewCellBig]}>
                   {active ? <View style={[styles.miniPunchDot, big && styles.miniPunchDotBig]} /> : null}

@@ -1,97 +1,7 @@
--- Personnalisation du bonus "parcours terminé" par professeur, classe et parcours.
--- Source de vérité :
--- public.personnaliser_parcours_termines(professeur_id, group_id, parcours_id, points_personnalises)
+-- Personnalisation des points de balises par classe, parcours et balise.
 
-create table if not exists public.personnaliser_parcours_termines (
-  id uuid primary key default gen_random_uuid(),
-  professeur_id uuid not null,
-  group_id uuid not null references public.groups(id) on delete cascade,
-  parcours_id uuid not null references public.parcours(id) on delete cascade,
-  points_personnalises integer not null default 0,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  constraint personnaliser_parcours_termines_points_check check (points_personnalises >= 0),
-  constraint personnaliser_parcours_termines_unique unique (professeur_id, group_id, parcours_id)
-);
-
-create index if not exists personnaliser_parcours_termines_group_idx
-  on public.personnaliser_parcours_termines(group_id);
-
-create index if not exists personnaliser_parcours_termines_parcours_idx
-  on public.personnaliser_parcours_termines(parcours_id);
-
-create index if not exists personnaliser_parcours_termines_professeur_idx
-  on public.personnaliser_parcours_termines(professeur_id);
-
-alter table public.personnaliser_parcours_termines enable row level security;
-
-drop policy if exists "personnaliser_parcours_termines_select" on public.personnaliser_parcours_termines;
-create policy "personnaliser_parcours_termines_select"
-  on public.personnaliser_parcours_termines
-  for select
-  using (true);
-
-drop policy if exists "personnaliser_parcours_termines_insert_own" on public.personnaliser_parcours_termines;
-create policy "personnaliser_parcours_termines_insert_own"
-  on public.personnaliser_parcours_termines
-  for insert
-  with check (auth.uid() = professeur_id);
-
-drop policy if exists "personnaliser_parcours_termines_update_own" on public.personnaliser_parcours_termines;
-create policy "personnaliser_parcours_termines_update_own"
-  on public.personnaliser_parcours_termines
-  for update
-  using (auth.uid() = professeur_id)
-  with check (auth.uid() = professeur_id);
-
-drop policy if exists "personnaliser_parcours_termines_delete_own" on public.personnaliser_parcours_termines;
-create policy "personnaliser_parcours_termines_delete_own"
-  on public.personnaliser_parcours_termines
-  for delete
-  using (auth.uid() = professeur_id);
-
-create or replace function public.set_updated_at_personnaliser_parcours_termines()
-returns trigger
-language plpgsql
-as $$
-begin
-  new.updated_at := now();
-  return new;
-end;
-$$;
-
-drop trigger if exists set_updated_at_personnaliser_parcours_termines
-  on public.personnaliser_parcours_termines;
-
-create trigger set_updated_at_personnaliser_parcours_termines
-before update on public.personnaliser_parcours_termines
-for each row
-execute function public.set_updated_at_personnaliser_parcours_termines();
-
--- Migration des anciennes valeurs stockées dans group_points_configs.
-insert into public.personnaliser_parcours_termines (
-  professeur_id,
-  group_id,
-  parcours_id,
-  points_personnalises
-)
-select
-  gpc.professeur_id,
-  gpc.group_id,
-  e.key::uuid,
-  greatest(0, round((e.value)::numeric)::integer)
-from public.group_points_configs gpc
-cross join lateral jsonb_each_text(
-  coalesce(gpc.tentative_source_assignments, '{}'::jsonb) -> 'parcours_bonus_overrides'
-) e
-where gpc.professeur_id is not null
-  and gpc.group_id is not null
-  and e.key ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-  and e.value ~ '^[0-9]+(\.[0-9]+)?$'
-on conflict (professeur_id, group_id, parcours_id)
-do update set
-  points_personnalises = excluded.points_personnalises,
-  updated_at = now();
+alter table public.group_points_configs
+  add column if not exists balise_point_overrides jsonb not null default '{}'::jsonb;
 
 create or replace function public.recalculer_stats_eleve_parcours(
   p_student_id uuid,
@@ -110,6 +20,7 @@ declare
   v_mode_tentatives boolean := false;
   v_points_par_parcours numeric := 0;
   v_parcours_bonus_mode text := 'general';
+  v_balise_point_overrides jsonb := '{}'::jsonb;
   v_custom_points integer := null;
   v_attempt_page integer := null;
   v_total_balises integer := 0;
@@ -142,6 +53,7 @@ begin
     v_mode_tentatives := coalesce((v_config.modes ->> 'tentatives')::boolean, false);
     v_points_par_parcours := coalesce(v_config.points_par_parcours, 0);
     v_parcours_bonus_mode := coalesce(v_config.parcours_bonus_mode, 'general');
+    v_balise_point_overrides := coalesce(v_config.balise_point_overrides, '{}'::jsonb);
     v_config_professeur_id := v_config.professeur_id;
 
     if v_points_par_parcours > 0 then
@@ -149,7 +61,10 @@ begin
     end if;
 
     if v_config.tentative_page_mode = 'personnalise' then
-      v_attempt_page := nullif(v_config.tentative_page_assignments ->> p_parcours_id::text, '')::integer;
+      v_attempt_page := coalesce(
+        nullif(v_config.tentative_page_assignments ->> p_parcours_id::text, '')::integer,
+        v_config.tentative_page_default
+      );
     else
       v_attempt_page := v_config.tentative_page_default;
     end if;
@@ -211,7 +126,11 @@ begin
   ordered_balises as (
     select
       balise_id,
-      coalesce(points, 0) as points,
+      coalesce(
+        nullif(v_balise_point_overrides -> p_parcours_id::text ->> balise_id::text, '')::numeric,
+        points,
+        0
+      ) as points,
       occurrence_number,
       balise_id::text || '__occ_' || occurrence_number::text || '__pos_' || (ordinality - 1)::text as instance_key
     from matched
@@ -361,78 +280,5 @@ begin
     updated_at = now();
 
   perform public.recalculer_total_points_eleve(p_student_id);
-end;
-$$;
-
-create or replace function public.recalculer_personnalisation_parcours_termines()
-returns trigger
-language plpgsql
-security definer
-set search_path to 'public'
-as $$
-declare
-  v_group_id uuid;
-  v_parcours_id uuid;
-  r record;
-begin
-  if TG_OP = 'DELETE' then
-    v_group_id := old.group_id;
-    v_parcours_id := old.parcours_id;
-  else
-    v_group_id := new.group_id;
-    v_parcours_id := new.parcours_id;
-  end if;
-
-  for r in
-    select distinct s.id as student_id
-    from public.students s
-    where s.group_id = v_group_id
-      and (
-        exists (
-          select 1
-          from public.eleve_parcours_stats eps
-          where eps.student_id = s.id
-            and eps.parcours_id = v_parcours_id
-        )
-        or exists (
-          select 1
-          from public.eleve_parcours_tentatives ept
-          where ept.student_id = s.id
-            and ept.parcours_id = v_parcours_id
-        )
-      )
-  loop
-    perform public.recalculer_stats_eleve_parcours(r.student_id, v_parcours_id);
-  end loop;
-
-  if TG_OP = 'DELETE' then
-    return old;
-  end if;
-
-  return new;
-end;
-$$;
-
-drop trigger if exists recalculer_personnalisation_parcours_termines
-  on public.personnaliser_parcours_termines;
-
-create trigger recalculer_personnalisation_parcours_termines
-after insert or update or delete on public.personnaliser_parcours_termines
-for each row
-execute function public.recalculer_personnalisation_parcours_termines();
-
-do $$
-declare
-  r record;
-begin
-  for r in
-    select distinct student_id, parcours_id
-    from public.eleve_parcours_stats
-    union
-    select distinct student_id, parcours_id
-    from public.eleve_parcours_tentatives
-  loop
-    perform public.recalculer_stats_eleve_parcours(r.student_id, r.parcours_id);
-  end loop;
 end;
 $$;
