@@ -281,15 +281,22 @@ const rowBelongsToTeacher = (row: any, teacherId: string | null) => {
 const uniqueIds = (values: Array<string | null | undefined>) =>
   Array.from(new Set(values.map((value) => String(value ?? "").trim()).filter(Boolean)));
 
+let lastSelectedGroupIdMemory: string | null = null;
+
 const readStoredGroupId = async () => {
-  const asyncValue = await AsyncStorage.getItem(LS_POINTS_SELECTED_GROUP_ID);
-  if (asyncValue) return asyncValue;
+  if (lastSelectedGroupIdMemory) return lastSelectedGroupIdMemory;
 
   if (Platform.OS === "web" && typeof window !== "undefined") {
-    return window.localStorage.getItem(LS_POINTS_SELECTED_GROUP_ID);
+    const webValue = window.localStorage.getItem(LS_POINTS_SELECTED_GROUP_ID);
+    if (webValue) {
+      lastSelectedGroupIdMemory = webValue;
+      return webValue;
+    }
   }
 
-  return null;
+  const asyncValue = await AsyncStorage.getItem(LS_POINTS_SELECTED_GROUP_ID);
+  if (asyncValue) lastSelectedGroupIdMemory = asyncValue;
+  return asyncValue;
 };
 
 export default function PersonnalisationParcoursTermines({ setPage }: Props) {
@@ -778,24 +785,13 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
 
     const { data, error } = await supabase
       .from("group_points_configs")
-      .update(payload)
-      .eq("group_id", groupId)
-      .eq("professeur_id", ownerId)
-      .select("*");
+      .upsert(payload, { onConflict: "group_id,professeur_id" })
+      .select("*")
+      .single();
 
     if (error) throw error;
 
-    if (!data || data.length === 0) {
-      const { error: insertError } = await supabase.from("group_points_configs").insert(payload);
-      if (insertError) throw insertError;
-    }
-
-    updateGroupConfigLocal(groupId, {
-      modes: payload.modes,
-      points_par_parcours: payload.points_par_parcours,
-      parcours_bonus_mode: payload.parcours_bonus_mode,
-      tentative_source_assignments: payload.tentative_source_assignments,
-    });
+    updateGroupConfigLocal(groupId, (data as GroupConfigRow) ?? payload);
   };
 
   const getStoredOverridesForGroup = useCallback(
@@ -922,8 +918,9 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
       await upsertParcoursBonusRows(selectedGroupId, [targetParcours], points);
       updateParcoursLocal(parcoursId, points, String(points));
       setModeByParcours((prev) => ({ ...prev, [parcoursId]: "personnalise" }));
-    } catch (e) {
+    } catch (e: any) {
       console.error("❌ save parcours bonus:", e);
+      Alert.alert("Erreur", e?.message || "Impossible d'enregistrer les points de ce parcours.");
     } finally {
       setSavingId(null);
     }
@@ -932,7 +929,7 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
   const triggerAutoSaveParcours = (parcoursId: string, valueToSave: string) => {
     const key = `parcours:${parcoursId}`;
     if (saveTimeouts[key]) clearTimeout(saveTimeouts[key]);
-    saveTimeouts[key] = setTimeout(() => saveParcoursValue(parcoursId, valueToSave), 700);
+    saveTimeouts[key] = setTimeout(() => saveParcoursValue(parcoursId, valueToSave), 250);
   };
 
   const getGroupIdsForParcours = (parcoursId: string) => {
@@ -994,8 +991,9 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
         });
         return next;
       });
-    } catch (e) {
+    } catch (e: any) {
       console.error("❌ save folder parcours bonus:", e);
+      Alert.alert("Erreur", e?.message || "Impossible d'enregistrer les points de ce dossier.");
     } finally {
       setSavingId(null);
     }
@@ -1041,12 +1039,7 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
 
     if (folderSaveSeqRef.current[folderId] !== nextSeq) return;
 
-    const key = `folder:${folderId}`;
-    if (saveTimeouts[key]) clearTimeout(saveTimeouts[key]);
-    saveTimeouts[key] = setTimeout(async () => {
-      setSavingId(key);
-      await saveManyParcoursValues(childParcours, value);
-    }, 400);
+    await saveManyParcoursValues(childParcours, value);
   };
 
   return (
@@ -1255,6 +1248,8 @@ export default function PersonnalisationParcoursTermines({ setPage }: Props) {
                                 updateParcoursLocal(p.id, points, nextValue);
                                 triggerAutoSaveParcours(p.id, nextValue);
                               }}
+                              onBlur={() => saveParcoursValue(p.id, bonusByParcours[p.id] ?? value)}
+                              onSubmitEditing={() => saveParcoursValue(p.id, bonusByParcours[p.id] ?? value)}
                               keyboardType="numeric"
                               style={styles.inlineInput}
                               placeholder="0"

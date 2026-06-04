@@ -438,7 +438,7 @@ function GroupPickerModal({
   };
 
   const renderGroupOption = (group: GroupRow, depth: number) => {
-    const optionMultiSelect = multiSelect && group.type === "groupe_session";
+    const optionMultiSelect = !!multiSelect;
     const selected = optionMultiSelect
       ? (selectedIds ?? []).includes(group.id)
       : selectedId === group.id;
@@ -632,6 +632,16 @@ function GroupPickerModal({
 
             {pickerScope === "classe" ? (
               <>
+                {multiSelect ? (
+                  <View style={styles.groupPickerActions}>
+                    <TouchableOpacity activeOpacity={0.9} onPress={() => onClear?.()} style={styles.groupPickerActionBtn}>
+                      <Text style={styles.groupPickerActionText}>Tout désélectionner</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity activeOpacity={0.9} onPress={onClose} style={[styles.groupPickerActionBtn, styles.groupPickerCreateBtn]}>
+                      <Text style={[styles.groupPickerActionText, { color: "#FFFFFF" }]}>Valider</Text>
+                    </TouchableOpacity>
+                  </View>
+                ) : null}
                 {rootGroups.map((group) => renderGroupOption(group, 0))}
                 {topFolders.map((folder) => renderFolderTree(folder, 0))}
               </>

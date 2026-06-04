@@ -74,10 +74,12 @@ type GroupConfigRow = {
   modes?: any;
   points_par_parcours?: number | string | null;
   parcours_bonus_mode?: "general" | "personnalise" | string | null;
+  parcours_bonus_overrides?: any;
   tentative_page_mode?: "general" | "personnalise" | string | null;
   tentative_page_default?: number | string | null;
   tentative_page_assignments?: any;
   tentative_source_assignments?: any;
+  balise_point_overrides?: any;
   updated_at?: string | null;
   [key: string]: any;
 };
@@ -204,6 +206,20 @@ const ensureTentativesMode = (modesValue: any) => {
   };
 };
 
+const getSourceAssignments = (current: GroupConfigRow | null) => {
+  const sourceAssignments = parseJsonObject(current?.tentative_source_assignments);
+  return {
+    parcours_bonus_overrides:
+      current?.parcours_bonus_overrides ??
+      sourceAssignments.parcours_bonus_overrides ??
+      {},
+    balise_point_overrides:
+      current?.balise_point_overrides ??
+      sourceAssignments.balise_point_overrides ??
+      {},
+  };
+};
+
 async function resolveTeacherId(): Promise<string | null> {
   try {
     const { data } = await supabase.auth.getUser();
@@ -234,6 +250,7 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
   >(null);
 
   const [existingConfigs, setExistingConfigs] = useState<Record<string, number>>({});
+  const [expandedFolderId, setExpandedFolderId] = useState<string | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -513,10 +530,10 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
     );
   };
 
-  const handleSave = async () => {
+  const saveSelection = async ({ showSuccess = true } = {}) => {
     if (!teacherId || !selectedGroupId) {
-      Alert.alert("Erreur", "Professeur introuvable.");
-      return;
+      if (showSuccess) Alert.alert("Erreur", "Professeur introuvable.");
+      return false;
     }
 
     const targetParcoursIds = selectedParcoursId
@@ -526,23 +543,25 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
       : [];
 
     if (targetParcoursIds.length === 0) {
-      Alert.alert("Erreur", "Choisis un dossier ou un parcours.");
-      return;
+      if (showSuccess) Alert.alert("Erreur", "Choisis un dossier ou un parcours.");
+      return false;
     }
 
     if (!selectedPageNumber) {
-      Alert.alert("Erreur", "Choisis un barème de tentatives.");
-      return;
+      if (showSuccess) Alert.alert("Erreur", "Choisis un barème de tentatives.");
+      return false;
     }
 
     setSaving(true);
 
     try {
       const current = getConfigForGroup(selectedGroupId, groupConfigs);
+      const sourceAssignments = getSourceAssignments(current);
       const nextAssignments = { ...sanitizeAssignments(current?.tentative_page_assignments) };
       targetParcoursIds.forEach((parcoursId) => {
         nextAssignments[parcoursId] = selectedPageNumber;
       });
+
       const payload = {
         group_id: selectedGroupId,
         professeur_id: teacherId,
@@ -554,46 +573,61 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
           current?.tentative_page_default ?? generalPageNumber ?? baremes[0]?.page_number ?? 1,
         tentative_page_assignments: nextAssignments,
         tentative_source_parcours_id: current?.tentative_source_parcours_id ?? null,
-        tentative_source_assignments: current?.tentative_source_assignments ?? {},
+        tentative_source_assignments: sourceAssignments,
+        balise_point_overrides: sourceAssignments.balise_point_overrides,
         updated_at: new Date().toISOString(),
       };
 
       const { data, error } = await supabase
         .from("group_points_configs")
-        .update(payload)
-        .eq("group_id", selectedGroupId)
-        .eq("professeur_id", teacherId)
-        .select("*");
+        .upsert(payload, { onConflict: "group_id,professeur_id" })
+        .select("*")
+        .single();
 
       if (error) throw error;
-
-      if (!data || data.length === 0) {
-        const { error: insertError } = await supabase.from("group_points_configs").insert(payload);
-        if (insertError) throw insertError;
-      }
 
       await Promise.all(
         targetParcoursIds.map((parcoursId) => recalcParcoursForGroup(selectedGroupId, parcoursId))
       );
 
       setExistingConfigs(nextAssignments);
-      updateConfigLocal(selectedGroupId, payload);
+      updateConfigLocal(selectedGroupId, (data as GroupConfigRow) ?? payload);
 
-      Alert.alert(
-        "Barème enregistré",
-        selectedParcoursId
-          ? "Ce parcours utilisera ce barème de tentatives personnalisé."
-          : "Tous les parcours de ce dossier utiliseront ce barème de tentatives."
-      );
+      if (showSuccess) {
+        Alert.alert(
+          "Barème enregistré",
+          selectedParcoursId
+            ? "Ce parcours utilisera ce barème de tentatives personnalisé."
+            : "Tous les parcours de ce dossier utiliseront ce barème de tentatives."
+        );
+      }
+
+      return true;
     } catch (e: any) {
       console.error("Erreur sauvegarde PersonnalisationTentatives :", e);
       Alert.alert(
         "Erreur",
         e?.message || "Impossible d'enregistrer le barème personnalisé."
       );
+      return false;
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleSave = async () => {
+    await saveSelection({ showSuccess: true });
+  };
+
+  const handleBack = async () => {
+    if (saving) return;
+
+    if ((selectedParcoursId || selectedFolderId) && selectedPageNumber) {
+      const saved = await saveSelection({ showSuccess: false });
+      if (!saved) return;
+    }
+
+    setPage("GestionPoints");
   };
 
   const handleReset = async () => {
@@ -603,6 +637,7 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
 
     try {
       const current = getConfigForGroup(selectedGroupId, groupConfigs);
+      const sourceAssignments = getSourceAssignments(current);
       const nextAssignments = sanitizeAssignments(current?.tentative_page_assignments);
       const targetParcoursIds = selectedParcoursId
         ? [selectedParcoursId]
@@ -625,15 +660,16 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
           current?.tentative_page_default ?? generalPageNumber ?? baremes[0]?.page_number ?? 1,
         tentative_page_assignments: nextAssignments,
         tentative_source_parcours_id: current?.tentative_source_parcours_id ?? null,
-        tentative_source_assignments: current?.tentative_source_assignments ?? {},
+        tentative_source_assignments: sourceAssignments,
+        balise_point_overrides: sourceAssignments.balise_point_overrides,
         updated_at: new Date().toISOString(),
       };
 
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from("group_points_configs")
-        .update(payload)
-        .eq("group_id", selectedGroupId)
-        .eq("professeur_id", teacherId);
+        .upsert(payload, { onConflict: "group_id,professeur_id" })
+        .select("*")
+        .single();
 
       if (error) throw error;
 
@@ -648,7 +684,7 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
         });
         return next;
       });
-      updateConfigLocal(selectedGroupId, payload);
+      updateConfigLocal(selectedGroupId, (data as GroupConfigRow) ?? payload);
 
       setSelectedPageNumber(generalPageNumber ?? baremes[0]?.page_number ?? null);
 
@@ -677,13 +713,6 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
       setSelectedFolderId(targetFolderId);
       setSelectedParcoursId(null);
       setSelectedPageNumber(pageNumber);
-      setExistingConfigs((prev) => {
-        const next = { ...prev };
-        targetParcoursIds.forEach((parcoursId) => {
-          next[parcoursId] = pageNumber;
-        });
-        return next;
-      });
     }
 
     if (pagePickerTarget?.type === "parcours") {
@@ -691,10 +720,6 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
 
       setSelectedParcoursId(targetParcoursId);
       setSelectedPageNumber(pageNumber);
-      setExistingConfigs((prev) => ({
-        ...prev,
-        [targetParcoursId]: pageNumber,
-      }));
     }
 
     setShowPagePicker(false);
@@ -717,7 +742,7 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
         <TouchableOpacity
           activeOpacity={0.9}
           style={styles.backBtn}
-          onPress={() => setPage("GestionPoints")}
+          onPress={handleBack}
         >
           <Feather name="arrow-left" size={21} color="#FFFFFF" />
         </TouchableOpacity>
@@ -764,9 +789,10 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
               <Text style={styles.emptyText}>Aucun dossier trouvé pour cette classe.</Text>
             ) : (
               visibleFolders.map((folder) => {
-                const open = selectedFolderId === folder.id;
+                const open = expandedFolderId === folder.id;
                 const folderParcours = getParcoursInFolder(folder.id);
-                const folderPageNumber = open && selectedPageNumber
+                const folderIsSelected = selectedFolderId === folder.id && !selectedParcoursId;
+                const folderPageNumber = folderIsSelected && selectedPageNumber
                   ? selectedPageNumber
                   : getFolderEffectivePageNumber(folder.id);
                 const folderBareme =
@@ -777,7 +803,8 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
                     <TouchableOpacity
                       activeOpacity={0.92}
                       onPress={() => {
-                        setSelectedFolderId((prev) => (prev === folder.id ? null : folder.id));
+                        setExpandedFolderId((prev) => (prev === folder.id ? null : folder.id));
+                        setSelectedFolderId(folder.id);
                         setSelectedParcoursId(null);
                         setSelectedPageNumber(folderPageNumber);
                       }}
@@ -823,6 +850,8 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
                           const active = p.id === selectedParcoursId;
                           const effectivePageNumber =
                             active && selectedPageNumber
+                              ? selectedPageNumber
+                              : folderIsSelected && selectedPageNumber
                               ? selectedPageNumber
                               : getEffectivePageNumber(p.id);
                           const effectiveBareme =

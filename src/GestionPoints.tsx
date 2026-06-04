@@ -131,6 +131,34 @@ const PURPLE_FROM = "#EDE9FE";
 const PURPLE_TO = "#C4B5FD";
 
 /* ======================= Helpers ======================= */
+let lastSelectedGroupIdMemory: string | null = null;
+
+const readStoredSelectedGroupId = async () => {
+  if (lastSelectedGroupIdMemory) return lastSelectedGroupIdMemory;
+
+  if (Platform.OS === "web" && typeof window !== "undefined") {
+    const webValue = window.localStorage.getItem(LS_POINTS_SELECTED_GROUP_ID);
+    if (webValue) {
+      lastSelectedGroupIdMemory = webValue;
+      return webValue;
+    }
+  }
+
+  const asyncValue = await AsyncStorage.getItem(LS_POINTS_SELECTED_GROUP_ID);
+  if (asyncValue) lastSelectedGroupIdMemory = asyncValue;
+  return asyncValue;
+};
+
+const saveStoredSelectedGroupId = async (groupId: string) => {
+  lastSelectedGroupIdMemory = groupId;
+
+  if (Platform.OS === "web" && typeof window !== "undefined") {
+    window.localStorage.setItem(LS_POINTS_SELECTED_GROUP_ID, groupId);
+  }
+
+  await AsyncStorage.setItem(LS_POINTS_SELECTED_GROUP_ID, groupId).catch(() => null);
+};
+
 const defaultModes: ModesActifs = {
   tentatives: false,
   balises: true,
@@ -888,6 +916,7 @@ export default function GestionPoints({ setPage }: Props) {
         .filter((session) => session.classIds.length > 0) as GroupSessionRow[];
 
       const visibleGroupIds = new Set(nextGroups.map((g) => String(g.id)));
+      const storedGroupId = await readStoredSelectedGroupId();
       const bestRowsByGroup = pickBestConfigRows(
         ((configsRes.data ?? []) as any[]).filter(
           (row) =>
@@ -926,7 +955,11 @@ export default function GestionPoints({ setPage }: Props) {
       setPerGroupConfigs(nextConfigs);
       setAllTentativePages(nextPages);
       setSelectedGroupId((prev) =>
-        prev && visibleGroupIds.has(prev) ? prev : nextGroups[0]?.id ?? null
+        prev && visibleGroupIds.has(prev)
+          ? prev
+          : storedGroupId && visibleGroupIds.has(String(storedGroupId))
+          ? String(storedGroupId)
+          : nextGroups[0]?.id ?? null
       );
       setCopyTargetsSelected((prev) =>
         prev
@@ -953,7 +986,7 @@ export default function GestionPoints({ setPage }: Props) {
 
   useEffect(() => {
     if (!selectedGroupId) return;
-    AsyncStorage.setItem(LS_POINTS_SELECTED_GROUP_ID, selectedGroupId).catch(() => null);
+    saveStoredSelectedGroupId(selectedGroupId).catch(() => null);
     const cfg = perGroupConfigs[selectedGroupId];
 
     if (cfg) {
@@ -992,13 +1025,6 @@ export default function GestionPoints({ setPage }: Props) {
 
     return [...classTargets, ...sessionTargets];
   }, [groupSessions, groups, selectedGroupId]);
-
-  useEffect(() => {
-    const availableKeys = new Set(copyTargets.map((target) => `${target.type}:${target.id}`));
-    setCopyTargetsSelected((prev) =>
-      prev.filter((target) => availableKeys.has(`${target.type}:${target.id}`))
-    );
-  }, [copyTargets]);
 
   const selectedCopyTargetIds = useMemo(
     () => copyTargetsSelected.map((target) => `${target.type}:${target.id}`),
@@ -1154,6 +1180,11 @@ export default function GestionPoints({ setPage }: Props) {
     }));
   };
 
+  const handleSelectGroup = useCallback((groupId: string) => {
+    saveStoredSelectedGroupId(groupId).catch(() => null);
+    setSelectedGroupId(groupId);
+  }, []);
+
   const handleSave = useCallback(async () => {
     if (!canSave || !selectedGroupId || !teacherId) return;
 
@@ -1202,16 +1233,11 @@ export default function GestionPoints({ setPage }: Props) {
         updated_at: new Date().toISOString(),
       };
 
-      const { error: deleteError } = await supabase
+      const { error: upsertError } = await supabase
         .from("group_points_configs")
-        .delete()
-        .eq("group_id", selectedGroupId)
-        .eq("professeur_id", teacherId);
+        .upsert(payload, { onConflict: "group_id,professeur_id" });
 
-      if (deleteError) throw deleteError;
-
-      const { error: insertError } = await supabase.from("group_points_configs").insert(payload);
-      if (insertError) throw insertError;
+      if (upsertError) throw upsertError;
 
       setPerGroupConfigs((prev) => ({
         ...prev,
@@ -1293,7 +1319,6 @@ export default function GestionPoints({ setPage }: Props) {
         },
         points_par_parcours: sourceConfig.pointsParParcours ?? 0,
         parcours_bonus_mode: sourceConfig.parcoursBonusMode,
-        parcours_bonus_overrides: sourceConfig.parcoursBonusOverrides ?? {},
         tentative_page_mode: sourceConfig.tentativePageMode,
         tentative_page_default: sourceConfig.tentativePageDefault,
         tentative_page_assignments: sourceConfig.tentativePageAssignments ?? {},
@@ -1315,14 +1340,6 @@ export default function GestionPoints({ setPage }: Props) {
       if (bonusReadError) throw bonusReadError;
 
       for (const groupId of targetGroupIds) {
-        const { error: configDeleteError } = await supabase
-          .from("group_points_configs")
-          .delete()
-          .eq("group_id", groupId)
-          .eq("professeur_id", teacherId);
-
-        if (configDeleteError) throw configDeleteError;
-
         const { error: bonusDeleteError } = await supabase
           .from("personnaliser_parcours_termines")
           .delete()
@@ -1332,11 +1349,11 @@ export default function GestionPoints({ setPage }: Props) {
         if (bonusDeleteError) throw bonusDeleteError;
       }
 
-      const { error: configInsertError } = await supabase
+      const { error: configUpsertError } = await supabase
         .from("group_points_configs")
-        .insert(payloads);
+        .upsert(payloads, { onConflict: "group_id,professeur_id" });
 
-      if (configInsertError) throw configInsertError;
+      if (configUpsertError) throw configUpsertError;
 
       const bonusPayloads = targetGroupIds.flatMap((groupId) =>
         ((parcoursBonusRows ?? []) as any[]).map((row) => ({
@@ -1582,7 +1599,7 @@ export default function GestionPoints({ setPage }: Props) {
                       activeOpacity={0.9}
                       onPress={() => {
                         if (selectedGroupId) {
-                          AsyncStorage.setItem(LS_POINTS_SELECTED_GROUP_ID, selectedGroupId).catch(() => null);
+                          saveStoredSelectedGroupId(selectedGroupId).catch(() => null);
                         }
                         setPage(getPersonalisationPage(selectedMode));
                       }}
@@ -1701,7 +1718,7 @@ export default function GestionPoints({ setPage }: Props) {
         groups={groups}
         selectedGroupId={selectedGroupId}
         onClose={() => setShowGroupPicker(false)}
-        onSelect={setSelectedGroupId}
+        onSelect={handleSelectGroup}
       />
 
       <CopySelectionPickerModal
