@@ -1,8 +1,9 @@
 // src/App.tsx
-import React, { useEffect, useState, Suspense, useCallback } from "react";
+import React, { useEffect, useState, Suspense, useCallback, useRef } from "react";
 import {
   Platform,
   SafeAreaView,
+  StyleSheet,
   View,
   Text,
   ActivityIndicator,
@@ -140,8 +141,73 @@ type EleveType = {
   display_name?: string | null;
   isGroupSession?: boolean | null;
   groupSessionId?: string | null;
+  targetStudentIds?: string[] | null;
   groupIds?: string[] | null;
   groupStudents?: EleveType[] | null;
+};
+
+const CHRONO_PAUSE_KEY_PREFIX = "chronoResultPauseUntil:";
+
+const formatChronometre = (ms: number) => {
+  const totalSeconds = Math.floor(Math.max(0, ms) / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+};
+
+const getTargetStudentIds = (eleve?: EleveType | null) => {
+  const ids = [
+    ...(Array.isArray(eleve?.targetStudentIds) ? eleve?.targetStudentIds ?? [] : []),
+    ...(Array.isArray(eleve?.groupStudents)
+      ? eleve?.groupStudents?.map((student) => student?.id ?? student?.uuid).filter(Boolean) ?? []
+      : []),
+    eleve?.id,
+    eleve?.uuid,
+  ];
+
+  return Array.from(new Set(ids.filter(Boolean).map(String)));
+};
+
+const parseChronoPauseKey = (key: string) => {
+  const [prefix, studentId, parcoursId] = key.split(":");
+  if (`${prefix}:` !== CHRONO_PAUSE_KEY_PREFIX || !studentId || !parcoursId) return null;
+  return { studentId, parcoursId };
+};
+
+const readChronoPauseKeys = async () => {
+  const keys = new Set<string>();
+
+  try {
+    const asyncKeys = await AsyncStorage.getAllKeys();
+    asyncKeys
+      .filter((key) => key.startsWith(CHRONO_PAUSE_KEY_PREFIX))
+      .forEach((key) => keys.add(key));
+  } catch {}
+
+  try {
+    if (Platform.OS === "web" && typeof window !== "undefined" && window.localStorage) {
+      Object.keys(window.localStorage)
+        .filter((key) => key.startsWith(CHRONO_PAUSE_KEY_PREFIX))
+        .forEach((key) => keys.add(key));
+    }
+  } catch {}
+
+  return Array.from(keys);
+};
+
+const readChronoPauseValue = async (key: string) => {
+  try {
+    const value = await AsyncStorage.getItem(key);
+    if (value != null) return value;
+  } catch {}
+
+  try {
+    if (Platform.OS === "web" && typeof window !== "undefined" && window.localStorage) {
+      return window.localStorage.getItem(key);
+    }
+  } catch {}
+
+  return null;
 };
 
 type Professeur = {
@@ -450,6 +516,14 @@ const [parcoursId, setParcoursId] = useState<string | null>(null);
   const [resultatsEleves] = useState<any[]>([]);
   const [parcoursTerminesEleves] = useState<any[]>([]);
   const [, setAffichageResultat] = useState(false);
+  const [globalPause, setGlobalPause] = useState<{
+    key: string;
+    studentId: string;
+    parcoursId: string;
+    untilMs: number;
+  } | null>(null);
+  const [globalPauseRemainingMs, setGlobalPauseRemainingMs] = useState(0);
+  const globalPauseResumingRef = useRef(false);
 
   const [newProfPrenom, setNewProfPrenom] = useState("");
   const [newProfName, setNewProfName] = useState("");
@@ -596,6 +670,41 @@ const [parcoursId, setParcoursId] = useState<string | null>(null);
   await storage.set(LS_LAST_MODE, "accueil");
 }, []);
 
+  const resumeGlobalPausedChrono = useCallback(
+    async (pause: { key: string; studentId: string; parcoursId: string } | null) => {
+      if (!pause || globalPauseResumingRef.current) return;
+
+      globalPauseResumingRef.current = true;
+      try {
+        const startedAt = new Date().toISOString();
+
+        await AsyncStorage.removeItem(pause.key).catch(() => null);
+        if (Platform.OS === "web" && typeof window !== "undefined" && window.localStorage) {
+          try {
+            window.localStorage.removeItem(pause.key);
+          } catch {}
+        }
+
+        await supabase
+          .from("eleve_parcours_stats")
+          .update({
+            chronometre_started_at: startedAt,
+            chronometre_running: true,
+            updated_at: startedAt,
+          })
+          .eq("student_id", pause.studentId)
+          .eq("parcours_id", pause.parcoursId);
+
+        setGlobalPause(null);
+        setGlobalPauseRemainingMs(0);
+        await handleDeconnexion();
+      } finally {
+        globalPauseResumingRef.current = false;
+      }
+    },
+    [handleDeconnexion]
+  );
+
   const handleSelectGroupForStudents = (group: SelectedGroup) => {
     setSelectedGroup(group);
     setNormalizedPage("GestionEleves");
@@ -709,7 +818,7 @@ const [parcoursId, setParcoursId] = useState<string | null>(null);
               setProfesseur(null);
               setModeConnexion("eleve");
               setPage(
-                lastElevePage && ALL_KNOWN_PAGES.has(lastElevePage)
+                lastElevePage && ALL_KNOWN_PAGES.has(lastElevePage) && lastElevePage !== "EcrireCodeBaliseEleve"
                   ? lastElevePage
                   : "AccueilEleve"
               );
@@ -766,8 +875,101 @@ const [parcoursId, setParcoursId] = useState<string | null>(null);
   }, [page, professeur]);
 
   useEffect(() => {
-    if (eleve) storage.set(LS_LAST_PAGE_ELEVE, normalizePage(page));
+    if (eleve) {
+      storage.set(
+        LS_LAST_PAGE_ELEVE,
+        page === "EcrireCodeBaliseEleve" ? "AccueilEleve" : normalizePage(page)
+      );
+    }
   }, [page, eleve]);
+
+  useEffect(() => {
+    if (!eleve || modeConnexion !== "eleve") {
+      setGlobalPause(null);
+      setGlobalPauseRemainingMs(0);
+      return;
+    }
+
+    let alive = true;
+    const studentIds = getTargetStudentIds(eleve);
+
+    const syncPause = async () => {
+      const keys = await readChronoPauseKeys();
+      if (!alive) return;
+
+      let nextPause: {
+        key: string;
+        studentId: string;
+        parcoursId: string;
+        untilMs: number;
+      } | null = null;
+      let expiredPause: {
+        key: string;
+        studentId: string;
+        parcoursId: string;
+      } | null = null;
+
+      for (const key of keys) {
+        const parsed = parseChronoPauseKey(key);
+        if (!parsed) continue;
+        if (studentIds.length > 0 && !studentIds.includes(parsed.studentId)) continue;
+
+        const raw = await readChronoPauseValue(key);
+        const untilMs = Number(raw ?? 0);
+        if (!Number.isFinite(untilMs) || untilMs <= 0) continue;
+
+        if (untilMs <= Date.now()) {
+          expiredPause = { key, ...parsed };
+          continue;
+        }
+
+        if (!nextPause || untilMs > nextPause.untilMs) {
+          nextPause = { key, ...parsed, untilMs };
+        }
+      }
+
+      if (!alive) return;
+
+      if (!nextPause && expiredPause) {
+        await resumeGlobalPausedChrono(expiredPause);
+        return;
+      }
+
+      setGlobalPause(nextPause);
+      setGlobalPauseRemainingMs(nextPause ? Math.max(0, nextPause.untilMs - Date.now()) : 0);
+    };
+
+    syncPause();
+    const syncTimer = setInterval(syncPause, 1000);
+
+    if (Platform.OS === "web" && typeof window !== "undefined") {
+      window.addEventListener("chronoPauseUpdated", syncPause);
+    }
+
+    return () => {
+      alive = false;
+      clearInterval(syncTimer);
+      if (Platform.OS === "web" && typeof window !== "undefined") {
+        window.removeEventListener("chronoPauseUpdated", syncPause);
+      }
+    };
+  }, [eleve, modeConnexion, page, resumeGlobalPausedChrono]);
+
+  useEffect(() => {
+    if (!globalPause) return;
+
+    const timer = setInterval(() => {
+      const remaining = Math.max(0, globalPause.untilMs - Date.now());
+      setGlobalPauseRemainingMs(remaining);
+
+      if (remaining <= 0) {
+        clearInterval(timer);
+        resumeGlobalPausedChrono(globalPause);
+      }
+    }, 500);
+
+    return () => clearInterval(timer);
+  }, [globalPause, resumeGlobalPausedChrono]);
 
   useEffect(() => {
     const fetchStudentParcours = async () => {
@@ -1178,6 +1380,7 @@ const [parcoursId, setParcoursId] = useState<string | null>(null);
                       setPage={goStr}
                       eleveConnecte={eleve}
                       handleDeconnexion={handleDeconnexion}
+                      setParcoursActif={setParcoursActif}
                     />
                   )}
 
@@ -1257,6 +1460,14 @@ const [parcoursId, setParcoursId] = useState<string | null>(null);
                     showBottomBar={!!professeur}
                   />
                 )}
+
+              {!!eleve && modeConnexion === "eleve" && !!globalPause && globalPauseRemainingMs > 0 && (
+                <View pointerEvents="none" style={styles.globalPauseTimer}>
+                  <Text style={styles.globalPauseTimerText}>
+                    {formatChronometre(globalPauseRemainingMs)}
+                  </Text>
+                </View>
+              )}
             </View>
           </Suspense>
         )}
@@ -1264,3 +1475,24 @@ const [parcoursId, setParcoursId] = useState<string | null>(null);
     </GestureHandlerRootView>
   );
 }
+
+const styles = StyleSheet.create({
+  globalPauseTimer: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 1000,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "transparent",
+  },
+  globalPauseTimerText: {
+    color: "rgba(55,65,81,0.24)",
+    fontSize: 150,
+    lineHeight: 166,
+    fontWeight: "900",
+    textAlign: "center",
+  },
+});

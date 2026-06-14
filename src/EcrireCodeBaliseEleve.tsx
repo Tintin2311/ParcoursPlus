@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   ActivityIndicator,
-  Alert,
   FlatList,
   ImageBackground,
   Keyboard,
@@ -115,6 +114,13 @@ type PoinconDebugRow = {
   payload?: any;
 };
 
+type ChronometreState = {
+  ms: number;
+  startedAt: string | null;
+  running: boolean;
+  finished: boolean;
+};
+
 type BaliseAffichee = BaliseRow & {
   ordre: number;
   instanceKey: string;
@@ -141,8 +147,13 @@ const C_BORDER = "rgba(31,91,134,0.14)";
 const C_BLUE_DARK = "#1F5B86";
 const C_GOLD = "#F59E0B";
 const C_GREEN = "#16A34A";
+const C_ORANGE = "#F97316";
 const C_RED = "#DC2626";
 const C_RED_FLASH = "#FF1F1F";
+const CHRONO_ERROR_REVIEW_MS = 30_000;
+
+const getChronoPauseStorageKey = (studentId: string, parcoursId: string) =>
+  `chronoResultPauseUntil:${studentId}:${parcoursId}`;
 
 const webScrollStyle =
   Platform.OS === "web"
@@ -180,6 +191,24 @@ const formatPointsLabel = (value: number | string | null | undefined) => {
 };
 
 const getDisplayName = (row: any) => String(row?.nom ?? row?.name ?? "Parcours");
+
+const parseChronometreMs = (value: any) => {
+  const n = Number(value ?? 0);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+};
+
+const formatChronometre = (ms: number) => {
+  const totalSeconds = Math.floor(Math.max(0, ms) / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+};
 
 function getStudentId(eleve?: EleveConnecte | null) {
   return eleve?.id ?? eleve?.uuid ?? null;
@@ -860,6 +889,38 @@ const loadStatParcoursTermine = async (
   return data?.parcours_termine === true;
 };
 
+const loadChronometreMs = async (
+  studentId: string | null,
+  parcoursId: string | undefined
+): Promise<ChronometreState> => {
+  if (!studentId || !parcoursId) return { ms: 0, startedAt: null, running: false, finished: false };
+
+  const { data, error } = await supabase
+    .from("eleve_parcours_stats")
+    .select("chronometre_ms,chronometre_started_at,chronometre_running,chronometre_finished")
+    .eq("student_id", studentId)
+    .eq("parcours_id", parcoursId)
+    .maybeSingle();
+
+  if (error) {
+    console.warn("Lecture chronomètre impossible :", error);
+    return { ms: 0, startedAt: null, running: false, finished: false };
+  }
+
+  const baseMs = parseChronometreMs(data?.chronometre_ms);
+  const startedAt = data?.chronometre_started_at ? String(data.chronometre_started_at) : null;
+  const running = data?.chronometre_running === true && !!startedAt;
+  const startedMs = startedAt ? new Date(startedAt).getTime() : 0;
+  const elapsedSinceStart = running && Number.isFinite(startedMs) ? Date.now() - startedMs : 0;
+
+  return {
+    ms: baseMs + Math.max(0, elapsedSinceStart),
+    startedAt,
+    running,
+    finished: data?.chronometre_finished === true,
+  };
+};
+
 const normalizeRpcPoinconRows = (data: any): BaliseFormatRow[] => {
   const rows = Array.isArray(data) ? data : [];
 
@@ -966,7 +1027,10 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   const scrollYRef = useRef(0);
   const scrollViewHeightRef = useRef(0);
   const focusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scrollTimerRefs = useRef<Array<ReturnType<typeof setTimeout>>>([]);
   const autoFocusLockRef = useRef<string | null>(null);
+  const chronometreStartedAtRef = useRef<number | null>(null);
+  const chronometreBaseMsRef = useRef(0);
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -974,6 +1038,14 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
 
   const [confirmLogoutVisible, setConfirmLogoutVisible] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [confirmChronometreVisible, setConfirmChronometreVisible] = useState(false);
+  const [confirmVerifyVisible, setConfirmVerifyVisible] = useState(false);
+  const [appMessage, setAppMessage] = useState<{
+    title: string;
+    message: string;
+    tone?: "info" | "success" | "warning" | "error";
+  } | null>(null);
+  const [chronometreCountdown, setChronometreCountdown] = useState<string | null>(null);
 
   const [studentId, setStudentId] = useState<string | null>(getTargetStudentIds(eleveConnecte)[0] ?? getStudentId(eleveConnecte));
   const [studentGroupId, setStudentGroupId] = useState<string | null>(getTargetGroupIds(eleveConnecte)[0] ?? eleveConnecte?.group_id ?? null);
@@ -994,6 +1066,14 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   const [savedPointsTotal, setSavedPointsTotal] = useState(0);
   const [lastPointsGain, setLastPointsGain] = useState(0);
   const [parcoursTermineDb, setParcoursTermineDb] = useState(false);
+  const [chronometreMs, setChronometreMs] = useState(0);
+  const [chronometreRunning, setChronometreRunning] = useState(false);
+  const [chronometreSaving, setChronometreSaving] = useState(false);
+  const [chronometreFinished, setChronometreFinished] = useState(false);
+  const [resultPauseUntilMs, setResultPauseUntilMs] = useState<number | null>(null);
+  const [resultPauseRemainingMs, setResultPauseRemainingMs] = useState(0);
+  const [errorReviewUntilMs, setErrorReviewUntilMs] = useState<number | null>(null);
+  const [errorReviewRemainingMs, setErrorReviewRemainingMs] = useState(0);
 
   const [pointsConfig, setPointsConfig] = useState<ParcoursPointsConfig>(getDefaultPointsConfig());
   const [tentativeBaremeRows, setTentativeBaremeRows] = useState<ParcoursBaremeTentativeRow[]>([]);
@@ -1036,6 +1116,137 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     const total = width - horizontalPadding - scoreWidth - gap * 2;
     return Math.max(isPoinconParcours ? 76 : 92, Math.floor(total / 2));
   }, [isPoinconParcours, width]);
+
+  const chronometreLabel = useMemo(() => formatChronometre(chronometreMs), [chronometreMs]);
+  const chronometrePaused = chronometreMs > 0 && !chronometreRunning;
+  const errorReviewLabel = useMemo(() => String(Math.ceil(Math.max(0, errorReviewRemainingMs) / 1000)), [errorReviewRemainingMs]);
+
+  const getCurrentChronometreMs = useCallback(() => {
+    if (!chronometreRunning || chronometreStartedAtRef.current == null) {
+      return chronometreBaseMsRef.current;
+    }
+
+    return chronometreBaseMsRef.current + Date.now() - chronometreStartedAtRef.current;
+  }, [chronometreRunning]);
+
+  const getChronometreStudentIds = useCallback(() => {
+    return Array.from(
+      new Set(
+        [
+          ...(eleveConnecte?.isGroupSession ? getTargetStudentIds(eleveConnecte) : []),
+          studentId,
+        ]
+          .filter(Boolean)
+          .map(String)
+      )
+    );
+  }, [eleveConnecte, studentId]);
+
+  const saveChronometre = useCallback(
+    async (nextMs: number, running = false, startedAt: string | null = null, finished = false) => {
+      if (!parcoursActif?.id) return;
+
+      const targetStudentIds = getChronometreStudentIds();
+      if (targetStudentIds.length === 0) return;
+
+      const cleanMs = parseChronometreMs(nextMs);
+      const now = new Date().toISOString();
+      const chronoPayload = {
+        chronometre_ms: cleanMs,
+        chronometre_started_at: startedAt,
+        chronometre_running: running,
+        chronometre_finished: finished,
+        updated_at: now,
+      };
+      setChronometreSaving(true);
+
+      try {
+        await Promise.all(
+          targetStudentIds.map(async (targetStudentId) => {
+            const { data, error } = await supabase
+              .from("eleve_parcours_stats")
+              .update(chronoPayload)
+              .eq("student_id", targetStudentId)
+              .eq("parcours_id", parcoursActif.id)
+              .select("student_id")
+              .maybeSingle();
+
+            if (error) {
+              console.warn("Sauvegarde chronomètre impossible :", error);
+              return;
+            }
+
+            if (data) return;
+
+            const { error: insertError } = await supabase.from("eleve_parcours_stats").upsert(
+              {
+                student_id: targetStudentId,
+                parcours_id: parcoursActif.id,
+                best_score: targetStudentId === String(studentId) ? savedScore : 0,
+                last_score: targetStudentId === String(studentId) ? savedScore : 0,
+                total_balises: balises.length,
+                tentatives_count: targetStudentId === String(studentId) ? tentativesCount : 0,
+                last_tentative_at: null,
+                best_points: targetStudentId === String(studentId) ? savedPointsTotal : 0,
+                last_points: targetStudentId === String(studentId) ? savedPointsTotal : 0,
+                parcours_termine: targetStudentId === String(studentId) ? isCompletedEffective : false,
+                ...chronoPayload,
+              },
+              { onConflict: "student_id,parcours_id" }
+            );
+
+            if (insertError) {
+              console.warn("Création stats chronomètre impossible :", insertError);
+            }
+          })
+        );
+      } finally {
+        setChronometreSaving(false);
+      }
+    },
+    [
+      balises.length,
+      getChronometreStudentIds,
+      isCompletedEffective,
+      parcoursActif?.id,
+      savedPointsTotal,
+      savedScore,
+      studentId,
+      tentativesCount,
+    ]
+  );
+
+  const toggleChronometre = useCallback(() => {
+    if (!parcoursActif?.id || loading || chronometreSaving || chronometreCountdown) return;
+    if (chronometreMs > 0 || chronometreRunning || chronometreFinished) return;
+
+    setConfirmChronometreVisible(true);
+  }, [
+    chronometreCountdown,
+    chronometreFinished,
+    chronometreMs,
+    chronometreRunning,
+    chronometreSaving,
+    loading,
+    parcoursActif?.id,
+  ]);
+
+  useEffect(() => {
+    if (!chronometreRunning) return;
+
+    const timer = setInterval(() => {
+      setChronometreMs(getCurrentChronometreMs());
+    }, 500);
+
+    return () => clearInterval(timer);
+  }, [chronometreRunning, getCurrentChronometreMs]);
+
+  useEffect(() => {
+    return () => {
+      if (!chronometreRunning) return;
+      saveChronometre(getCurrentChronometreMs(), true, chronometreStartedAtRef.current ? new Date(chronometreStartedAtRef.current).toISOString() : null);
+    };
+  }, [chronometreRunning, getCurrentChronometreMs, saveChronometre]);
 
   useEffect(() => {
     if (!isPoinconParcours) return;
@@ -1128,37 +1339,36 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     []
   );
 
-  const scrollBaliseIntoComfortZone = useCallback(
+  const scrollBaliseToTopPosition = useCallback(
     (baliseKey: string, animated = true) => {
       const rowY = rowYRefs.current[baliseKey];
       if (typeof rowY !== "number") return;
 
-      const rowHeight = rowHeightRefs.current[baliseKey] ?? 86;
-      const viewportHeight = scrollViewHeightRef.current || height;
-      const currentY = scrollYRef.current || 0;
-
-      const topComfort = 12;
-      const bottomComfort = Platform.OS === "web" ? 128 : 190;
-
-      const visibleTop = currentY + topComfort;
-      const visibleBottom = currentY + viewportHeight - bottomComfort;
-      const rowBottom = rowY + rowHeight;
-
-      let targetY: number | null = null;
-
-      if (rowY < visibleTop) {
-        targetY = Math.max(0, rowY - topComfort);
-      } else if (rowBottom > visibleBottom) {
-        targetY = Math.max(0, rowBottom - viewportHeight + bottomComfort);
-      }
-
-      if (targetY == null) return;
+      const topOffset = isCompact ? 6 : 10;
+      const targetY = Math.max(0, rowY - topOffset);
 
       requestAnimationFrame(() => {
         scrollRef.current?.scrollTo({ y: targetY, animated });
       });
     },
-    [height]
+    [isCompact]
+  );
+
+  const scheduleBaliseScroll = useCallback(
+    (baliseKey: string) => {
+      scrollTimerRefs.current.forEach((timer) => clearTimeout(timer));
+      scrollTimerRefs.current = [];
+
+      scrollBaliseToTopPosition(baliseKey, true);
+
+      [80, 220, 420].forEach((delay) => {
+        const timer = setTimeout(() => {
+          scrollBaliseToTopPosition(baliseKey, true);
+        }, delay);
+        scrollTimerRefs.current.push(timer);
+      });
+    },
+    [scrollBaliseToTopPosition]
   );
 
   const focusBalise = useCallback(
@@ -1168,7 +1378,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       setActiveBaliseKey(key);
 
       if (balise.poinconFormat) {
-        if (shouldScroll) scrollBaliseIntoComfortZone(key, true);
+        if (shouldScroll) scheduleBaliseScroll(key);
         Keyboard.dismiss();
         return;
       }
@@ -1179,21 +1389,27 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       setSelectionForBalise(key, currentValue, expectedLength, forceSelectAll);
 
       if (shouldScroll) {
-        scrollBaliseIntoComfortZone(key, true);
+        scheduleBaliseScroll(key);
       }
 
       if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
 
       if (Platform.OS === "web") {
         inputRefs.current[key]?.focus?.();
+        if (shouldScroll) {
+          requestAnimationFrame(() => {
+            scheduleBaliseScroll(key);
+          });
+        }
         return;
       }
 
       focusTimerRef.current = setTimeout(() => {
         inputRefs.current[key]?.focus?.();
+        if (shouldScroll) scheduleBaliseScroll(key);
       }, 70);
     },
-    [codesSaisis, getExpectedLength, scrollBaliseIntoComfortZone, setSelectionForBalise]
+    [codesSaisis, getExpectedLength, scheduleBaliseScroll, setSelectionForBalise]
   );
 
   const focusNextBalise = useCallback(
@@ -1214,16 +1430,42 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   useEffect(() => {
     return () => {
       if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
+      scrollTimerRefs.current.forEach((timer) => clearTimeout(timer));
+      scrollTimerRefs.current = [];
     };
   }, []);
 
-  const handleLogout = useCallback(async () => {
+  const handleLogout = useCallback(async (resumePausedChrono = true) => {
     if (loggingOut) return;
 
     try {
       setLoggingOut(true);
       Keyboard.dismiss();
       setConfirmLogoutVisible(false);
+
+      if (
+        resumePausedChrono &&
+        resultPauseUntilMs &&
+        !errorReviewUntilMs &&
+        !chronometreFinished &&
+        parcoursActif?.id
+      ) {
+        const startedAt = new Date().toISOString();
+        const baseMs = getCurrentChronometreMs();
+
+        chronometreBaseMsRef.current = baseMs;
+        chronometreStartedAtRef.current = new Date(startedAt).getTime();
+        setChronometreMs(baseMs);
+        setChronometreRunning(true);
+        setResultPauseUntilMs(null);
+        setResultPauseRemainingMs(0);
+
+        if (studentId) {
+          await AsyncStorage.removeItem(getChronoPauseStorageKey(studentId, parcoursActif.id)).catch(() => null);
+        }
+
+        await saveChronometre(baseMs, true, startedAt, false);
+      }
 
       await AsyncStorage.multiRemove([
         "derniereConnexionMode",
@@ -1251,7 +1493,133 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     } finally {
       setLoggingOut(false);
     }
-  }, [handleDeconnexion, loggingOut, setPage]);
+  }, [
+    chronometreFinished,
+    errorReviewUntilMs,
+    getCurrentChronometreMs,
+    handleDeconnexion,
+    loggingOut,
+    parcoursActif?.id,
+    resultPauseUntilMs,
+    saveChronometre,
+    setPage,
+    studentId,
+  ]);
+
+  const resumeChronometreAndLogout = useCallback(async () => {
+    if (!parcoursActif?.id || chronometreFinished) return;
+
+    const startedAt = new Date().toISOString();
+    const baseMs = getCurrentChronometreMs();
+
+    chronometreBaseMsRef.current = baseMs;
+    chronometreStartedAtRef.current = new Date(startedAt).getTime();
+    setChronometreMs(baseMs);
+    setChronometreRunning(true);
+    setResultPauseUntilMs(null);
+    setResultPauseRemainingMs(0);
+    setErrorReviewUntilMs(null);
+    setErrorReviewRemainingMs(0);
+
+    if (studentId) {
+      await AsyncStorage.removeItem(getChronoPauseStorageKey(studentId, parcoursActif.id)).catch(() => null);
+    }
+
+    await saveChronometre(baseMs, true, startedAt, false);
+    await handleLogout(false);
+  }, [chronometreFinished, getCurrentChronometreMs, handleLogout, parcoursActif?.id, saveChronometre, studentId]);
+
+  useEffect(() => {
+    if (!resultPauseUntilMs || errorReviewUntilMs || chronometreFinished) return;
+
+    const timer = setInterval(() => {
+      const remaining = Math.max(0, resultPauseUntilMs - Date.now());
+      setResultPauseRemainingMs(remaining);
+
+      if (remaining <= 0) {
+        clearInterval(timer);
+        resumeChronometreAndLogout();
+      }
+    }, 500);
+
+    return () => clearInterval(timer);
+  }, [chronometreFinished, errorReviewUntilMs, resultPauseUntilMs, resumeChronometreAndLogout]);
+
+  useEffect(() => {
+    if (!errorReviewUntilMs || chronometreFinished) return;
+
+    const timer = setInterval(() => {
+      const remaining = Math.max(0, errorReviewUntilMs - Date.now());
+      setErrorReviewRemainingMs(remaining);
+
+      if (remaining <= 0) {
+        clearInterval(timer);
+        resumeChronometreAndLogout();
+      }
+    }, 500);
+
+    return () => clearInterval(timer);
+  }, [chronometreFinished, errorReviewUntilMs, resumeChronometreAndLogout]);
+
+  useEffect(() => {
+    if (
+      loading ||
+      chronometreFinished ||
+      chronometreRunning ||
+      resultPauseUntilMs ||
+      errorReviewUntilMs ||
+      chronometreMs <= 0 ||
+      !parcoursActif?.id
+    ) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      resumeChronometreAndLogout();
+    }, 250);
+
+    return () => clearTimeout(timer);
+  }, [
+    chronometreFinished,
+    chronometreMs,
+    chronometreRunning,
+    errorReviewUntilMs,
+    loading,
+    parcoursActif?.id,
+    resultPauseUntilMs,
+    resumeChronometreAndLogout,
+  ]);
+
+  const startChronometreFlow = useCallback(async () => {
+    if (!parcoursActif?.id || chronometreSaving || chronometreCountdown) return;
+
+    setConfirmChronometreVisible(false);
+
+    const steps = ["3", "2", "1", "GO !"];
+    for (const step of steps) {
+      setChronometreCountdown(step);
+      await new Promise((resolve) => setTimeout(resolve, step === "GO !" ? 650 : 850));
+    }
+
+    const startedAt = new Date().toISOString();
+    const baseMs = parseChronometreMs(chronometreMs);
+
+    chronometreBaseMsRef.current = baseMs;
+    chronometreStartedAtRef.current = new Date(startedAt).getTime();
+    setChronometreMs(baseMs);
+    setChronometreRunning(true);
+    setChronometreCountdown(null);
+
+    await saveChronometre(baseMs, true, startedAt);
+    await handleLogout();
+  }, [
+    chronometreCountdown,
+    chronometreMs,
+    chronometreSaving,
+    handleLogout,
+    parcoursActif?.id,
+    saveChronometre,
+  ]);
 
   const handleRetour = useCallback(() => {
     Keyboard.dismiss();
@@ -1363,9 +1731,10 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         parcoursTermine: orderedBalises.length > 0 && normalizedValidatedIds.length >= orderedBalises.length,
       };
 
-      const [attempts, dbTermine] = await Promise.all([
+      const [attempts, dbTermine, savedChronometre] = await Promise.all([
         loadAttemptsHistory(resolvedStudentId, resolvedParcoursId),
         loadStatParcoursTermine(resolvedStudentId, resolvedParcoursId),
+        loadChronometreMs(resolvedStudentId, resolvedParcoursId),
       ]);
 
       const effectiveTermine =
@@ -1409,6 +1778,28 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       setSavedPointsTotal(correctedTotal);
       setLastPointsGain(progressRaw.lastPointsGain);
       setParcoursTermineDb(effectiveTermine);
+      chronometreStartedAtRef.current = savedChronometre.running && savedChronometre.startedAt ? new Date(savedChronometre.startedAt).getTime() : null;
+      chronometreBaseMsRef.current = savedChronometre.running
+        ? Math.max(0, savedChronometre.ms - (Date.now() - (chronometreStartedAtRef.current ?? Date.now())))
+        : savedChronometre.ms;
+      setChronometreMs(savedChronometre.ms);
+      setChronometreRunning(savedChronometre.running);
+      setChronometreFinished(savedChronometre.finished);
+
+      if (resolvedStudentId && resolvedParcoursId) {
+        const pauseRaw = await AsyncStorage.getItem(
+          getChronoPauseStorageKey(resolvedStudentId, resolvedParcoursId)
+        ).catch(() => null);
+        const pauseUntil = Number(pauseRaw ?? 0);
+
+        if (Number.isFinite(pauseUntil) && pauseUntil > Date.now()) {
+          setResultPauseUntilMs(pauseUntil);
+          setResultPauseRemainingMs(pauseUntil - Date.now());
+        } else {
+          setResultPauseUntilMs(null);
+          setResultPauseRemainingMs(0);
+        }
+      }
 
       setPointsConfig(fixedPointsConfig);
       setResolvedTentativePage(fixedAttemptPage);
@@ -1441,6 +1832,19 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     setPoinconsSaisis({});
     setResultats({});
     setInputSelections({});
+    chronometreStartedAtRef.current = null;
+    chronometreBaseMsRef.current = 0;
+    setChronometreMs(0);
+    setChronometreRunning(false);
+    setChronometreSaving(false);
+    setChronometreFinished(false);
+    setResultPauseUntilMs(null);
+    setResultPauseRemainingMs(0);
+    setErrorReviewUntilMs(null);
+    setErrorReviewRemainingMs(0);
+    setConfirmVerifyVisible(false);
+    setConfirmChronometreVisible(false);
+    setChronometreCountdown(null);
     inputRefs.current = {};
     rowYRefs.current = {};
     rowHeightRefs.current = {};
@@ -2019,6 +2423,47 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         nextTentativesCount,
       } = await saveTentativeAndStats(nextResults);
 
+      const hasErrors = Object.values(nextResults).some((value) => value === false);
+      const parcoursSucceeded = balises.length > 0 && nextValidatedCount >= balises.length && !hasErrors;
+
+      if (parcoursSucceeded) {
+        const finalMs = getCurrentChronometreMs();
+        chronometreStartedAtRef.current = null;
+        chronometreBaseMsRef.current = finalMs;
+        setChronometreMs(finalMs);
+        setChronometreRunning(false);
+        setChronometreFinished(true);
+        setResultPauseUntilMs(null);
+        setResultPauseRemainingMs(0);
+        setErrorReviewUntilMs(null);
+        setErrorReviewRemainingMs(0);
+
+        if (studentId && parcoursActif?.id) {
+          await AsyncStorage.removeItem(getChronoPauseStorageKey(studentId, parcoursActif.id)).catch(() => null);
+        }
+
+        await saveChronometre(finalMs, false, null, true);
+
+        const totalSeconds = Math.floor(finalMs / 1000);
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds % 60;
+        setAppMessage({
+          title: "Félicitations",
+          message: `Vous avez réussi le parcours en ${minutes} minutes et ${seconds} secondes.`,
+          tone: "success",
+        });
+        return;
+      }
+
+      if (hasErrors) {
+        const reviewUntil = Date.now() + CHRONO_ERROR_REVIEW_MS;
+        setErrorReviewUntilMs(reviewUntil);
+        setErrorReviewRemainingMs(CHRONO_ERROR_REVIEW_MS);
+        setResultPauseUntilMs(null);
+        setResultPauseRemainingMs(0);
+        return;
+      }
+
       const lines = [
         `Balises nouvellement validées : ${breakdown.newlyValidatedCount}`,
         `Gain total : ${formatPointsLabel(breakdown.totalGain)}`,
@@ -2029,10 +2474,18 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
 
       if (breakdown.willComplete) lines.unshift("Parcours terminé ✅");
 
-      Alert.alert("Tentative enregistrée", lines.join("\n"));
+      setAppMessage({
+        title: "Tentative enregistrée",
+        message: lines.join("\n"),
+        tone: "info",
+      });
     } catch (err: any) {
       console.error("Erreur enregistrement tentative:", err);
-      Alert.alert("Erreur", err?.message || "Impossible d'enregistrer la tentative.");
+      setAppMessage({
+        title: "Erreur",
+        message: err?.message || "Impossible d'enregistrer la tentative.",
+        tone: "error",
+      });
     } finally {
       setSaving(false);
     }
@@ -2042,6 +2495,10 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     codesSaisis,
     poinconsSaisis,
     saveTentativeAndStats,
+    getCurrentChronometreMs,
+    parcoursActif?.id,
+    saveChronometre,
+    studentId,
   ]);
 
   const handleVerifierTout = useCallback(async () => {
@@ -2049,7 +2506,11 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     if (saving) return;
 
     if (isCompleted) {
-      Alert.alert("Parcours terminé", "Ce parcours est déjà entièrement validé.");
+      setAppMessage({
+        title: "Parcours terminé",
+        message: "Ce parcours est déjà entièrement validé.",
+        tone: "success",
+      });
       return;
     }
 
@@ -2067,31 +2528,15 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     });
 
     if (missingInput) {
-      const message = "Vous n'avez pas rempli tous les codes des balises.";
-      if (Platform.OS === "web") window.alert(message);
-      else Alert.alert("Attention", message);
+      setAppMessage({
+        title: "Codes incomplets",
+        message: "Vous n'avez pas rempli tous les codes des balises.",
+        tone: "warning",
+      });
       return;
     }
 
-    const message =
-      "Voulez-vous vérifier toutes les balises ?\n\nCette action enregistrera une tentative.";
-
-    if (Platform.OS === "web") {
-      const confirmed = window.confirm(message);
-      if (!confirmed) return;
-      await runVerifierTout();
-      return;
-    }
-
-    Alert.alert("Confirmation", message, [
-      { text: "Annuler", style: "cancel" },
-      {
-        text: "Valider",
-        onPress: () => {
-          runVerifierTout();
-        },
-      },
-    ]);
+    setConfirmVerifyVisible(true);
   }, [
     balises,
     validatedSet,
@@ -2102,6 +2547,11 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     runVerifierTout,
     getExpectedLength,
   ]);
+
+  const confirmVerifyAndRun = useCallback(() => {
+    setConfirmVerifyVisible(false);
+    runVerifierTout();
+  }, [runVerifierTout]);
 
   const renderCodeBoxes = useCallback(
     (item: BaliseAffichee, baliseIndex: number) => {
@@ -2117,7 +2567,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       return (
         <Pressable
           onPress={() => {
-            if (!alreadyValidated) focusBalise(item, true, false);
+            if (!alreadyValidated) focusBalise(item, true, true);
           }}
           style={[styles.codeBoxesWrap, { gap: boxGap }, webPanYStyle]}
         >
@@ -2131,6 +2581,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
             onFocus={() => {
               setActiveBaliseKey(key);
               setSelectionForBalise(key, typedValue, expectedLength, typedValue.length >= expectedLength);
+              scheduleBaliseScroll(key);
             }}
             onChangeText={(text) => handleCodeChange(item, baliseIndex, text)}
             onSubmitEditing={() => focusNextBalise(baliseIndex)}
@@ -2190,6 +2641,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       inputSelections,
       isCompact,
       resultats,
+      scheduleBaliseScroll,
       setInputRef,
       setSelectionForBalise,
       validatedSet,
@@ -2285,7 +2737,6 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       return (
         <View
           onLayout={(event) => {
-            rowYRefs.current[key] = event.nativeEvent.layout.y;
             rowHeightRefs.current[key] = event.nativeEvent.layout.height;
           }}
           style={[
@@ -2299,7 +2750,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
           <TouchableOpacity
             activeOpacity={0.95}
             onPress={() => {
-              if (!alreadyValidated) focusBalise(item, true, false);
+              if (!alreadyValidated) focusBalise(item, true, true);
             }}
             style={[styles.baliseLineTouchable, webPanYStyle]}
           >
@@ -2508,9 +2959,40 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
                 {parcoursNom}
               </Text>
 
-              <TouchableOpacity activeOpacity={0.9} onPress={() => setConfirmLogoutVisible(true)} style={[styles.logoutBtn, isPoinconParcours && styles.logoutBtnCompact]}>
-                <Feather name="log-out" size={isPoinconParcours ? 17 : 19} color="#fff" />
-              </TouchableOpacity>
+              <View style={[styles.topBarActions, isPoinconParcours && styles.topBarActionsCompact]}>
+                <TouchableOpacity
+                  activeOpacity={0.9}
+                  onPress={toggleChronometre}
+                  style={[
+                    styles.chronoBtn,
+                    isPoinconParcours && styles.chronoBtnCompact,
+                    chronometrePaused && styles.chronoBtnPaused,
+                    chronometreRunning && styles.chronoBtnRunning,
+                    chronometreFinished && styles.chronoBtnFinished,
+                    (chronometreSaving || !!chronometreCountdown || chronometreMs > 0 || chronometreFinished) && styles.chronoBtnDisabled,
+                  ]}
+                  disabled={chronometreSaving || !!chronometreCountdown || chronometreMs > 0 || chronometreFinished}
+                >
+                  {chronometreSaving ? (
+                    <ActivityIndicator color="#fff" size="small" />
+                  ) : (
+                    <Feather
+                      name={chronometreRunning ? "pause" : "clock"}
+                      size={isPoinconParcours ? 15 : 17}
+                      color={chronometreFinished ? "#0F172A" : "#fff"}
+                    />
+                  )}
+                  {!isPoinconParcours && (
+                    <Text style={[styles.chronoBtnText, chronometreFinished && styles.chronoBtnTextFinished]}>
+                      {chronometreLabel}
+                    </Text>
+                  )}
+                </TouchableOpacity>
+
+                <TouchableOpacity activeOpacity={0.9} onPress={() => setConfirmLogoutVisible(true)} style={[styles.logoutBtn, isPoinconParcours && styles.logoutBtnCompact]}>
+                  <Feather name="log-out" size={isPoinconParcours ? 17 : 19} color="#fff" />
+                </TouchableOpacity>
+              </View>
             </View>
 
             <View style={[styles.stickyStatsBar, isPoinconParcours && styles.stickyStatsBarCompact]}>
@@ -2672,7 +3154,14 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
             ) : (
               <View style={webPanYStyle}>
                 {balises.map((item, index) => (
-                  <View key={item.instanceKey} style={webPanYStyle}>
+                  <View
+                    key={item.instanceKey}
+                    onLayout={(event) => {
+                      rowYRefs.current[item.instanceKey] = event.nativeEvent.layout.y;
+                      rowHeightRefs.current[item.instanceKey] = event.nativeEvent.layout.height;
+                    }}
+                    style={webPanYStyle}
+                  >
                     {renderBalise({ item, index })}
                     {index < balises.length - 1 && <View style={{ height: 10 }} />}
                   </View>
@@ -2722,10 +3211,132 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
                     <Text style={styles.cancelText}>Annuler</Text>
                   </Pressable>
 
-                  <Pressable style={styles.confirmLogoutBtn} onPress={handleLogout}>
+                  <Pressable style={styles.confirmLogoutBtn} onPress={() => handleLogout()}>
                     {loggingOut ? <ActivityIndicator color="#fff" /> : <Text style={styles.confirmText}>Déconnexion</Text>}
                   </Pressable>
                 </View>
+              </View>
+            </View>
+          </Modal>
+
+          <Modal transparent visible={!!appMessage} animationType="fade">
+            <View style={styles.appMessageOverlay}>
+              <View style={styles.appMessageCard}>
+                <View
+                  style={[
+                    styles.appMessageIcon,
+                    appMessage?.tone === "success" && styles.appMessageIconSuccess,
+                    appMessage?.tone === "warning" && styles.appMessageIconWarning,
+                    appMessage?.tone === "error" && styles.appMessageIconError,
+                  ]}
+                >
+                  <Feather
+                    name={
+                      appMessage?.tone === "success"
+                        ? "award"
+                        : appMessage?.tone === "warning"
+                          ? "alert-triangle"
+                          : appMessage?.tone === "error"
+                            ? "x-circle"
+                            : "info"
+                    }
+                    size={27}
+                    color="#FFFFFF"
+                  />
+                </View>
+                <Text style={styles.appMessageTitle}>{appMessage?.title}</Text>
+                <Text style={styles.appMessageText}>{appMessage?.message}</Text>
+                <Pressable style={styles.appMessageBtn} onPress={() => setAppMessage(null)}>
+                  <Text style={styles.appMessageBtnText}>OK</Text>
+                </Pressable>
+              </View>
+            </View>
+          </Modal>
+
+          <Modal transparent visible={confirmVerifyVisible} animationType="fade">
+            <View style={styles.verifyModalOverlay}>
+              <View style={styles.verifyModalCard}>
+                <View style={styles.verifyModalIcon}>
+                  <Feather name="check-square" size={26} color="#FFFFFF" />
+                </View>
+
+                <Text style={styles.verifyModalTitle}>Vérifier les balises ?</Text>
+
+                <Text style={styles.verifyModalText}>
+                  Cette action enregistrera une tentative et affichera les balises justes ou à corriger.
+                </Text>
+
+                <View style={styles.verifyModalActions}>
+                  <Pressable style={styles.verifyCancelBtn} onPress={() => setConfirmVerifyVisible(false)}>
+                    <Text style={styles.verifyCancelText}>Annuler</Text>
+                  </Pressable>
+
+                  <Pressable style={styles.verifyConfirmBtn} onPress={confirmVerifyAndRun}>
+                    {saving ? <ActivityIndicator color="#fff" /> : <Text style={styles.verifyConfirmText}>Vérifier</Text>}
+                  </Pressable>
+                </View>
+              </View>
+            </View>
+          </Modal>
+
+          <Modal transparent visible={confirmChronometreVisible} animationType="fade">
+            <View style={styles.modalBg}>
+              <View style={styles.logoutModalBox}>
+                <Text style={styles.logoutModalTitle}>Chronomètre</Text>
+                <Text style={styles.logoutModalText}>
+                  Souhaitez-vous lancer le chronomètre pour le parcours "{parcoursNom}" ?
+                </Text>
+
+                <View style={styles.modalActions}>
+                  <Pressable style={styles.cancelBtn} onPress={() => setConfirmChronometreVisible(false)}>
+                    <Text style={styles.cancelText}>Non</Text>
+                  </Pressable>
+
+                  <Pressable style={styles.confirmChronoBtn} onPress={startChronometreFlow}>
+                    {chronometreSaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.confirmText}>Oui</Text>}
+                  </Pressable>
+                </View>
+              </View>
+            </View>
+          </Modal>
+
+          <Modal transparent visible={!!chronometreCountdown} animationType="fade">
+            <View style={styles.countdownOverlay}>
+              <Text style={styles.countdownText}>{chronometreCountdown}</Text>
+            </View>
+          </Modal>
+
+          <Modal transparent visible={!!errorReviewUntilMs} animationType="fade">
+            <View style={styles.errorReviewOverlay}>
+              <View style={styles.errorReviewCard}>
+                <Text style={styles.errorReviewTitle}>Résultats de la tentative</Text>
+                <View style={styles.errorReviewGrid}>
+                  {balises.map((balise) => {
+                    const key = balise.instanceKey;
+                    const ok = resultats[key] === true;
+
+                    return (
+                      <View
+                        key={key}
+                        style={[
+                          styles.errorReviewBadge,
+                          ok ? styles.errorReviewBadgeOk : styles.errorReviewBadgeKo,
+                        ]}
+                      >
+                        <Text style={styles.errorReviewBadgeText}>{balise.ordre}</Text>
+                      </View>
+                    );
+                  })}
+                </View>
+              </View>
+
+              <View style={styles.errorReviewFooter}>
+                <Text style={styles.errorReviewFooterText}>
+                  Le chronomètre va redémarrer dans {errorReviewLabel} secondes.
+                </Text>
+                <Text style={styles.errorReviewFooterSub}>
+                  La session va être déconnectée automatiquement.
+                </Text>
               </View>
             </View>
           </Modal>
@@ -2821,6 +3432,64 @@ const styles = StyleSheet.create({
     width: 34,
     height: 34,
     borderRadius: 12,
+  },
+  topBarActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  topBarActionsCompact: {
+    gap: 6,
+  },
+  chronoBtn: {
+    minWidth: 104,
+    height: 42,
+    borderRadius: 15,
+    paddingHorizontal: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+    backgroundColor: C_GREEN,
+    borderWidth: 2,
+    borderColor: "rgba(255,255,255,0.45)",
+    shadowColor: C_GREEN,
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 5,
+  },
+  chronoBtnCompact: {
+    minWidth: 34,
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    paddingHorizontal: 0,
+    borderWidth: 1,
+  },
+  chronoBtnRunning: {
+    backgroundColor: "#2563EB",
+    shadowColor: "#2563EB",
+  },
+  chronoBtnPaused: {
+    backgroundColor: C_ORANGE,
+    shadowColor: C_ORANGE,
+  },
+  chronoBtnFinished: {
+    backgroundColor: "#FFFFFF",
+    shadowColor: "#FFFFFF",
+  },
+  chronoBtnDisabled: {
+    opacity: 0.82,
+  },
+  chronoBtnText: {
+    color: "#FFFFFF",
+    fontSize: 13,
+    lineHeight: 16,
+    fontWeight: "900",
+  },
+  chronoBtnTextFinished: {
+    color: "#0F172A",
   },
   logoutBtn: {
     width: 42,
@@ -3513,6 +4182,13 @@ const styles = StyleSheet.create({
     backgroundColor: C_RED_FLASH,
     borderRadius: 12,
   },
+  confirmChronoBtn: {
+    flex: 1,
+    padding: 13,
+    alignItems: "center",
+    backgroundColor: C_GREEN,
+    borderRadius: 12,
+  },
   cancelText: {
     color: "#D1D5DB",
     fontWeight: "900",
@@ -3520,6 +4196,270 @@ const styles = StyleSheet.create({
   confirmText: {
     color: "#fff",
     fontWeight: "900",
+  },
+
+  appMessageOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(6,24,39,0.70)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 18,
+  },
+  appMessageCard: {
+    width: "100%",
+    maxWidth: 430,
+    borderRadius: 28,
+    paddingHorizontal: 20,
+    paddingTop: 22,
+    paddingBottom: 18,
+    backgroundColor: "rgba(255,255,255,0.97)",
+    borderWidth: 2,
+    borderColor: "rgba(255,255,255,0.68)",
+    alignItems: "center",
+  },
+  appMessageIcon: {
+    width: 62,
+    height: 62,
+    borderRadius: 22,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: C_BLUE_DARK,
+    marginBottom: 12,
+  },
+  appMessageIconSuccess: {
+    backgroundColor: C_GREEN,
+  },
+  appMessageIconWarning: {
+    backgroundColor: C_ORANGE,
+  },
+  appMessageIconError: {
+    backgroundColor: C_RED_FLASH,
+  },
+  appMessageTitle: {
+    color: C_TEXT,
+    fontSize: 22,
+    lineHeight: 28,
+    fontWeight: "900",
+    textAlign: "center",
+  },
+  appMessageText: {
+    color: C_MUTED,
+    fontSize: 15,
+    lineHeight: 21,
+    fontWeight: "800",
+    textAlign: "center",
+    marginTop: 10,
+    marginBottom: 18,
+  },
+  appMessageBtn: {
+    minWidth: 140,
+    minHeight: 48,
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: C_BLUE_DARK,
+    paddingHorizontal: 18,
+  },
+  appMessageBtnText: {
+    color: "#FFFFFF",
+    fontSize: 15,
+    fontWeight: "900",
+  },
+
+  verifyModalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(6,24,39,0.72)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 18,
+  },
+  verifyModalCard: {
+    width: "100%",
+    maxWidth: 440,
+    borderRadius: 28,
+    paddingHorizontal: 18,
+    paddingTop: 20,
+    paddingBottom: 18,
+    backgroundColor: "rgba(255,255,255,0.97)",
+    borderWidth: 2,
+    borderColor: "rgba(255,255,255,0.65)",
+    alignItems: "center",
+    shadowColor: "#000",
+    shadowOpacity: 0.28,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 8,
+  },
+  verifyModalIcon: {
+    width: 58,
+    height: 58,
+    borderRadius: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: C_BLUE_DARK,
+    marginBottom: 12,
+  },
+  verifyModalTitle: {
+    color: C_TEXT,
+    fontSize: 22,
+    lineHeight: 27,
+    fontWeight: "900",
+    textAlign: "center",
+  },
+  verifyModalTimerBox: {
+    marginTop: 14,
+    marginBottom: 12,
+    minWidth: 190,
+    borderRadius: 22,
+    paddingVertical: 12,
+    paddingHorizontal: 18,
+    backgroundColor: "#FFFFFF",
+    borderWidth: 2,
+    borderColor: "rgba(31,91,134,0.18)",
+    alignItems: "center",
+  },
+  verifyModalTimerLabel: {
+    color: C_MUTED,
+    fontSize: 11,
+    lineHeight: 14,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
+  verifyModalTimerValue: {
+    color: "#0F172A",
+    fontSize: 42,
+    lineHeight: 48,
+    fontWeight: "900",
+    marginTop: 2,
+  },
+  verifyModalText: {
+    color: C_MUTED,
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: "800",
+    textAlign: "center",
+    marginTop: 8,
+    marginBottom: 18,
+  },
+  verifyModalActions: {
+    width: "100%",
+    flexDirection: "row",
+    gap: 10,
+  },
+  verifyCancelBtn: {
+    flex: 1,
+    minHeight: 48,
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(15,23,42,0.08)",
+  },
+  verifyConfirmBtn: {
+    flex: 1,
+    minHeight: 48,
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: C_BLUE_DARK,
+  },
+  verifyCancelText: {
+    color: C_TEXT,
+    fontSize: 14,
+    fontWeight: "900",
+  },
+  verifyConfirmText: {
+    color: "#FFFFFF",
+    fontSize: 14,
+    fontWeight: "900",
+  },
+
+  countdownOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(6,24,39,0.82)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  countdownText: {
+    color: "#FFFFFF",
+    fontSize: 86,
+    lineHeight: 98,
+    fontWeight: "900",
+    textAlign: "center",
+    textShadowColor: "rgba(34,197,94,0.65)",
+    textShadowOffset: { width: 0, height: 5 },
+    textShadowRadius: 18,
+  },
+
+  errorReviewOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(6,24,39,0.86)",
+    justifyContent: "space-between",
+    paddingHorizontal: 18,
+    paddingTop: 42,
+    paddingBottom: 32,
+  },
+  errorReviewCard: {
+    flex: 1,
+    borderRadius: 24,
+    backgroundColor: "rgba(255,255,255,0.96)",
+    padding: 16,
+    borderWidth: 2,
+    borderColor: "rgba(255,255,255,0.58)",
+  },
+  errorReviewTitle: {
+    color: C_TEXT,
+    fontSize: 20,
+    fontWeight: "900",
+    textAlign: "center",
+    marginBottom: 14,
+  },
+  errorReviewGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "center",
+    gap: 10,
+  },
+  errorReviewBadge: {
+    width: 54,
+    height: 54,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 2,
+    borderColor: "rgba(255,255,255,0.65)",
+  },
+  errorReviewBadgeOk: {
+    backgroundColor: C_GREEN,
+  },
+  errorReviewBadgeKo: {
+    backgroundColor: C_RED_FLASH,
+  },
+  errorReviewBadgeText: {
+    color: "#FFFFFF",
+    fontSize: 20,
+    fontWeight: "900",
+  },
+  errorReviewFooter: {
+    marginTop: 16,
+    borderRadius: 22,
+    backgroundColor: "rgba(255,255,255,0.95)",
+    paddingVertical: 16,
+    paddingHorizontal: 14,
+  },
+  errorReviewFooterText: {
+    color: C_RED,
+    fontSize: 18,
+    lineHeight: 24,
+    fontWeight: "900",
+    textAlign: "center",
+  },
+  errorReviewFooterSub: {
+    marginTop: 6,
+    color: C_MUTED,
+    fontSize: 14,
+    lineHeight: 19,
+    fontWeight: "800",
+    textAlign: "center",
   },
 
   modalBackdrop: {

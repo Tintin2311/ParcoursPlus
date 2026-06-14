@@ -14,6 +14,7 @@ import {
   useWindowDimensions,
   View,
 } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Feather } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
 import BottomBarEleve from "./ui/BottomBarEleve";
@@ -56,6 +57,7 @@ type ParcoursRow = {
 };
 
 type StatRow = {
+  student_id?: string | null;
   parcours_id: string;
   best_points?: number | null;
   last_points?: number | null;
@@ -66,6 +68,10 @@ type StatRow = {
   parcours_termine?: boolean | null;
   updated_at?: string | null;
   created_at?: string | null;
+  chronometre_ms?: number | null;
+  chronometre_started_at?: string | null;
+  chronometre_running?: boolean | null;
+  chronometre_finished?: boolean | null;
 };
 
 type Props = {
@@ -82,6 +88,22 @@ const C_BLUE = "#1F75B8";
 const C_GREEN = "#22C55E";
 const C_ORANGE = "#F97316";
 const C_RED = "#EF4444";
+const CHRONO_RESULT_PAUSE_MS = 3 * 60 * 1000;
+
+const parseChronometreMs = (value: any) => {
+  const n = Number(value ?? 0);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+};
+
+const formatChronometre = (ms: number) => {
+  const totalSeconds = Math.floor(Math.max(0, ms) / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+};
+
+const getChronoPauseStorageKey = (studentId: string, parcoursId: string) =>
+  `chronoResultPauseUntil:${studentId}:${parcoursId}`;
 
 // ─────────────────────────────────────────────
 // Titres des niveaux
@@ -404,6 +426,7 @@ const AccueilEleve: React.FC<Props> = ({
   setPage,
   eleveConnecte,
   handleDeconnexion,
+  setParcoursActif,
 }) => {
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
@@ -439,6 +462,15 @@ const AccueilEleve: React.FC<Props> = ({
   const [score, setScore] = React.useState(0);
   const [totalParcours, setTotalParcours] = React.useState(0);
   const [completedParcours, setCompletedParcours] = React.useState(0);
+  const [activeChrono, setActiveChrono] = React.useState<{
+    studentId: string;
+    parcours: ParcoursRow;
+    ms: number;
+    startedAt: string;
+  } | null>(null);
+  const [activeChronoMs, setActiveChronoMs] = React.useState(0);
+  const [pausingChrono, setPausingChrono] = React.useState(false);
+  const [pauseMessageVisible, setPauseMessageVisible] = React.useState(false);
   const [confirmVisible, setConfirmVisible] = React.useState(false);
   const [loggingOut, setLoggingOut] = React.useState(false);
 
@@ -464,13 +496,13 @@ const AccueilEleve: React.FC<Props> = ({
             ? supabase
                 .from("eleve_parcours_stats")
                 .select(
-                  "student_id,parcours_id,best_points,last_points,best_score,last_score,total_balises,tentatives_count,parcours_termine,updated_at,created_at"
+                  "student_id,parcours_id,best_points,last_points,best_score,last_score,total_balises,tentatives_count,parcours_termine,updated_at,created_at,chronometre_ms,chronometre_started_at,chronometre_running,chronometre_finished"
                 )
                 .in("student_id", statsQueryIds)
             : supabase
                 .from("eleve_parcours_stats")
                 .select(
-                  "student_id,parcours_id,best_points,last_points,best_score,last_score,total_balises,tentatives_count,parcours_termine,updated_at,created_at"
+                  "student_id,parcours_id,best_points,last_points,best_score,last_score,total_balises,tentatives_count,parcours_termine,updated_at,created_at,chronometre_ms,chronometre_started_at,chronometre_running,chronometre_finished"
                 )
                 .eq("student_id", statsQueryIds[0]);
 
@@ -515,13 +547,99 @@ const AccueilEleve: React.FC<Props> = ({
         setScore(totalPts);
         setTotalParcours(visibleParcours.length);
         setCompletedParcours(completed);
+
+        const runningChrono = visibleStats.find(
+          (row) => row.chronometre_running === true && row.chronometre_finished !== true && !!row.chronometre_started_at
+        );
+        const runningParcours = runningChrono
+          ? visibleParcours.find((p) => String(p.id) === String(runningChrono.parcours_id)) ?? null
+          : null;
+
+        if (runningChrono && runningParcours && runningChrono.student_id && runningChrono.chronometre_started_at) {
+          const startedAtMs = new Date(runningChrono.chronometre_started_at).getTime();
+          const elapsed = Number.isFinite(startedAtMs) ? Math.max(0, Date.now() - startedAtMs) : 0;
+          const nextMs = parseChronometreMs(runningChrono.chronometre_ms) + elapsed;
+          setActiveChrono({
+            studentId: String(runningChrono.student_id),
+            parcours: runningParcours,
+            ms: nextMs,
+            startedAt: String(runningChrono.chronometre_started_at),
+          });
+          setActiveChronoMs(nextMs);
+        } else {
+          const pausedChrono = visibleStats.find(
+            (row) =>
+              row.chronometre_running !== true &&
+              row.chronometre_finished !== true &&
+              parseChronometreMs(row.chronometre_ms) > 0
+          );
+          const pausedParcours = pausedChrono
+            ? visibleParcours.find((p) => String(p.id) === String(pausedChrono.parcours_id)) ?? null
+            : null;
+
+          if (pausedChrono?.student_id && pausedParcours) {
+            const pauseRaw = await AsyncStorage.getItem(
+              getChronoPauseStorageKey(String(pausedChrono.student_id), pausedParcours.id)
+            ).catch(() => null);
+            const pauseUntil = Number(pauseRaw ?? 0);
+
+            if (Number.isFinite(pauseUntil) && pauseUntil > Date.now()) {
+              setActiveChrono(null);
+              setActiveChronoMs(0);
+              return;
+            }
+
+            const startedAt = new Date().toISOString();
+            await AsyncStorage.removeItem(
+              getChronoPauseStorageKey(String(pausedChrono.student_id), pausedParcours.id)
+            ).catch(() => null);
+            await supabase
+              .from("eleve_parcours_stats")
+              .update({
+                chronometre_ms: parseChronometreMs(pausedChrono.chronometre_ms),
+                chronometre_started_at: startedAt,
+                chronometre_running: true,
+                updated_at: startedAt,
+              })
+              .eq("student_id", String(pausedChrono.student_id))
+              .eq("parcours_id", pausedParcours.id);
+            await handleDeconnexion();
+            return;
+          }
+
+          setActiveChrono(null);
+          setActiveChronoMs(0);
+        }
       } finally {
         setLoading(false);
       }
     };
 
     loadHome();
-  }, [studentId, targetStudentIds, groupKey, isGroupSession, classIds, sessionAssociationId]);
+  }, [
+    studentId,
+    targetStudentIds,
+    groupKey,
+    isGroupSession,
+    classIds,
+    sessionAssociationId,
+    handleDeconnexion,
+    setPage,
+    setParcoursActif,
+  ]);
+
+  React.useEffect(() => {
+    if (!activeChrono) return;
+
+    const startedAtMs = new Date(activeChrono.startedAt).getTime();
+    const baseMs = parseChronometreMs(activeChrono.ms) - Math.max(0, Date.now() - startedAtMs);
+
+    const timer = setInterval(() => {
+      setActiveChronoMs(baseMs + Math.max(0, Date.now() - startedAtMs));
+    }, 500);
+
+    return () => clearInterval(timer);
+  }, [activeChrono]);
 
   const levelData = React.useMemo(() => getLevelData(score), [score]);
 
@@ -561,6 +679,79 @@ const AccueilEleve: React.FC<Props> = ({
   const subtitleGroup = isGroupSession
     ? `${targetStudentIds.length} élèves connectés avec le code ${eleveConnecte?.groupSessionCode ?? "groupe"}`
     : null;
+
+  const pauseActiveChrono = async () => {
+    if (!activeChrono || pausingChrono) return;
+
+    try {
+      setPausingChrono(true);
+      const pauseUntil = Date.now() + CHRONO_RESULT_PAUSE_MS;
+      const now = new Date().toISOString();
+
+      await supabase
+        .from("eleve_parcours_stats")
+        .update({
+          chronometre_ms: activeChronoMs,
+          chronometre_started_at: null,
+          chronometre_running: false,
+          updated_at: now,
+        })
+        .eq("student_id", activeChrono.studentId)
+        .eq("parcours_id", activeChrono.parcours.id);
+
+      await AsyncStorage.setItem(
+        getChronoPauseStorageKey(activeChrono.studentId, activeChrono.parcours.id),
+        String(pauseUntil)
+      );
+      if (Platform.OS === "web" && typeof window !== "undefined") {
+        window.dispatchEvent(new Event("chronoPauseUpdated"));
+      }
+
+      setParcoursActif?.(activeChrono.parcours);
+      setPauseMessageVisible(true);
+      setTimeout(() => {
+        setPage("EcrireCodeBaliseEleve");
+      }, 3500);
+    } finally {
+      setPausingChrono(false);
+    }
+  };
+
+  if (activeChrono) {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <ImageBackground source={{ uri: backgroundImage }} style={styles.bg} resizeMode="cover">
+          <LinearGradient
+            colors={["rgba(5,18,30,0.72)", "rgba(9,34,54,0.72)", "rgba(234,246,255,0.86)"]}
+            style={[styles.container, styles.chronoOnlyContainer]}
+          >
+            <Text style={styles.chronoOnlyTitle} numberOfLines={2}>
+              {getDisplayName(activeChrono.parcours)}
+            </Text>
+            <Text style={styles.chronoOnlyTime}>{formatChronometre(activeChronoMs)}</Text>
+            <Pressable style={styles.chronoPauseBtn} onPress={pauseActiveChrono}>
+              {pausingChrono ? <ActivityIndicator color="#fff" /> : <Text style={styles.chronoPauseText}>PAUSE</Text>}
+            </Pressable>
+
+            <Modal transparent visible={pauseMessageVisible} animationType="fade">
+              <View style={styles.pauseMessageOverlay}>
+                <View style={styles.pauseMessageCard}>
+                  <View style={styles.pauseMessageIcon}>
+                    <Feather name="clock" size={28} color="#FFFFFF" />
+                  </View>
+                  <Text style={styles.pauseMessageTitle}>Chronomètre en pause</Text>
+                  <Text style={styles.pauseMessageTime}>3:00</Text>
+                  <Text style={styles.pauseMessageText}>
+                    Vous avez 3 minutes pour remplir vos résultats avant la reprise du chronomètre et la déconnexion.
+                  </Text>
+                </View>
+              </View>
+            </Modal>
+          </LinearGradient>
+        </ImageBackground>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -873,6 +1064,91 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(239,68,68,0.78)",
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.32)",
+  },
+
+  chronoOnlyContainer: {
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+  },
+  chronoOnlyTitle: {
+    color: "#FFFFFF",
+    fontSize: 24,
+    lineHeight: 30,
+    fontWeight: "900",
+    textAlign: "center",
+    marginBottom: 28,
+  },
+  chronoOnlyTime: {
+    color: "#FFFFFF",
+    fontSize: 72,
+    lineHeight: 82,
+    fontWeight: "900",
+    textAlign: "center",
+    marginBottom: 34,
+  },
+  chronoPauseBtn: {
+    minWidth: 220,
+    minHeight: 72,
+    borderRadius: 24,
+    backgroundColor: C_ORANGE,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 2,
+    borderColor: "rgba(255,255,255,0.55)",
+  },
+  chronoPauseText: {
+    color: "#FFFFFF",
+    fontSize: 26,
+    fontWeight: "900",
+  },
+  pauseMessageOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(6,24,39,0.64)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 20,
+  },
+  pauseMessageCard: {
+    width: "100%",
+    maxWidth: 390,
+    borderRadius: 28,
+    paddingVertical: 26,
+    paddingHorizontal: 22,
+    alignItems: "center",
+    backgroundColor: "rgba(255,255,255,0.97)",
+    borderWidth: 2,
+    borderColor: "rgba(255,255,255,0.72)",
+  },
+  pauseMessageIcon: {
+    width: 62,
+    height: 62,
+    borderRadius: 22,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: C_ORANGE,
+    marginBottom: 14,
+  },
+  pauseMessageTitle: {
+    color: C_TEXT,
+    fontSize: 22,
+    fontWeight: "900",
+    textAlign: "center",
+  },
+  pauseMessageTime: {
+    color: C_ORANGE,
+    fontSize: 58,
+    lineHeight: 66,
+    fontWeight: "900",
+    marginTop: 8,
+  },
+  pauseMessageText: {
+    color: C_MUTED,
+    fontSize: 16,
+    lineHeight: 22,
+    fontWeight: "800",
+    textAlign: "center",
+    marginTop: 10,
   },
 
   // ── Scroll ───────────────────────────────
