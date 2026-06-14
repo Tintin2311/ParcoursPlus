@@ -199,12 +199,6 @@ const isStatCompleted = (row: StatRow) => {
   );
 };
 
-const formatDateMs = (value?: string | null) => {
-  if (!value) return 0;
-  const t = new Date(value).getTime();
-  return Number.isFinite(t) ? t : 0;
-};
-
 function getStudentId(eleve?: EleveMin | null) {
   return eleve?.id ?? eleve?.uuid ?? null;
 }
@@ -288,6 +282,7 @@ function ActionCard({
   locked = false,
   disabled = false,
   isActive = false,
+  compact = false,
 }: {
   icon: React.ComponentProps<typeof Feather>["name"];
   title: string;
@@ -296,6 +291,7 @@ function ActionCard({
   locked?: boolean;
   disabled?: boolean;
   isActive?: boolean;
+  compact?: boolean;
 }) {
   const borderColors: readonly [string, string, string, string, string] = isActive
     ? ["#5ab0ff", "#1a6ab8", "#0a4a88", "#1a6ab8", "#5ab0ff"]
@@ -326,30 +322,32 @@ function ActionCard({
           colors={innerColors}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
-          style={styles.cardInner}
+          style={[styles.cardInner, compact && styles.cardInnerCompact]}
         >
           {/* Badge cadenas — coin haut-droit */}
           {locked && (
-            <View style={styles.lockBadge}>
-              <Feather name="lock" size={13} color="#c0d8f0" />
+            <View style={[styles.lockBadge, compact && styles.lockBadgeCompact]}>
+              <Feather name="lock" size={compact ? 11 : 13} color="#c0d8f0" />
             </View>
           )}
 
           {/* Corps de la carte */}
-          <View style={styles.cardBody}>
+          <View style={[styles.cardBody, compact && styles.cardBodyCompact]}>
             <View
               style={[
                 styles.cardIconWrap,
+                compact && styles.cardIconWrapCompact,
                 { opacity: locked ? 0.5 : 0.82 },
               ]}
             >
-              <Feather name={icon} size={38} color="#3a6a8a" />
+              <Feather name={icon} size={compact ? 30 : 38} color="#3a6a8a" />
             </View>
 
             <Text
               numberOfLines={1}
               style={[
                 styles.cardTitle,
+                compact && styles.cardTitleCompact,
                 isActive && styles.cardTitleActive,
               ]}
             >
@@ -360,6 +358,7 @@ function ActionCard({
               numberOfLines={2}
               style={[
                 styles.cardSub,
+                compact && styles.cardSubCompact,
                 isActive && styles.cardSubActive,
               ]}
             >
@@ -371,7 +370,7 @@ function ActionCard({
           {locked ? (
             <LinearGradient
               colors={["#1a3a5c", "#0d2a45"]}
-              style={styles.cardFooter}
+              style={[styles.cardFooter, compact && styles.cardFooterCompact]}
             >
               <Feather name="lock" size={12} color="#8ab0d0" />
               <Text style={styles.cardFooterText}>BLOQUÉ</Text>
@@ -379,7 +378,7 @@ function ActionCard({
           ) : (
             <LinearGradient
               colors={["#0a3a78", "#062a60"]}
-              style={[styles.cardFooter, styles.cardFooterActive]}
+              style={[styles.cardFooter, styles.cardFooterActive, compact && styles.cardFooterCompact]}
             >
               <View style={styles.diamondBadge}>
                 <Feather
@@ -405,12 +404,12 @@ const AccueilEleve: React.FC<Props> = ({
   setPage,
   eleveConnecte,
   handleDeconnexion,
-  setParcoursActif,
 }) => {
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
   const isLargeScreen = width >= 768;
   const isSmall = width < 420;
+  const useCompactActions = width < 520;
 
   const backgroundImage =
     isLandscape || isLargeScreen ? BG_PAYSAGE : BG_MOBILE;
@@ -440,9 +439,6 @@ const AccueilEleve: React.FC<Props> = ({
   const [score, setScore] = React.useState(0);
   const [totalParcours, setTotalParcours] = React.useState(0);
   const [completedParcours, setCompletedParcours] = React.useState(0);
-  const [continueParcours, setContinueParcours] =
-    React.useState<ParcoursRow | null>(null);
-
   const [confirmVisible, setConfirmVisible] = React.useState(false);
   const [loggingOut, setLoggingOut] = React.useState(false);
 
@@ -516,32 +512,9 @@ const AccueilEleve: React.FC<Props> = ({
         );
         const completed = completedByParcours.size;
 
-        const startedNotDoneStats = visibleStats
-          .filter((row) => {
-            const bestScore = Number(row.best_score ?? 0);
-            const lastScore = Number(row.last_score ?? 0);
-            const tentatives = Number(row.tentatives_count ?? 0);
-            return (
-              !isStatCompleted(row) &&
-              (tentatives > 0 || bestScore > 0 || lastScore > 0)
-            );
-          })
-          .sort((a, b) => {
-            const dateB = formatDateMs(b.updated_at ?? b.created_at);
-            const dateA = formatDateMs(a.updated_at ?? a.created_at);
-            return dateB - dateA;
-          });
-
-        const lastContinue = startedNotDoneStats[0]
-          ? visibleParcours.find(
-              (p) => String(p.id) === String(startedNotDoneStats[0].parcours_id)
-            ) ?? null
-          : null;
-
         setScore(totalPts);
         setTotalParcours(visibleParcours.length);
         setCompletedParcours(completed);
-        setContinueParcours(lastContinue);
       } finally {
         setLoading(false);
       }
@@ -583,12 +556,6 @@ const AccueilEleve: React.FC<Props> = ({
     } finally {
       setLoggingOut(false);
     }
-  };
-
-  const openContinueParcours = () => {
-    if (!continueParcours) return;
-    setParcoursActif?.(continueParcours);
-    setPage("EcrireCodeBaliseEleve");
   };
 
   const subtitleGroup = isGroupSession
@@ -721,23 +688,9 @@ const AccueilEleve: React.FC<Props> = ({
               </View>
             </View>
 
-            {/* ── Grille des 4 cartes ── */}
+            {/* ── Grille des 3 cartes ── */}
             <View style={styles.actionsGrid}>
-              <View style={styles.actionsRow}>
-                {/* PARCOURS EN COURS */}
-                <ActionCard
-                  icon="map"
-                  title="PARCOURS EN COURS"
-                  subtitle={
-                    continueParcours
-                      ? getDisplayName(continueParcours)
-                      : "Aucun parcours en cours"
-                  }
-                  isActive
-                  disabled={!continueParcours}
-                  onPress={openContinueParcours}
-                />
-
+              <View style={[styles.actionsRow, useCompactActions && styles.actionsRowCompact]}>
                 {/* DUEL */}
                 <ActionCard
                   icon="crosshair"
@@ -745,11 +698,10 @@ const AccueilEleve: React.FC<Props> = ({
                   subtitle="Bientôt disponible"
                   locked
                   disabled
+                  compact={useCompactActions}
                   onPress={() => {}}
                 />
-              </View>
 
-              <View style={styles.actionsRow}>
                 {/* INVENTAIRE */}
                 <ActionCard
                   icon="briefcase"
@@ -757,6 +709,7 @@ const AccueilEleve: React.FC<Props> = ({
                   subtitle="Bientôt disponible"
                   locked
                   disabled
+                  compact={useCompactActions}
                   onPress={() => {}}
                 />
 
@@ -767,6 +720,7 @@ const AccueilEleve: React.FC<Props> = ({
                   subtitle="Bientôt disponible"
                   locked
                   disabled
+                  compact={useCompactActions}
                   onPress={() => {}}
                 />
               </View>
@@ -1089,6 +1043,10 @@ const styles = StyleSheet.create({
     gap: 12,
   },
 
+  actionsRowCompact: {
+    gap: 7,
+  },
+
   actionOuter: {
     flex: 1,
     shadowColor: "#000",
@@ -1116,6 +1074,10 @@ const styles = StyleSheet.create({
     flexDirection: "column",
   },
 
+  cardInnerCompact: {
+    minHeight: 138,
+  },
+
   cardBody: {
     flex: 1,
     alignItems: "center",
@@ -1123,6 +1085,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingTop: 16,
     paddingBottom: 8,
+  },
+
+  cardBodyCompact: {
+    paddingHorizontal: 5,
+    paddingTop: 12,
+    paddingBottom: 6,
   },
 
   cardIconWrap: {
@@ -1133,6 +1101,12 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
 
+  cardIconWrapCompact: {
+    width: 42,
+    height: 42,
+    marginBottom: 5,
+  },
+
   cardTitle: {
     color: "#1a3a5c",
     fontSize: 12,
@@ -1140,6 +1114,12 @@ const styles = StyleSheet.create({
     textAlign: "center",
     textTransform: "uppercase",
     letterSpacing: 0.5,
+  },
+
+  cardTitleCompact: {
+    fontSize: 10,
+    lineHeight: 12,
+    letterSpacing: 0,
   },
 
   cardTitleActive: {
@@ -1155,6 +1135,11 @@ const styles = StyleSheet.create({
     lineHeight: 15,
   },
 
+  cardSubCompact: {
+    fontSize: 9,
+    lineHeight: 12,
+  },
+
   cardSubActive: {
     color: "#2a6aaa",
     fontWeight: "700",
@@ -1168,6 +1153,11 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderTopWidth: 1.5,
     borderTopColor: "#4a7090",
+  },
+
+  cardFooterCompact: {
+    gap: 4,
+    paddingVertical: 6,
   },
 
   cardFooterActive: {
@@ -1197,6 +1187,14 @@ const styles = StyleSheet.create({
     borderColor: "#4a7090",
     alignItems: "center",
     justifyContent: "center",
+  },
+
+  lockBadgeCompact: {
+    top: 6,
+    right: 6,
+    width: 24,
+    height: 24,
+    borderRadius: 5,
   },
 
   // Badge diamant — carte active

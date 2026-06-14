@@ -1183,9 +1183,15 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       }
 
       if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
+
+      if (Platform.OS === "web") {
+        inputRefs.current[key]?.focus?.();
+        return;
+      }
+
       focusTimerRef.current = setTimeout(() => {
         inputRefs.current[key]?.focus?.();
-      }, Platform.OS === "web" ? 20 : 70);
+      }, 70);
     },
     [codesSaisis, getExpectedLength, scrollBaliseIntoComfortZone, setSelectionForBalise]
   );
@@ -3055,15 +3061,17 @@ const styles = StyleSheet.create({
     position: "absolute",
     left: 0,
     top: 0,
-    width: 1,
-    height: 1,
-    opacity: 0.01,
+    right: 0,
+    bottom: 0,
+    minWidth: "100%",
+    minHeight: "100%",
+    opacity: 0.02,
     color: "transparent",
     backgroundColor: "transparent",
     padding: 0,
     margin: 0,
     borderWidth: 0,
-    zIndex: -1,
+    zIndex: 10,
   },
   codeBoxFake: {
     backgroundColor: "rgba(255,255,255,0.96)",
