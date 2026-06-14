@@ -12,3 +12,4 @@ backup_*_avant_refacto.sql
 .supabase-home/
 supabase/.temp/
 test_before_baremes.sql
+.vercel
