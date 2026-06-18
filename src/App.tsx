@@ -42,6 +42,7 @@ const NouveauMotDePasse = React.lazy(() => import("./NouveauMotDePasse"));
 const GestionResultats = React.lazy(() => import("./GestionResultats")) as React.LazyExoticComponent<React.ComponentType<any>>;
 const GestionResultatsTentatives = React.lazy(() => import("./GestionResultatsTentatives")) as React.LazyExoticComponent<React.ComponentType<any>>;
 const GestionResultatsProgressivite = React.lazy(() => import("./GestionResultatsProgressivite")) as React.LazyExoticComponent<React.ComponentType<any>>;
+const BaremesEvaluation = React.lazy(() => import("./BaremesEvaluation")) as React.LazyExoticComponent<React.ComponentType<any>>;
 const GestionPoints = React.lazy(() => import("./GestionPoints")) as React.LazyExoticComponent<React.ComponentType<any>>;
 const Association = React.lazy(() => import("./Association")) as React.LazyExoticComponent<React.ComponentType<any>>;
 
@@ -107,6 +108,7 @@ type PageType =
   | "GestionResultats"
   | "GestionResultatsTentatives"
   | "GestionResultatsProgressivite"
+  | "BaremesEvaluation"
   | "GestionPoints"
   | "Association"
   | "personnalisationBalises"
@@ -318,6 +320,7 @@ const normalizePage = (value: string | null | undefined): PageType => {
     case "gestionresultats": return "GestionResultats";
     case "gestionresultatstentatives": return "GestionResultatsTentatives";
     case "gestionresultatsprogressivite": return "GestionResultatsProgressivite";
+    case "baremesevaluation": return "BaremesEvaluation";
     case "gestionpoints": return "GestionPoints";
     case "association": return "Association";
     case "personnalisationbalises": return "personnalisationBalises";
@@ -385,6 +388,7 @@ const PROF_EXTRA_PAGES = new Set<PageType>([
   "MesParcours",
   "GestionResultatsTentatives",
   "GestionResultatsProgressivite",
+  "BaremesEvaluation",
   "GestionPoints",
   "Association",
   "personnalisationBalises",
@@ -420,6 +424,7 @@ const pageToTabId = (p: PageType) => {
     case "GestionPoints":
     case "GestionResultatsTentatives":
     case "GestionResultatsProgressivite":
+    case "BaremesEvaluation":
     case "gestionResultatsTentatives_parcours":
     case "personnalisationBalises":
     case "personnalisationParcoursTermines":
@@ -524,6 +529,8 @@ const [parcoursId, setParcoursId] = useState<string | null>(null);
   } | null>(null);
   const [globalPauseRemainingMs, setGlobalPauseRemainingMs] = useState(0);
   const globalPauseResumingRef = useRef(false);
+  const lastAuthUserIdRef = useRef<string | null>(null);
+  const connectedRef = useRef({ hasProfesseur: false, hasEleve: false });
 
   const [newProfPrenom, setNewProfPrenom] = useState("");
   const [newProfName, setNewProfName] = useState("");
@@ -546,6 +553,13 @@ const [parcoursId, setParcoursId] = useState<string | null>(null);
     baremeTentatives: [] as any[],
   });
   const [baremePointsParcours] = useState<any>({});
+
+  useEffect(() => {
+    connectedRef.current = {
+      hasProfesseur: !!professeur,
+      hasEleve: !!eleve,
+    };
+  }, [professeur, eleve]);
 
   const setNormalizedPage = useCallback((next: PageInput) => {
     let nextPage: PageType;
@@ -784,6 +798,7 @@ const [parcoursId, setParcoursId] = useState<string | null>(null);
           const profComplet = await fetchProfesseurFromSupabase(userId, email);
           if (!alive) return;
 
+          lastAuthUserIdRef.current = userId;
           setProfesseur(profComplet);
           setEleve(null);
           setModeConnexion("prof");
@@ -832,6 +847,7 @@ const [parcoursId, setParcoursId] = useState<string | null>(null);
       }
 
       if (!alive) return;
+      lastAuthUserIdRef.current = null;
       setProfesseur(null);
       setEleve(null);
       setModeConnexion("accueil");
@@ -842,7 +858,7 @@ const [parcoursId, setParcoursId] = useState<string | null>(null);
 
     restore();
 
-    const { data: sub } = supabase.auth.onAuthStateChange(async (event) => {
+    const { data: sub } = supabase.auth.onAuthStateChange(async (event, session) => {
       if (!alive) return;
 
       if (event === "PASSWORD_RECOVERY") {
@@ -861,7 +877,18 @@ const [parcoursId, setParcoursId] = useState<string | null>(null);
         return;
       }
 
-      restore();
+      if (event === "SIGNED_IN") {
+        const nextUserId = session?.user?.id ?? null;
+        const alreadyConnected = connectedRef.current.hasProfesseur || connectedRef.current.hasEleve;
+
+        if (!alreadyConnected) {
+          restore();
+          return;
+        }
+        if (nextUserId && lastAuthUserIdRef.current && nextUserId !== lastAuthUserIdRef.current) {
+          restore();
+        }
+      }
     });
 
     return () => {
@@ -1306,6 +1333,10 @@ const [parcoursId, setParcoursId] = useState<string | null>(null);
 
                   {page === "GestionResultatsProgressivite" && (
                     <GestionResultatsProgressivite setPage={goStr} professeur={professeur} />
+                  )}
+
+                  {page === "BaremesEvaluation" && (
+                    <BaremesEvaluation setPage={goStr} professeur={professeur} />
                   )}
 
                   {page === "GestionPoints" && (

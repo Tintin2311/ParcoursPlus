@@ -20,6 +20,7 @@ import BottomBar from "./ui/BottomBar";
 import { ArrowLeft, Trash2, Palette as PaletteIcon, Plus, X, Check } from "lucide-react-native";
 import { supabase } from "./supabaseClient";
 import { GestureHandlerRootView, Swipeable, RectButton } from "react-native-gesture-handler";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 /* ======================= Types ======================= */
 type ConditionType = "=" | "≥" | "≤" | "entre";
@@ -43,6 +44,7 @@ type PageRow = {
   teacher_id: string;
   page_number: number;
   page_name: string;
+  max_attempts?: number | null;
   created_at?: string | null;
 };
 
@@ -62,6 +64,7 @@ const BOTTOM_BAR_HEIGHT = 78;
 /* ======================= Supabase ======================= */
 const TABLE = "group_tentative_baremes";
 const TABLE_PAGES = "group_tentative_bareme_pages";
+const LS_MAX_ATTEMPTS_PREFIX = "tentativeBareme.maxAttempts";
 
 /* ======================= ColorWheel (optional) ======================= */
 let ColorWheel: any = null;
@@ -185,6 +188,48 @@ const getAttemptsLabel = (n: number | null | undefined) => {
   return Number(n) === 1 ? "tentative" : "tentatives";
 };
 
+const isMissingColumnError = (error: any, columnName: string) => {
+  const msg = String(error?.message ?? error?.details ?? error?.hint ?? "");
+  return error?.code === "42703" || msg.includes(columnName);
+};
+
+const getLocalMaxAttemptsKey = (teacherId: string, pageNumber: number) =>
+  `${LS_MAX_ATTEMPTS_PREFIX}.${teacherId}.${pageNumber}`;
+
+const readLocalMaxAttempts = async (teacherId: string, pageNumber: number) => {
+  try {
+    const key = getLocalMaxAttemptsKey(teacherId, pageNumber);
+    const value =
+      Platform.OS === "web" && typeof window !== "undefined"
+        ? window.localStorage.getItem(key)
+        : await AsyncStorage.getItem(key);
+    const n = Number(value);
+    return Number.isInteger(n) && n >= 1 ? n : null;
+  } catch {
+    return null;
+  }
+};
+
+const writeLocalMaxAttempts = async (
+  teacherId: string,
+  pageNumber: number,
+  value: number | null
+) => {
+  try {
+    const key = getLocalMaxAttemptsKey(teacherId, pageNumber);
+    if (Platform.OS === "web" && typeof window !== "undefined") {
+      if (value == null) window.localStorage.removeItem(key);
+      else window.localStorage.setItem(key, String(value));
+      return;
+    }
+
+    if (value == null) await AsyncStorage.removeItem(key);
+    else await AsyncStorage.setItem(key, String(value));
+  } catch {
+    // La sauvegarde Supabase reste prioritaire quand la migration est appliquee.
+  }
+};
+
 const IntervalGlyph: React.FC<{ size: number; stroke?: string }> = ({
   size,
   stroke = C_TEXT,
@@ -290,6 +335,8 @@ const GestionResultatsTentatives: React.FC<Props> = ({ setPage }) => {
 
   const [editingPageTitle, setEditingPageTitle] = useState(false);
   const [pageTitleDraft, setPageTitleDraft] = useState("");
+  const [maxAttemptsDraft, setMaxAttemptsDraft] = useState("");
+  const [maxAttemptsColumnReady, setMaxAttemptsColumnReady] = useState(true);
 
   const flushTimer = useRef<any>(null);
   const pendingById = useRef<Map<string, Partial<Row>>>(new Map());
@@ -360,11 +407,29 @@ const GestionResultatsTentatives: React.FC<Props> = ({ setPage }) => {
       }
 
       try {
-        const { data, error } = await supabase
-          .from(TABLE_PAGES)
-          .select("id, teacher_id, page_number, page_name, created_at")
-          .eq("teacher_id", teacherId)
-          .order("page_number", { ascending: true });
+        const loadPagesQuery = (withMaxAttempts: boolean) =>
+          supabase
+            .from(TABLE_PAGES)
+            .select(
+              withMaxAttempts
+                ? "id, teacher_id, page_number, page_name, max_attempts, created_at"
+                : "id, teacher_id, page_number, page_name, created_at"
+            )
+            .eq("teacher_id", teacherId)
+            .order("page_number", { ascending: true });
+
+        let maxAttemptsColumnAvailable = maxAttemptsColumnReady;
+        let { data, error } = await loadPagesQuery(maxAttemptsColumnAvailable);
+
+        if (error && isMissingColumnError(error, "max_attempts")) {
+          maxAttemptsColumnAvailable = false;
+          if (!cancelled) setMaxAttemptsColumnReady(false);
+          const fallback = await loadPagesQuery(false);
+          data = fallback.data;
+          error = fallback.error;
+        } else if (!error && maxAttemptsColumnAvailable) {
+          if (!cancelled) setMaxAttemptsColumnReady(true);
+        }
 
         if (error) {
           reportSb("LOAD_PAGES", error);
@@ -377,19 +442,41 @@ const GestionResultatsTentatives: React.FC<Props> = ({ setPage }) => {
           teacher_id: String(p.teacher_id),
           page_number: Number(p.page_number ?? 1),
           page_name: String(p.page_name || `PAGE ${Number(p.page_number ?? 1)}`),
+          max_attempts: p.max_attempts == null ? null : Number(p.max_attempts),
           created_at: p.created_at ?? null,
         }));
 
+        if (!maxAttemptsColumnAvailable) {
+          list = await Promise.all(
+            list.map(async (page) => ({
+              ...page,
+              max_attempts: await readLocalMaxAttempts(teacherId, page.page_number),
+            }))
+          );
+        }
+
         if (list.length === 0) {
-          const { data: ins, error: insErr } = await supabase
+          let { data: ins, error: insErr } = await supabase
             .from(TABLE_PAGES)
             .insert({
               teacher_id: teacherId,
               page_number: 1,
               page_name: "PAGE 1",
             })
-            .select("id, teacher_id, page_number, page_name, created_at")
+            .select("id, teacher_id, page_number, page_name, max_attempts, created_at")
             .single();
+
+          if (insErr && isMissingColumnError(insErr, "max_attempts")) {
+            if (!cancelled) setMaxAttemptsColumnReady(false);
+            const fallback = await supabase
+              .from(TABLE_PAGES)
+              .select("id, teacher_id, page_number, page_name, created_at")
+              .eq("teacher_id", teacherId)
+              .eq("page_number", 1)
+              .limit(1);
+            ins = ((fallback.data as any[]) ?? [])[0] ?? null;
+            insErr = fallback.error;
+          }
 
           if (!insErr && ins) {
             list = [
@@ -398,6 +485,7 @@ const GestionResultatsTentatives: React.FC<Props> = ({ setPage }) => {
                 teacher_id: String((ins as any).teacher_id),
                 page_number: Number((ins as any).page_number ?? 1),
                 page_name: String((ins as any).page_name || "PAGE 1"),
+                max_attempts: (ins as any).max_attempts == null ? null : Number((ins as any).max_attempts),
                 created_at: (ins as any).created_at ?? null,
               },
             ];
@@ -419,7 +507,7 @@ const GestionResultatsTentatives: React.FC<Props> = ({ setPage }) => {
     return () => {
       cancelled = true;
     };
-  }, [teacherReady, teacherId, currentPage]);
+  }, [teacherReady, teacherId, currentPage, maxAttemptsColumnReady]);
 
   const currentPageObj = useMemo(
     () => pages.find((p) => p.page_number === currentPage) || null,
@@ -427,8 +515,10 @@ const GestionResultatsTentatives: React.FC<Props> = ({ setPage }) => {
   );
 
   useEffect(() => {
-    if (currentPageObj) setPageTitleDraft(currentPageObj.page_name);
-  }, [currentPageObj?.id]);
+    if (!currentPageObj) return;
+    setPageTitleDraft(currentPageObj.page_name);
+    setMaxAttemptsDraft(currentPageObj.max_attempts == null ? "" : String(currentPageObj.max_attempts));
+  }, [currentPageObj?.id, currentPageObj?.max_attempts]);
 
   /* ========= Scroll helper ========= */
   const scrollToVeryBottom = useCallback(() => {
@@ -500,6 +590,56 @@ const GestionResultatsTentatives: React.FC<Props> = ({ setPage }) => {
     const cur = pendingById.current.get(id) || {};
     pendingById.current.set(id, { ...cur, ...patch });
     scheduleFlush();
+  };
+
+  const updateCurrentPageLocal = (patch: Partial<PageRow>) => {
+    if (!currentPageObj) return;
+    setPages((prev) =>
+      prev.map((p) => (p.id === currentPageObj.id ? { ...p, ...patch } : p))
+    );
+  };
+
+  const saveMaxAttempts = async (value: number | null) => {
+    if (!teacherId || !currentPageObj) return;
+
+    updateCurrentPageLocal({ max_attempts: value });
+    setMaxAttemptsDraft(value == null ? "" : String(value));
+    setSavingError(null);
+    await writeLocalMaxAttempts(teacherId, currentPageObj.page_number, value);
+
+    if (!maxAttemptsColumnReady) return;
+
+    try {
+      const { error } = await supabase
+        .from(TABLE_PAGES)
+        .update({ max_attempts: value })
+        .eq("id", currentPageObj.id)
+        .eq("teacher_id", teacherId);
+
+      if (error) {
+        if (isMissingColumnError(error, "max_attempts")) {
+          setMaxAttemptsColumnReady(false);
+          return;
+        }
+        reportSb("UPDATE_MAX_ATTEMPTS", error);
+      }
+    } catch (e) {
+      if (isMissingColumnError(e, "max_attempts")) {
+        setMaxAttemptsColumnReady(false);
+        return;
+      }
+      console.error("UPDATE_MAX_ATTEMPTS crash:", e);
+      setSavingError("Erreur limite tentatives (voir console).");
+    }
+  };
+
+  const commitMaxAttemptsDraft = () => {
+    const n = toIntOrNull(maxAttemptsDraft);
+    if (n == null || n < 1) {
+      saveMaxAttempts(null);
+      return;
+    }
+    saveMaxAttempts(n);
   };
 
   /* ========= Actions ========= */
@@ -782,15 +922,30 @@ const GestionResultatsTentatives: React.FC<Props> = ({ setPage }) => {
     const name = `PAGE ${nextNum}`;
 
     try {
-      const { data, error } = await supabase
+      let { data, error } = await supabase
         .from(TABLE_PAGES)
         .insert({
           teacher_id: teacherId,
           page_number: nextNum,
           page_name: name,
+          max_attempts: null,
         })
-        .select("id, teacher_id, page_number, page_name, created_at")
+        .select("id, teacher_id, page_number, page_name, max_attempts, created_at")
         .single();
+
+      if (error && isMissingColumnError(error, "max_attempts")) {
+        const fallback = await supabase
+          .from(TABLE_PAGES)
+          .insert({
+            teacher_id: teacherId,
+            page_number: nextNum,
+            page_name: name,
+          })
+          .select("id, teacher_id, page_number, page_name, created_at")
+          .single();
+        data = fallback.data as any;
+        error = fallback.error;
+      }
 
       if (error) {
         reportSb("CREATE_PAGE", error);
@@ -802,6 +957,7 @@ const GestionResultatsTentatives: React.FC<Props> = ({ setPage }) => {
         teacher_id: String((data as any).teacher_id),
         page_number: Number((data as any).page_number ?? nextNum),
         page_name: String((data as any).page_name || name),
+        max_attempts: (data as any).max_attempts == null ? null : Number((data as any).max_attempts),
         created_at: (data as any).created_at ?? null,
       };
 
@@ -1180,6 +1336,57 @@ const GestionResultatsTentatives: React.FC<Props> = ({ setPage }) => {
 
   const empty = !loading && rows.length === 0;
 
+  const renderMaxAttemptsBar = () => {
+    const draftLimit = toIntOrNull(maxAttemptsDraft);
+    const hasLimit = draftLimit != null || currentPageObj?.max_attempts != null;
+
+    return (
+      <View style={styles.maxAttemptsBar}>
+        <View style={styles.maxAttemptsLabelWrap}>
+          <Text style={styles.maxAttemptsTitle} numberOfLines={1}>
+            Tentatives max
+          </Text>
+        </View>
+
+        <View style={styles.maxAttemptsControls}>
+          <TouchableOpacity
+            activeOpacity={0.9}
+            onPress={() => saveMaxAttempts(null)}
+            disabled={!teacherId}
+            style={[styles.limitChoiceBtn, !hasLimit && styles.limitChoiceBtnActive]}
+          >
+            <Text style={[styles.limitChoiceText, !hasLimit && styles.limitChoiceTextActive]}>
+              Illimité
+            </Text>
+          </TouchableOpacity>
+
+          <View style={[styles.limitNumberWrap, hasLimit && styles.limitNumberWrapActive]}>
+            <TextInput
+              value={maxAttemptsDraft}
+              onChangeText={(value) => {
+                const cleaned = value.replace(/[^0-9]/g, "");
+                setMaxAttemptsDraft(cleaned);
+                updateCurrentPageLocal({ max_attempts: cleaned ? Number(cleaned) : null });
+              }}
+              onFocus={() => {
+                if (currentPageObj?.max_attempts == null) setMaxAttemptsDraft("");
+              }}
+              onBlur={commitMaxAttemptsDraft}
+              onSubmitEditing={commitMaxAttemptsDraft}
+              editable={!!teacherId}
+              keyboardType="number-pad"
+              returnKeyType="done"
+              placeholder="Nombre"
+              placeholderTextColor="rgba(15,23,42,0.42)"
+              style={styles.limitNumberInput}
+            />
+            <Text style={styles.limitNumberSuffix}>max</Text>
+          </View>
+        </View>
+      </View>
+    );
+  };
+
   const renderPagesBar = () => {
     return (
       <View style={styles.pagesBar}>
@@ -1292,6 +1499,7 @@ const GestionResultatsTentatives: React.FC<Props> = ({ setPage }) => {
         </View>
 
         {renderPagesBar()}
+        {renderMaxAttemptsBar()}
 
         <View style={{ flex: 1 }}>
           {loading ? (
@@ -1811,6 +2019,78 @@ const styles = StyleSheet.create({
     color: C_TEXT,
     textAlign: "center",
     ...(Platform.OS === "web" ? ({ outlineStyle: "none", outlineWidth: 0 } as any) : null),
+  },
+
+  maxAttemptsBar: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(0,0,0,0.05)",
+    backgroundColor: "rgba(255,255,255,0.46)",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 6 as any,
+    flexWrap: "nowrap",
+  },
+  maxAttemptsLabelWrap: { width: 112, flexShrink: 1 },
+  maxAttemptsTitle: { color: C_TEXT, fontSize: 12, fontWeight: "900" },
+  maxAttemptsControls: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6 as any,
+    flexWrap: "nowrap",
+    justifyContent: "flex-end",
+    flexShrink: 0,
+  },
+  limitChoiceBtn: {
+    minHeight: 34,
+    borderRadius: 12,
+    paddingHorizontal: 9,
+    borderWidth: 1,
+    borderColor: "rgba(15,23,42,0.12)",
+    backgroundColor: "rgba(255,255,255,0.82)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  limitChoiceBtnActive: {
+    backgroundColor: "#DCFCE7",
+    borderColor: "rgba(22,163,74,0.34)",
+  },
+  limitChoiceText: { color: C_TEXT, fontSize: 11, fontWeight: "900" },
+  limitChoiceTextActive: { color: "#166534" },
+  limitNumberWrap: {
+    minHeight: 34,
+    width: 104,
+    flexShrink: 0,
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    borderWidth: 1,
+    borderColor: "rgba(15,23,42,0.12)",
+    backgroundColor: "rgba(255,255,255,0.82)",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4 as any,
+  },
+  limitNumberWrapActive: {
+    backgroundColor: "#EFF6FF",
+    borderColor: "rgba(59,130,246,0.34)",
+  },
+  limitNumberInput: {
+    minWidth: 40,
+    flex: 1,
+    paddingVertical: 2,
+    paddingHorizontal: 0,
+    color: C_TEXT,
+    fontWeight: "900",
+    textAlign: "center",
+    ...(Platform.OS === "web" ? ({ outlineStyle: "none", outlineWidth: 0 } as any) : null),
+  },
+  limitNumberSuffix: {
+    color: "rgba(15,23,42,0.62)",
+    fontSize: 10,
+    fontWeight: "900",
   },
 
   center: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24 },

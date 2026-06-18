@@ -649,7 +649,10 @@ const GestionEleves: React.FC<Props> = ({
 
     const { error } = await supabase
       .from("students")
-      .delete()
+      .update({
+        group_id: null,
+        updated_at: new Date().toISOString(),
+      })
       .eq("id", deleteTarget.id)
       .eq("teacher_id", professeur.user_id)
       .eq("group_id", groupId);
@@ -657,8 +660,8 @@ const GestionEleves: React.FC<Props> = ({
     setDeletingId(null);
 
     if (error) {
-      console.error("Erreur suppression élève:", error.message);
-      Alert.alert("Erreur", "Impossible de supprimer l'élève.");
+      console.error("Erreur retrait élève:", error.message);
+      Alert.alert("Erreur", "Impossible de retirer l'élève de cette classe.");
       return;
     }
 

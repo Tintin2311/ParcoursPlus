@@ -20,7 +20,8 @@ type MenuItem = {
   id:
     | "GestionResultatsTentatives"
     | "GestionPoints"
-    | "GestionResultatsProgressivite";
+    | "GestionResultatsProgressivite"
+    | "BaremesEvaluation";
   title: string;
   subtitle: string;
   imageUri: string;
@@ -62,6 +63,9 @@ const IMG_POINTS =
 const IMG_PROGRESSIVITE =
   "https://aswhubzprehjnunbpkwc.supabase.co/storage/v1/object/public/background/Prof_PageBaremes/Progressivite.png";
 
+const IMG_EVALUATION =
+  "https://aswhubzprehjnunbpkwc.supabase.co/storage/v1/object/public/background/Prof_PageBaremes/BaremeEval.png";
+
 /* ======================= Helpers ======================= */
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
@@ -87,12 +91,12 @@ const GestionResultats: React.FC<Props> = ({ setPage }) => {
   const estimatedInnerHeight =
     usableHeight - headerHeight - contentVerticalPadding * 2 - topPadding;
 
-  const rawCardHeight = (estimatedInnerHeight - listGap * 2) / 3;
+  const rawCardHeight = (estimatedInnerHeight - listGap * 3) / 4;
 
   const cardHeight = clamp(
     rawCardHeight,
-    isPhone ? (verySmallPhone ? 122 : 132) : 144,
-    isDesktop ? 196 : 176
+    isPhone ? (verySmallPhone ? 108 : 116) : 118,
+    isDesktop ? 164 : 152
   );
 
   const titleSize = isDesktop ? 20 : isTablet ? 18 : verySmallPhone ? 15 : 16;
@@ -118,6 +122,12 @@ const GestionResultats: React.FC<Props> = ({ setPage }) => {
         title: "Progressivité",
         subtitle: "Faites évoluer la difficulté, choisissez les critères pour débloquer des parcours.",
         imageUri: IMG_PROGRESSIVITE,
+      },
+      {
+        id: "BaremesEvaluation",
+        title: "Evaluation",
+        subtitle: "Configurez les critères d'évaluation.",
+        imageUri: IMG_EVALUATION,
       },
     ],
     []

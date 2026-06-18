@@ -76,6 +76,8 @@ type ParcoursActif = {
   format_type?: ParcoursFormatType | null;
   user_id?: string | null;
   professeur_id?: string | null;
+  mode_evaluation?: boolean | null;
+  bareme_evaluation_id?: string | null;
   [key: string]: any;
 };
 
@@ -194,7 +196,7 @@ const getDisplayName = (row: any) => String(row?.nom ?? row?.name ?? "Parcours")
 
 const parseChronometreMs = (value: any) => {
   const n = Number(value ?? 0);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  return Number.isFinite(n) && n > 0 ? Math.floor(n / 1000) * 1000 : 0;
 };
 
 const formatChronometre = (ms: number) => {
@@ -287,6 +289,22 @@ const toBool = (value: any, fallback = false): boolean => {
 const parseJsonObject = (value: any): any => {
   const parsed = safeParseObject(value);
   return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+};
+
+const parseAttemptDetails = (value: any): AttemptDetail[] => {
+  if (Array.isArray(value)) return value as AttemptDetail[];
+  const parsed = safeParseObject(value);
+  return Array.isArray(parsed) ? (parsed as AttemptDetail[]) : [];
+};
+
+const resultsFromAttemptDetails = (attempt: TentativeRow | null | undefined) => {
+  const out: Record<string, boolean | null> = {};
+  parseAttemptDetails(attempt?.details).forEach((detail) => {
+    const key = String(detail?.balise_id ?? "").trim();
+    if (!key) return;
+    out[key] = detail?.correct === true;
+  });
+  return out;
 };
 
 const emptyPoincon = (rows: number, cols: number): PoinconCell =>
@@ -1074,10 +1092,18 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   const [resultPauseRemainingMs, setResultPauseRemainingMs] = useState(0);
   const [errorReviewUntilMs, setErrorReviewUntilMs] = useState<number | null>(null);
   const [errorReviewRemainingMs, setErrorReviewRemainingMs] = useState(0);
+  const [attemptsExhaustedFinal, setAttemptsExhaustedFinal] = useState(false);
+  const [evaluationResult, setEvaluationResult] = useState<{
+    note: number | null;
+    max: number | null;
+    reason?: string | null;
+  } | null>(null);
+  const [evaluationRequiresTime, setEvaluationRequiresTime] = useState(false);
 
   const [pointsConfig, setPointsConfig] = useState<ParcoursPointsConfig>(getDefaultPointsConfig());
   const [tentativeBaremeRows, setTentativeBaremeRows] = useState<ParcoursBaremeTentativeRow[]>([]);
   const [resolvedTentativePage, setResolvedTentativePage] = useState<number | null>(null);
+  const [resolvedMaxAttempts, setResolvedMaxAttempts] = useState<number | null>(null);
   const [resolvedTentativeGroupId, setResolvedTentativeGroupId] = useState<string | null>(null);
   const [resolvedProfesseurId, setResolvedProfesseurId] = useState<string | null>(null);
   const [supportParcoursId, setSupportParcoursId] = useState<string | null>(null);
@@ -1090,6 +1116,9 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
 
   const isCompleted = balises.length > 0 && validatedBaliseIds.length >= balises.length;
   const isCompletedEffective = isCompleted || parcoursTermineDb;
+  const maxAttemptsReached =
+    attemptsExhaustedFinal ||
+    (resolvedMaxAttempts != null && tentativesCount >= resolvedMaxAttempts && !isCompleted);
 
   useEffect(() => {
     setActivePoinconIndex((prev) => {
@@ -1120,6 +1149,36 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   const chronometreLabel = useMemo(() => formatChronometre(chronometreMs), [chronometreMs]);
   const chronometrePaused = chronometreMs > 0 && !chronometreRunning;
   const errorReviewLabel = useMemo(() => String(Math.ceil(Math.max(0, errorReviewRemainingMs) / 1000)), [errorReviewRemainingMs]);
+  const exhaustedFinalTimeLabel = useMemo(() => formatChronometre(chronometreMs), [chronometreMs]);
+  const evaluationNoteLabel = useMemo(() => {
+    if (!evaluationResult || evaluationResult.note == null) return "";
+    const note = Number(evaluationResult.note);
+    const max = evaluationResult.max == null ? null : Number(evaluationResult.max);
+    const fmt = (value: number) =>
+      Number.isInteger(value) ? String(value) : String(Math.round(value * 100) / 100).replace(".", ",");
+    return max != null && Number.isFinite(max)
+      ? `${fmt(note)} / ${fmt(max)}`
+      : fmt(note);
+  }, [evaluationResult]);
+  const evaluationUnavailableLabel = useMemo(() => {
+    if (!evaluationResult || evaluationResult.note != null) return "";
+    const reason = String(evaluationResult.reason ?? "");
+    if (reason === "not_finished") return "Note en attente";
+    if (reason === "no_matching_row") return "Aucune ligne du barème ne correspond";
+    if (reason === "no_matching_column") return "Aucune colonne du barème ne correspond";
+    if (reason === "no_matching_cell") return "Aucune case du barème ne correspond";
+    if (reason === "no_stats") return "Statistiques introuvables";
+    return "Note indisponible";
+  }, [evaluationResult]);
+  const showEvaluationChronoGate =
+    evaluationRequiresTime &&
+    !loading &&
+    !!parcoursActif?.id &&
+    chronometreMs <= 0 &&
+    !chronometreRunning &&
+    !chronometreFinished &&
+    !chronometreCountdown &&
+    !attemptsExhaustedFinal;
 
   const getCurrentChronometreMs = useCallback(() => {
     if (!chronometreRunning || chronometreStartedAtRef.current == null) {
@@ -1141,6 +1200,100 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       )
     );
   }, [eleveConnecte, studentId]);
+
+  const refreshEvaluationResult = useCallback(
+    async (targetStudentId?: string | null, targetParcoursId?: string | null) => {
+      const sid = targetStudentId || studentId;
+      const pid = targetParcoursId || parcoursActif?.id;
+      if (!sid || !pid) {
+        setEvaluationResult(null);
+        return null;
+      }
+
+      try {
+        const direct = await supabase.rpc("get_evaluation_note", {
+          p_student_id: sid,
+          p_parcours_id: pid,
+        });
+
+        if (!direct.error) {
+          const row = Array.isArray(direct.data) ? direct.data[0] : direct.data;
+          if (row?.bareme_id) {
+            const note = row?.note == null ? null : Number(row.note);
+            const max = row?.max_points == null ? null : Number(row.max_points);
+            const next = { note, max, reason: row?.reason ? String(row.reason) : null };
+            setEvaluationResult(next);
+            return next;
+          }
+        } else {
+          console.warn("Lecture directe note évaluation impossible :", direct.error);
+        }
+
+        await supabase.rpc("recalculer_evaluation_note", {
+          p_student_id: sid,
+          p_parcours_id: pid,
+        });
+
+        const { data, error } = await supabase
+          .from("eleve_parcours_stats")
+          .select("evaluation_note,evaluation_max_points,evaluation_bareme_id")
+          .eq("student_id", sid)
+          .eq("parcours_id", pid)
+          .maybeSingle();
+
+        if (error) {
+          console.warn("Lecture note évaluation impossible :", error);
+          return null;
+        }
+
+        const note = data?.evaluation_note == null ? null : Number(data.evaluation_note);
+        const max = data?.evaluation_max_points == null ? null : Number(data.evaluation_max_points);
+        const next = data?.evaluation_bareme_id ? { note, max, reason: null } : null;
+        setEvaluationResult(next);
+        return next;
+      } catch (error) {
+        console.warn("Recalcul note évaluation impossible :", error);
+        return null;
+      }
+    },
+    [parcoursActif?.id, studentId]
+  );
+
+  const loadEvaluationRequiresTime = useCallback(async (baremeId?: string | null) => {
+    const cleanBaremeId = String(baremeId ?? "").trim();
+    if (!cleanBaremeId) return false;
+
+    try {
+      const rpc = await supabase.rpc("evaluation_bareme_requires_time", {
+        p_bareme_id: cleanBaremeId,
+      });
+
+      if (!rpc.error && typeof rpc.data === "boolean") {
+        return rpc.data;
+      }
+
+      if (rpc.error) {
+        console.warn("RPC barème évaluation temps indisponible :", rpc.error);
+      }
+
+      const { data, error } = await supabase
+        .from("group_evaluation_bareme_axes")
+        .select("id")
+        .eq("bareme_page_id", cleanBaremeId)
+        .eq("metric", "time")
+        .limit(1);
+
+      if (error) {
+        console.warn("Lecture barème évaluation temps impossible :", error);
+        return false;
+      }
+
+      return ((data as Array<{ id?: string }> | null) ?? []).length > 0;
+    } catch (error) {
+      console.warn("Vérification barème évaluation temps impossible :", error);
+      return false;
+    }
+  }, []);
 
   const saveChronometre = useCallback(
     async (nextMs: number, running = false, startedAt: string | null = null, finished = false) => {
@@ -1213,6 +1366,65 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       savedScore,
       studentId,
       tentativesCount,
+    ]
+  );
+
+  const finishParcoursByAttemptsExhausted = useCallback(
+    async (finalResults: Record<string, boolean | null>, finalMsOverride?: number) => {
+      if (!parcoursActif?.id) return;
+
+      const finalMs = parseChronometreMs(finalMsOverride ?? getCurrentChronometreMs());
+      const now = new Date().toISOString();
+
+      chronometreStartedAtRef.current = null;
+      chronometreBaseMsRef.current = finalMs;
+      setChronometreMs(finalMs);
+      setChronometreRunning(false);
+      setChronometreFinished(true);
+      setAttemptsExhaustedFinal(true);
+      setResultats(finalResults);
+      setResultPauseUntilMs(null);
+      setResultPauseRemainingMs(0);
+      setErrorReviewUntilMs(null);
+      setErrorReviewRemainingMs(0);
+
+      if (studentId) {
+        await AsyncStorage.removeItem(getChronoPauseStorageKey(studentId, parcoursActif.id)).catch(() => null);
+      }
+
+      await saveChronometre(finalMs, false, null, true);
+
+      const targetStudentIds = getChronometreStudentIds();
+      await Promise.all(
+        targetStudentIds.map(async (targetStudentId) => {
+          const { error } = await supabase
+            .from("eleve_parcours_stats")
+            .update({
+              parcours_termine: true,
+              chronometre_ms: finalMs,
+              chronometre_started_at: null,
+              chronometre_running: false,
+              chronometre_finished: true,
+              updated_at: now,
+            })
+            .eq("student_id", targetStudentId)
+            .eq("parcours_id", parcoursActif.id);
+
+          if (error) {
+            console.warn("Clôture par tentatives épuisées impossible :", error);
+          }
+        })
+      );
+
+      await refreshEvaluationResult(studentId, parcoursActif.id);
+    },
+    [
+      getChronometreStudentIds,
+      getCurrentChronometreMs,
+      parcoursActif?.id,
+      saveChronometre,
+      studentId,
+      refreshEvaluationResult,
     ]
   );
 
@@ -1529,6 +1741,37 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     await handleLogout(false);
   }, [chronometreFinished, getCurrentChronometreMs, handleLogout, parcoursActif?.id, saveChronometre, studentId]);
 
+  const startEvaluationChronometreGate = useCallback(async () => {
+    if (!parcoursActif?.id || chronometreSaving || chronometreCountdown || chronometreFinished) return;
+
+    const steps = ["3", "2", "1", "GO !"];
+    for (const step of steps) {
+      setChronometreCountdown(step);
+      await new Promise((resolve) => setTimeout(resolve, step === "GO !" ? 650 : 850));
+    }
+
+    const startedAt = new Date().toISOString();
+    const baseMs = 0;
+
+    chronometreBaseMsRef.current = baseMs;
+    chronometreStartedAtRef.current = new Date(startedAt).getTime();
+    setChronometreMs(baseMs);
+    setChronometreRunning(true);
+    setChronometreFinished(false);
+    setEvaluationRequiresTime(false);
+    setChronometreCountdown(null);
+
+    await saveChronometre(baseMs, true, startedAt, false);
+    await handleLogout(false);
+  }, [
+    chronometreCountdown,
+    chronometreFinished,
+    chronometreSaving,
+    handleLogout,
+    parcoursActif?.id,
+    saveChronometre,
+  ]);
+
   useEffect(() => {
     if (!resultPauseUntilMs || errorReviewUntilMs || chronometreFinished) return;
 
@@ -1737,8 +1980,14 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         loadChronometreMs(resolvedStudentId, resolvedParcoursId),
       ]);
 
+      const resolvedMaxAttemptsValue = baseResolvedConfig.resolvedMaxAttempts ?? null;
+      const attemptsExhausted =
+        resolvedMaxAttemptsValue != null &&
+        attempts.length >= resolvedMaxAttemptsValue &&
+        !progress.parcoursTermine;
+
       const effectiveTermine =
-        dbTermine ||
+        (dbTermine && !attemptsExhausted) ||
         progress.parcoursTermine ||
         (orderedBalises.length > 0 && progress.validatedIds.length >= orderedBalises.length);
 
@@ -1777,16 +2026,33 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       setTentativesCount(progressRaw.tentativesCount);
       setSavedPointsTotal(correctedTotal);
       setLastPointsGain(progressRaw.lastPointsGain);
-      setParcoursTermineDb(effectiveTermine);
+      setParcoursTermineDb(effectiveTermine || attemptsExhausted);
+      setAttemptsExhaustedFinal(attemptsExhausted);
+      if (attemptsExhausted) {
+        setResultats(resultsFromAttemptDetails(attempts[attempts.length - 1]));
+      }
       chronometreStartedAtRef.current = savedChronometre.running && savedChronometre.startedAt ? new Date(savedChronometre.startedAt).getTime() : null;
       chronometreBaseMsRef.current = savedChronometre.running
         ? Math.max(0, savedChronometre.ms - (Date.now() - (chronometreStartedAtRef.current ?? Date.now())))
         : savedChronometre.ms;
       setChronometreMs(savedChronometre.ms);
-      setChronometreRunning(savedChronometre.running);
-      setChronometreFinished(savedChronometre.finished);
+      setChronometreRunning(attemptsExhausted ? false : savedChronometre.running);
+      setChronometreFinished(attemptsExhausted ? true : savedChronometre.finished);
 
-      if (resolvedStudentId && resolvedParcoursId) {
+      if (attemptsExhausted && (savedChronometre.running || !savedChronometre.finished)) {
+        await finishParcoursByAttemptsExhausted(
+          resultsFromAttemptDetails(attempts[attempts.length - 1]),
+          savedChronometre.ms
+        );
+      }
+
+      if (attemptsExhausted) {
+        setResultPauseUntilMs(null);
+        setResultPauseRemainingMs(0);
+        if (resolvedStudentId && resolvedParcoursId) {
+          await AsyncStorage.removeItem(getChronoPauseStorageKey(resolvedStudentId, resolvedParcoursId)).catch(() => null);
+        }
+      } else if (resolvedStudentId && resolvedParcoursId) {
         const pauseRaw = await AsyncStorage.getItem(
           getChronoPauseStorageKey(resolvedStudentId, resolvedParcoursId)
         ).catch(() => null);
@@ -1801,14 +2067,21 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         }
       }
 
+      if (effectiveTermine || attemptsExhausted) {
+        await refreshEvaluationResult(resolvedStudentId, resolvedParcoursId);
+      } else {
+        setEvaluationResult(null);
+      }
+
       setPointsConfig(fixedPointsConfig);
       setResolvedTentativePage(fixedAttemptPage);
+      setResolvedMaxAttempts(resolvedMaxAttemptsValue);
       setResolvedTentativeGroupId(baseResolvedConfig.resolvedGroupId);
       setResolvedProfesseurId(baseResolvedConfig.resolvedProfesseurId);
       setSupportParcoursId(baseResolvedConfig.supportParcoursId);
       setTentativeBaremeRows(baremes);
     },
-    [forceParcoursBonusIfNeeded]
+    [finishParcoursByAttemptsExhausted, forceParcoursBonusIfNeeded, loadEvaluationRequiresTime, refreshEvaluationResult]
   );
 
   const resetProgress = useCallback(() => {
@@ -1825,6 +2098,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     setPointsConfig(getDefaultPointsConfig());
     setTentativeBaremeRows([]);
     setResolvedTentativePage(null);
+    setResolvedMaxAttempts(null);
     setResolvedTentativeGroupId(null);
     setResolvedProfesseurId(null);
     setSupportParcoursId(null);
@@ -1842,6 +2116,9 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     setResultPauseRemainingMs(0);
     setErrorReviewUntilMs(null);
     setErrorReviewRemainingMs(0);
+    setAttemptsExhaustedFinal(false);
+    setEvaluationResult(null);
+    setEvaluationRequiresTime(false);
     setConfirmVerifyVisible(false);
     setConfirmChronometreVisible(false);
     setChronometreCountdown(null);
@@ -1872,6 +2149,13 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       if (parcoursError) throw parcoursError;
 
       const parcoursDb = (((parcoursData as ParcoursActif[] | null) ?? [])[0] as ParcoursActif | undefined) ?? parcoursActif;
+      const evaluationModeActive = parcoursDb?.mode_evaluation === true || parcoursActif?.mode_evaluation === true;
+      const evaluationBaremeId = parcoursDb?.bareme_evaluation_id ?? parcoursActif?.bareme_evaluation_id ?? null;
+      const needsEvaluationTimeGate = evaluationModeActive
+        ? await loadEvaluationRequiresTime(evaluationBaremeId)
+        : false;
+
+      setEvaluationRequiresTime(needsEvaluationTimeGate);
 
       const rawBalisesOrdre = parcoursDb?.balises_ordre ?? parcoursActif?.balises_ordre ?? null;
       const tokens = extractTokens(rawBalisesOrdre);
@@ -2085,6 +2369,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   const handleCodeChange = useCallback(
     (balise: BaliseAffichee, baliseIndex: number, text: string) => {
       const key = balise.instanceKey;
+      if (maxAttemptsReached) return;
       if (validatedSet.has(key)) return;
 
       const expectedLength = getExpectedLength(balise);
@@ -2108,7 +2393,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         focusNextBalise(baliseIndex);
       }, 90);
     },
-    [focusNextBalise, getExpectedLength, validatedSet]
+    [focusNextBalise, getExpectedLength, maxAttemptsReached, validatedSet]
   );
 
   const computeGainBreakdown = useCallback(
@@ -2147,6 +2432,12 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
 
       if (isCompleted) {
         throw new Error("Ce parcours est déjà terminé.");
+      }
+
+      if (maxAttemptsReached) {
+        throw new Error(
+          `La limite de ${resolvedMaxAttempts} tentative${resolvedMaxAttempts === 1 ? "" : "s"} est atteinte.`
+        );
       }
 
       const parcoursId = parcoursActif.id;
@@ -2285,6 +2576,10 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
           })
       );
 
+      const evaluation = effectiveTermine
+        ? await refreshEvaluationResult(studentId, parcoursActif.id)
+        : null;
+
       setAttemptsHistory((prev) => [
         ...prev,
         {
@@ -2335,12 +2630,15 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         nextSavedPointsTotal: correctedTotal,
         nextValidatedCount: nextProgress.validatedCount,
         nextTentativesCount: nextProgress.tentativesCount || result.nextTentativesCount,
+        evaluation,
       };
     },
     [
       studentId,
       parcoursActif?.id,
       isCompleted,
+      maxAttemptsReached,
+      resolvedMaxAttempts,
       computeGainBreakdown,
       balises,
       validatedBaliseIds,
@@ -2351,6 +2649,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       completionAttemptNumber,
       tentativeBaremeRows,
       forceParcoursBonusIfNeeded,
+      refreshEvaluationResult,
       eleveConnecte,
     ]
   );
@@ -2421,6 +2720,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         nextSavedPointsTotal,
         nextValidatedCount,
         nextTentativesCount,
+        evaluation,
       } = await saveTentativeAndStats(nextResults);
 
       const hasErrors = Object.values(nextResults).some((value) => value === false);
@@ -2443,19 +2743,44 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         }
 
         await saveChronometre(finalMs, false, null, true);
+        const finalEvaluation = await refreshEvaluationResult(studentId, parcoursActif?.id);
 
         const totalSeconds = Math.floor(finalMs / 1000);
         const minutes = Math.floor(totalSeconds / 60);
         const seconds = totalSeconds % 60;
+        const noteLine =
+          finalEvaluation?.note != null
+            ? `\nNote : ${
+                Number.isInteger(Number(finalEvaluation.note))
+                  ? Number(finalEvaluation.note)
+                  : String(Math.round(Number(finalEvaluation.note) * 100) / 100).replace(".", ",")
+              }${
+                finalEvaluation.max != null
+                  ? ` / ${
+                      Number.isInteger(Number(finalEvaluation.max))
+                        ? Number(finalEvaluation.max)
+                        : String(Math.round(Number(finalEvaluation.max) * 100) / 100).replace(".", ",")
+                    }`
+                  : ""
+              }`
+            : "";
         setAppMessage({
           title: "Félicitations",
-          message: `Vous avez réussi le parcours en ${minutes} minutes et ${seconds} secondes.`,
+          message: `Vous avez réussi le parcours en ${minutes} minutes et ${seconds} secondes.${noteLine}`,
           tone: "success",
         });
         return;
       }
 
       if (hasErrors) {
+        const attemptsLimitNowReached =
+          resolvedMaxAttempts != null && nextTentativesCount >= resolvedMaxAttempts;
+
+        if (attemptsLimitNowReached) {
+          await finishParcoursByAttemptsExhausted(nextResults);
+          return;
+        }
+
         const reviewUntil = Date.now() + CHRONO_ERROR_REVIEW_MS;
         setErrorReviewUntilMs(reviewUntil);
         setErrorReviewRemainingMs(CHRONO_ERROR_REVIEW_MS);
@@ -2471,6 +2796,16 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         `Total : ${formatPointsLabel(nextSavedPointsTotal)}`,
         `Tentatives : ${nextTentativesCount}`,
       ];
+
+      if (evaluation?.note != null) {
+        lines.push(
+          `Note : ${String(Math.round(Number(evaluation.note) * 100) / 100).replace(".", ",")}${
+            evaluation.max != null
+              ? ` / ${String(Math.round(Number(evaluation.max) * 100) / 100).replace(".", ",")}`
+              : ""
+          }`
+        );
+      }
 
       if (breakdown.willComplete) lines.unshift("Parcours terminé ✅");
 
@@ -2496,8 +2831,11 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     poinconsSaisis,
     saveTentativeAndStats,
     getCurrentChronometreMs,
+    finishParcoursByAttemptsExhausted,
     parcoursActif?.id,
+    resolvedMaxAttempts,
     saveChronometre,
+    refreshEvaluationResult,
     studentId,
   ]);
 
@@ -2510,6 +2848,15 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         title: "Parcours terminé",
         message: "Ce parcours est déjà entièrement validé.",
         tone: "success",
+      });
+      return;
+    }
+
+    if (maxAttemptsReached) {
+      setAppMessage({
+        title: "Limite atteinte",
+        message: `La limite de ${resolvedMaxAttempts} tentative${resolvedMaxAttempts === 1 ? "" : "s"} est atteinte pour ce parcours.`,
+        tone: "warning",
       });
       return;
     }
@@ -2543,6 +2890,8 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     codesSaisis,
     poinconsSaisis,
     isCompleted,
+    maxAttemptsReached,
+    resolvedMaxAttempts,
     saving,
     runVerifierTout,
     getExpectedLength,
@@ -2567,14 +2916,14 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       return (
         <Pressable
           onPress={() => {
-            if (!alreadyValidated) focusBalise(item, true, true);
+            if (!alreadyValidated && !maxAttemptsReached) focusBalise(item, true, true);
           }}
           style={[styles.codeBoxesWrap, { gap: boxGap }, webPanYStyle]}
         >
           <TextInput
             ref={(ref) => setInputRef(key, ref)}
             value={alreadyValidated ? "" : typedValue}
-            editable={!alreadyValidated}
+            editable={!alreadyValidated && !maxAttemptsReached}
             maxLength={expectedLength}
             selection={selection}
             selectTextOnFocus={typedValue.length >= expectedLength}
@@ -2640,6 +2989,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       handleCodeChange,
       inputSelections,
       isCompact,
+      maxAttemptsReached,
       resultats,
       scheduleBaliseScroll,
       setInputRef,
@@ -2664,7 +3014,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       return (
         <Pressable
           onPress={() => {
-            if (!alreadyValidated) {
+            if (!alreadyValidated && !maxAttemptsReached) {
               setActiveBaliseKey(key);
               Keyboard.dismiss();
             }
@@ -2682,7 +3032,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
                 <TouchableOpacity
                   key={`${key}_cell_${r}_${c}`}
                   activeOpacity={0.85}
-                  disabled={alreadyValidated}
+                  disabled={alreadyValidated || maxAttemptsReached}
                   onPress={() => {
                     setActiveBaliseKey(key);
                     setResultats((prev) => ({ ...prev, [key]: null }));
@@ -2715,7 +3065,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         </Pressable>
       );
     },
-    [activeBaliseKey, isCompact, poinconsSaisis, resultats, validatedSet]
+    [activeBaliseKey, isCompact, maxAttemptsReached, poinconsSaisis, resultats, validatedSet]
   );
 
   const renderBalise = useCallback(
@@ -2821,7 +3171,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         <View style={[styles.bigPoinconCardOuter, { width: poinconCardWidth }, webPanXStyle]}>
           <Pressable
             onPress={() => {
-              if (!alreadyValidated) {
+              if (!alreadyValidated && !maxAttemptsReached) {
                 setActiveBaliseKey(key);
                 Keyboard.dismiss();
               }
@@ -2891,7 +3241,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
                     <TouchableOpacity
                       key={`${key}_big_cell_${r}_${c}`}
                       activeOpacity={0.82}
-                      disabled={alreadyValidated}
+                      disabled={alreadyValidated || maxAttemptsReached}
                       onPress={() => {
                         setActiveBaliseKey(key);
                         setResultats((prev) => ({ ...prev, [key]: null }));
@@ -2928,7 +3278,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         </View>
       );
     },
-    [activeBaliseKey, balises.length, getPoinconBigCellSize, goToPoinconIndex, isCompact, poinconCardMinHeight, poinconCardWidth, poinconsSaisis, pointsConfig, resultats, validatedSet, width]
+    [activeBaliseKey, balises.length, getPoinconBigCellSize, goToPoinconIndex, isCompact, maxAttemptsReached, poinconCardMinHeight, poinconCardWidth, poinconsSaisis, pointsConfig, resultats, validatedSet, width]
   );
 
   return (
@@ -2959,6 +3309,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
                 {parcoursNom}
               </Text>
 
+              {!showEvaluationChronoGate ? (
               <View style={[styles.topBarActions, isPoinconParcours && styles.topBarActionsCompact]}>
                 <TouchableOpacity
                   activeOpacity={0.9}
@@ -2993,8 +3344,10 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
                   <Feather name="log-out" size={isPoinconParcours ? 17 : 19} color="#fff" />
                 </TouchableOpacity>
               </View>
+              ) : null}
             </View>
 
+            {!showEvaluationChronoGate ? (
             <View style={[styles.stickyStatsBar, isPoinconParcours && styles.stickyStatsBarCompact]}>
               <View style={[styles.statBox, isPoinconParcours && styles.statBoxCompact, { width: statCardWidth }]}> 
                 <Text style={[styles.statValue, isPoinconParcours && styles.statValueCompact]}>{savedScore}/{balises.length}</Text>
@@ -3004,7 +3357,9 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
               </View>
 
               <View style={[styles.statBox, isPoinconParcours && styles.statBoxCompact, { width: statCardWidth }]}> 
-                <Text style={[styles.statValue, isPoinconParcours && styles.statValueCompact]}>{tentativesCount}</Text>
+                <Text style={[styles.statValue, isPoinconParcours && styles.statValueCompact]}>
+                  {resolvedMaxAttempts == null ? tentativesCount : `${tentativesCount}/${resolvedMaxAttempts}`}
+                </Text>
                 <Text style={[styles.statLabel, isPoinconParcours && styles.statLabelCompact]}>Tentatives</Text>
               </View>
 
@@ -3013,6 +3368,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
                 <Text style={[styles.bigScoreLabel, isPoinconParcours && styles.bigScoreLabelCompact]}>{formatPointUnit(savedPointsTotal)}</Text>
               </TouchableOpacity>
             </View>
+            ) : null}
           </View>
 
           <ScrollView
@@ -3038,6 +3394,29 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
               <View style={styles.stateCard}>
                 <ActivityIndicator size="large" color={C_GOLD} />
                 <Text style={styles.stateTitle}>Chargement...</Text>
+              </View>
+            ) : showEvaluationChronoGate ? (
+              <View style={styles.evaluationChronoGate}>
+                <View style={styles.evaluationChronoGateIcon}>
+                  <Feather name="clock" size={38} color="#FFFFFF" />
+                </View>
+                <Text style={styles.evaluationChronoGateTitle}>Evaluation chronométrée</Text>
+                <Text style={styles.evaluationChronoGateValue}>{chronometreLabel}</Text>
+                <TouchableOpacity
+                  activeOpacity={0.9}
+                  style={[styles.evaluationChronoGateButton, chronometreSaving && styles.evaluationChronoGateButtonDisabled]}
+                  onPress={startEvaluationChronometreGate}
+                  disabled={chronometreSaving}
+                >
+                  {chronometreSaving ? (
+                    <ActivityIndicator color="#FFFFFF" />
+                  ) : (
+                    <>
+                      <Feather name="play" size={22} color="#FFFFFF" />
+                      <Text style={styles.evaluationChronoGateButtonText}>Démarrer</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
               </View>
             ) : screenError ? (
               <View style={styles.stateCard}>
@@ -3119,11 +3498,11 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
                     style={[
                       styles.verifyAllBtn,
                       styles.verifyAllBtnBelowPoincon,
-                      (saving || isCompleted) && { opacity: 0.7 },
+                      (saving || isCompleted || maxAttemptsReached) && { opacity: 0.7 },
                       isCompleted && styles.verifyAllBtnDone,
                     ]}
                     onPress={handleVerifierTout}
-                    disabled={saving || isCompleted}
+                    disabled={saving || isCompleted || maxAttemptsReached}
                   >
                     {saving ? (
                       <ActivityIndicator color="#fff" />
@@ -3131,6 +3510,11 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
                       <>
                         <Feather name="award" size={17} color="#fff" />
                         <Text style={[styles.verifyAllBtnText, styles.verifyAllBtnTextCompact]}>Parcours terminé</Text>
+                      </>
+                    ) : maxAttemptsReached ? (
+                      <>
+                        <Feather name="lock" size={17} color="#fff" />
+                        <Text style={[styles.verifyAllBtnText, styles.verifyAllBtnTextCompact]}>Limite atteinte</Text>
                       </>
                     ) : (
                       <>
@@ -3170,18 +3554,18 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
             )}
           </ScrollView>
 
-          {!isPoinconParcours && !loading && !screenError && !!balises.length && (
+          {!showEvaluationChronoGate && !isPoinconParcours && !loading && !screenError && !!balises.length && (
             <View style={[styles.bottomBar, isPoinconParcours && styles.bottomBarCompact]}>
               <TouchableOpacity
                 activeOpacity={0.9}
                 style={[
                   styles.verifyAllBtn,
                   isPoinconParcours && styles.verifyAllBtnCompact,
-                  (saving || isCompleted) && { opacity: 0.7 },
+                  (saving || isCompleted || maxAttemptsReached) && { opacity: 0.7 },
                   isCompleted && styles.verifyAllBtnDone,
                 ]}
                 onPress={handleVerifierTout}
-                disabled={saving || isCompleted}
+                disabled={saving || isCompleted || maxAttemptsReached}
               >
                 {saving ? (
                   <ActivityIndicator color="#fff" />
@@ -3189,6 +3573,11 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
                   <>
                     <Feather name="award" size={17} color="#fff" />
                     <Text style={[styles.verifyAllBtnText, isPoinconParcours && styles.verifyAllBtnTextCompact]}>Parcours terminé</Text>
+                  </>
+                ) : maxAttemptsReached ? (
+                  <>
+                    <Feather name="lock" size={17} color="#fff" />
+                    <Text style={[styles.verifyAllBtnText, isPoinconParcours && styles.verifyAllBtnTextCompact]}>Limite atteinte</Text>
                   </>
                 ) : (
                   <>
@@ -3306,7 +3695,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
             </View>
           </Modal>
 
-          <Modal transparent visible={!!errorReviewUntilMs} animationType="fade">
+          <Modal transparent visible={!!errorReviewUntilMs || attemptsExhaustedFinal} animationType="fade">
             <View style={styles.errorReviewOverlay}>
               <View style={styles.errorReviewCard}>
                 <Text style={styles.errorReviewTitle}>Résultats de la tentative</Text>
@@ -3331,12 +3720,41 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
               </View>
 
               <View style={styles.errorReviewFooter}>
-                <Text style={styles.errorReviewFooterText}>
-                  Le chronomètre va redémarrer dans {errorReviewLabel} secondes.
-                </Text>
-                <Text style={styles.errorReviewFooterSub}>
-                  La session va être déconnectée automatiquement.
-                </Text>
+                {attemptsExhaustedFinal ? (
+                  <>
+                    <Text style={styles.errorReviewFooterText}>
+                      Vous avez utilisé toutes vos tentatives pour ce parcours.
+                    </Text>
+                    <Text style={styles.errorReviewFinalTimeLabel}>Temps final</Text>
+                    <Text style={styles.errorReviewFinalTimeValue}>
+                      {exhaustedFinalTimeLabel}
+                    </Text>
+                    {!!evaluationNoteLabel || !!evaluationUnavailableLabel ? (
+                      <View style={styles.evaluationNoteBox}>
+                        <Text style={styles.evaluationNoteLabel}>Note</Text>
+                        <Text style={[
+                          styles.evaluationNoteValue,
+                          !evaluationNoteLabel && styles.evaluationNoteUnavailableValue,
+                        ]}>
+                          {evaluationNoteLabel || evaluationUnavailableLabel}
+                        </Text>
+                      </View>
+                    ) : null}
+                    <Pressable style={styles.errorReviewExitBtn} onPress={handleRetour}>
+                      <Feather name="arrow-left" size={18} color="#FFFFFF" />
+                      <Text style={styles.errorReviewExitBtnText}>Quitter</Text>
+                    </Pressable>
+                  </>
+                ) : (
+                  <>
+                    <Text style={styles.errorReviewFooterText}>
+                      Le chronomètre va redémarrer dans {errorReviewLabel} secondes.
+                    </Text>
+                    <Text style={styles.errorReviewFooterSub}>
+                      La session va être déconnectée automatiquement.
+                    </Text>
+                  </>
+                )}
               </View>
             </View>
           </Modal>
@@ -4373,6 +4791,79 @@ const styles = StyleSheet.create({
     fontWeight: "900",
   },
 
+  evaluationChronoGate: {
+    minHeight: 520,
+    flexGrow: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 34,
+    paddingHorizontal: 18,
+  },
+  evaluationChronoGateIcon: {
+    width: 78,
+    height: 78,
+    borderRadius: 24,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(34,197,94,0.94)",
+    borderWidth: 2,
+    borderColor: "rgba(255,255,255,0.72)",
+    shadowColor: "#0F172A",
+    shadowOpacity: 0.18,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 8,
+  },
+  evaluationChronoGateTitle: {
+    marginTop: 18,
+    color: "#FFFFFF",
+    fontSize: 26,
+    lineHeight: 32,
+    fontWeight: "900",
+    textAlign: "center",
+    textShadowColor: "rgba(6,24,39,0.55)",
+    textShadowOffset: { width: 0, height: 2 },
+    textShadowRadius: 8,
+  },
+  evaluationChronoGateValue: {
+    marginTop: 16,
+    color: "#FFFFFF",
+    fontSize: 96,
+    lineHeight: 110,
+    fontWeight: "900",
+    textAlign: "center",
+    textShadowColor: "rgba(6,24,39,0.62)",
+    textShadowOffset: { width: 0, height: 5 },
+    textShadowRadius: 18,
+  },
+  evaluationChronoGateButton: {
+    marginTop: 22,
+    minHeight: 62,
+    minWidth: 210,
+    borderRadius: 22,
+    paddingHorizontal: 28,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    backgroundColor: C_GREEN,
+    borderWidth: 2,
+    borderColor: "rgba(255,255,255,0.72)",
+    shadowColor: "#0F172A",
+    shadowOpacity: 0.24,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 8,
+  },
+  evaluationChronoGateButtonDisabled: {
+    opacity: 0.72,
+  },
+  evaluationChronoGateButtonText: {
+    color: "#FFFFFF",
+    fontSize: 20,
+    fontWeight: "900",
+  },
+
   countdownOverlay: {
     flex: 1,
     backgroundColor: "rgba(6,24,39,0.82)",
@@ -4460,6 +4951,73 @@ const styles = StyleSheet.create({
     lineHeight: 19,
     fontWeight: "800",
     textAlign: "center",
+  },
+  errorReviewFinalTimeLabel: {
+    marginTop: 14,
+    color: C_MUTED,
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: "900",
+    textAlign: "center",
+    textTransform: "uppercase",
+  },
+  errorReviewFinalTimeValue: {
+    marginTop: 3,
+    color: "#0F172A",
+    fontSize: 36,
+    lineHeight: 42,
+    fontWeight: "900",
+    textAlign: "center",
+  },
+  evaluationNoteBox: {
+    alignSelf: "center",
+    marginTop: 14,
+    borderRadius: 18,
+    backgroundColor: "#DBEAFE",
+    borderWidth: 1,
+    borderColor: "rgba(37,99,235,0.28)",
+    paddingVertical: 10,
+    paddingHorizontal: 24,
+    minWidth: 170,
+    alignItems: "center",
+  },
+  evaluationNoteLabel: {
+    color: "#1D4ED8",
+    fontSize: 12,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
+  evaluationNoteValue: {
+    marginTop: 2,
+    color: "#0F172A",
+    fontSize: 30,
+    lineHeight: 36,
+    fontWeight: "900",
+  },
+  evaluationNoteUnavailableValue: {
+    maxWidth: 230,
+    color: C_RED,
+    fontSize: 14,
+    lineHeight: 19,
+    textAlign: "center",
+  },
+  errorReviewExitBtn: {
+    alignSelf: "center",
+    marginTop: 14,
+    minHeight: 46,
+    minWidth: 150,
+    borderRadius: 16,
+    paddingHorizontal: 18,
+    backgroundColor: "#0F172A",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
+  errorReviewExitBtnText: {
+    color: "#FFFFFF",
+    fontSize: 15,
+    fontWeight: "900",
   },
 
   modalBackdrop: {

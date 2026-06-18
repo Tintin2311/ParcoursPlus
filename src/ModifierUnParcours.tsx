@@ -59,6 +59,11 @@ type FolderItem = {
   parent_folder_id?: string | null;
 };
 
+type EvaluationBaremeOption = {
+  id: string;
+  name: string;
+};
+
 type ParcoursRecord = {
   id: string;
   nom: string | null;
@@ -67,6 +72,8 @@ type ParcoursRecord = {
   folder_id: string | null;
   format_type: ParcoursFormatType | null;
   allow_duplicate_balises: boolean;
+  mode_evaluation: boolean;
+  bareme_evaluation_id: string | null;
 };
 
 type SelectedBaliseOccurrence = Balise & {
@@ -476,10 +483,29 @@ const fetchAllFolders = async (): Promise<FolderItem[]> => {
   }));
 };
 
+const fetchEvaluationBaremes = async (): Promise<EvaluationBaremeOption[]> => {
+  const { data, error } = await supabase
+    .from("group_evaluation_bareme_pages")
+    .select("id, page_name, page_number")
+    .order("page_number", { ascending: true });
+
+  if (error) {
+    const msg = String(error.message || "").toLowerCase();
+    if (msg.includes("does not exist") || msg.includes("relation")) return [];
+    console.error("❌ fetchEvaluationBaremes:", error);
+    return [];
+  }
+
+  return (data || []).map((row: any) => ({
+    id: String(row.id),
+    name: String(row.page_name || `Evaluation ${row.page_number || ""}`).trim(),
+  }));
+};
+
 const fetchParcoursById = async (parcoursId: string): Promise<ParcoursRecord | null> => {
   const primary = await supabase
     .from("parcours")
-    .select("id, nom, description, balises_ordre, folder_id, format_type, allow_duplicate_balises")
+    .select("id, nom, description, balises_ordre, folder_id, format_type, allow_duplicate_balises, mode_evaluation, bareme_evaluation_id")
     .eq("id", parcoursId)
     .single();
 
@@ -493,6 +519,8 @@ const fetchParcoursById = async (parcoursId: string): Promise<ParcoursRecord | n
       folder_id: d.folder_id ?? null,
       format_type: ((d as any).format_type ?? null) as ParcoursFormatType | null,
       allow_duplicate_balises: !!(d as any).allow_duplicate_balises,
+      mode_evaluation: !!(d as any).mode_evaluation,
+      bareme_evaluation_id: (d as any).bareme_evaluation_id ?? null,
     };
   }
 
@@ -516,6 +544,8 @@ const fetchParcoursById = async (parcoursId: string): Promise<ParcoursRecord | n
     folder_id: d.folder_id ?? null,
     format_type: null,
     allow_duplicate_balises: false,
+    mode_evaluation: false,
+    bareme_evaluation_id: null,
   };
 };
 
@@ -529,6 +559,8 @@ const updateParcoursInSupabase = async (
     professeur_id?: string | null;
     format_type: ParcoursFormatType;
     allow_duplicate_balises: boolean;
+    mode_evaluation: boolean;
+    bareme_evaluation_id: string | null;
   }
 ) => {
   const primary = await supabase
@@ -543,8 +575,9 @@ const updateParcoursInSupabase = async (
   const msg = String(primary.error.message || "").toLowerCase();
   const missingFormat = msg.includes("format_type");
   const missingDup = msg.includes("allow_duplicate_balises");
+  const missingEval = msg.includes("mode_evaluation") || msg.includes("bareme_evaluation_id");
 
-  if (!missingFormat && !missingDup) throw primary.error;
+  if (!missingFormat && !missingDup && !missingEval) throw primary.error;
 
   const fallbackPayload: any = {
     nom: payload.nom,
@@ -565,7 +598,7 @@ const updateParcoursInSupabase = async (
 
   Alert.alert(
     "Colonnes manquantes",
-    "Le parcours a été mis à jour, mais format_type et/ou allow_duplicate_balises n'existent pas encore dans la table parcours."
+    "Le parcours a été mis à jour, mais certaines colonnes récentes n'existent pas encore dans la table parcours."
   );
 
   return fallback.data;
@@ -589,6 +622,8 @@ const ModifierUnParcours: React.FC<Props> = ({
   const [description, setDescription] = useState("");
   const [formatType, setFormatType] = useState<ParcoursFormatType | null>(null);
   const [allowDuplicateBalises, setAllowDuplicateBalises] = useState(false);
+  const [modeEvaluation, setModeEvaluation] = useState(false);
+  const [selectedEvaluationBaremeId, setSelectedEvaluationBaremeId] = useState<string | null>(null);
 
   const [balises, setBalises] = useState<Balise[]>([]);
   const [selectedBalises, setSelectedBalises] = useState<Balise[]>([]);
@@ -596,6 +631,7 @@ const ModifierUnParcours: React.FC<Props> = ({
   const [baliseFormatPayloadMap, setBaliseFormatPayloadMap] = useState<BaliseFormatPayloadMap>(new Map());
 
   const [folders, setFolders] = useState<FolderItem[]>([]);
+  const [evaluationBaremes, setEvaluationBaremes] = useState<EvaluationBaremeOption[]>([]);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const [folderModalVisible, setFolderModalVisible] = useState(false);
 
@@ -625,10 +661,11 @@ const ModifierUnParcours: React.FC<Props> = ({
       try {
         setLoading(true);
 
-        const [allBalises, allFolders, allFormats, parcours] = await Promise.all([
+        const [allBalises, allFolders, allFormats, allEvaluationBaremes, parcours] = await Promise.all([
           fetchAllBalises(),
           fetchAllFolders(),
           fetchAllBaliseFormats(),
+          fetchEvaluationBaremes(),
           fetchParcoursById(cleanParcoursId),
         ]);
 
@@ -642,6 +679,7 @@ const ModifierUnParcours: React.FC<Props> = ({
 
         setBalises(allBalises);
         setFolders(allFolders);
+        setEvaluationBaremes(allEvaluationBaremes);
         setBaliseFormatsMap(allFormats.typeMap);
         setBaliseFormatPayloadMap(allFormats.payloadMap);
 
@@ -649,6 +687,8 @@ const ModifierUnParcours: React.FC<Props> = ({
         setDescription(parcours.description || "");
         setFormatType(parcours.format_type || null);
         setAllowDuplicateBalises(!!parcours.allow_duplicate_balises);
+        setModeEvaluation(!!parcours.mode_evaluation);
+        setSelectedEvaluationBaremeId(parcours.bareme_evaluation_id || null);
         setSelectedFolderId(parcours.folder_id || null);
         setSearchBalise("");
         setShowOnlyFrozen(false);
@@ -807,6 +847,11 @@ const ModifierUnParcours: React.FC<Props> = ({
       return;
     }
 
+    if (modeEvaluation && !selectedEvaluationBaremeId) {
+      Alert.alert("Barème manquant", "Choisis un barème d'évaluation pour ce parcours.");
+      return;
+    }
+
     const allCompatible = selectedBalises.every((b) => hasFormatForBalise(b, formatType, baliseFormatsMap));
 
     if (!allCompatible) {
@@ -822,6 +867,8 @@ const ModifierUnParcours: React.FC<Props> = ({
       professeur_id: professeur?.user_id ?? null,
       format_type: formatType,
       allow_duplicate_balises: allowDuplicateBalises,
+      mode_evaluation: modeEvaluation,
+      bareme_evaluation_id: modeEvaluation ? selectedEvaluationBaremeId : null,
     };
 
     try {
@@ -845,6 +892,8 @@ const ModifierUnParcours: React.FC<Props> = ({
     selectedFolderId,
     professeur,
     allowDuplicateBalises,
+    modeEvaluation,
+    selectedEvaluationBaremeId,
     setPage,
   ]);
 
@@ -1078,6 +1127,54 @@ const ModifierUnParcours: React.FC<Props> = ({
     </View>
   );
 
+  const renderEvaluationSettings = () => (
+    <View style={styles.evaluationBox}>
+      <View style={styles.evaluationTopRow}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.evaluationTitle}>Mode évaluation</Text>
+          <Text style={styles.evaluationSub}>
+            La note sera calculée avec un barème d'évaluation quand l'élève termine ou atteint sa limite.
+          </Text>
+        </View>
+        <Switch
+          value={modeEvaluation}
+          onValueChange={(value) => {
+            setModeEvaluation(value);
+            if (!value) setSelectedEvaluationBaremeId(null);
+          }}
+          trackColor={{ false: "rgba(15,23,42,0.18)", true: "rgba(37,99,235,0.35)" }}
+          thumbColor={modeEvaluation ? C_BLUE : "#fff"}
+        />
+      </View>
+
+      {modeEvaluation ? (
+        <View style={styles.evaluationBaremesWrap}>
+          {evaluationBaremes.length === 0 ? (
+            <Text style={styles.evaluationEmptyText}>Aucun barème d'évaluation trouvé.</Text>
+          ) : (
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.evaluationBaremesRow}>
+              {evaluationBaremes.map((bareme) => {
+                const active = selectedEvaluationBaremeId === bareme.id;
+                return (
+                  <TouchableOpacity
+                    key={bareme.id}
+                    activeOpacity={0.9}
+                    onPress={() => setSelectedEvaluationBaremeId(active ? null : bareme.id)}
+                    style={[styles.evaluationBaremeChip, active && styles.evaluationBaremeChipActive]}
+                  >
+                    <Text style={[styles.evaluationBaremeChipText, active && styles.evaluationBaremeChipTextActive]}>
+                      {bareme.name}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          )}
+        </View>
+      ) : null}
+    </View>
+  );
+
   return (
     <SafeAreaView style={styles.root}>
       <View style={styles.header}>
@@ -1133,6 +1230,8 @@ const ModifierUnParcours: React.FC<Props> = ({
                 </View>
               </View>
             </TouchableOpacity>
+
+            {renderEvaluationSettings()}
           </View>
 
           <View style={styles.card}>
@@ -1298,6 +1397,42 @@ const styles = StyleSheet.create({
   },
   folderChooserLeft: { flexDirection: "row", alignItems: "center", gap: 10 },
   folderChooserValue: { color: C_TEXT, fontWeight: "900", fontSize: 15 },
+
+  evaluationBox: {
+    marginTop: 14,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(37,99,235,0.18)",
+    backgroundColor: "rgba(37,99,235,0.06)",
+    padding: 12,
+    gap: 10,
+  },
+  evaluationTopRow: { flexDirection: "row", alignItems: "center", gap: 12 },
+  evaluationTitle: { color: C_TEXT, fontWeight: "900", fontSize: 15 },
+  evaluationSub: { color: C_MUTED, fontWeight: "700", fontSize: 12, marginTop: 3 },
+  evaluationBaremesWrap: {
+    borderTopWidth: 1,
+    borderTopColor: "rgba(37,99,235,0.14)",
+    paddingTop: 10,
+  },
+  evaluationBaremesRow: { gap: 8, alignItems: "center" },
+  evaluationBaremeChip: {
+    minHeight: 36,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(15,23,42,0.14)",
+    backgroundColor: "#FFFFFF",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 12,
+  },
+  evaluationBaremeChipActive: {
+    backgroundColor: "#DBEAFE",
+    borderColor: "rgba(37,99,235,0.45)",
+  },
+  evaluationBaremeChipText: { color: C_TEXT, fontWeight: "900", fontSize: 12 },
+  evaluationBaremeChipTextActive: { color: C_BLUE },
+  evaluationEmptyText: { color: C_MUTED, fontWeight: "800", fontSize: 12 },
 
   formatSimpleGrid: { marginTop: 12, flexDirection: "row", flexWrap: "wrap", gap: 10 },
   formatCard: {

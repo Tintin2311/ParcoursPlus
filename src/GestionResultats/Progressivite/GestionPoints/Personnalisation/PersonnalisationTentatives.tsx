@@ -55,6 +55,7 @@ type BaremePageRow = {
   teacher_id: string;
   page_number: number;
   page_name: string;
+  max_attempts?: number | null;
   created_at?: string | null;
 };
 
@@ -78,6 +79,7 @@ type GroupConfigRow = {
   tentative_page_mode?: "general" | "personnalise" | string | null;
   tentative_page_default?: number | string | null;
   tentative_page_assignments?: any;
+  tentative_max_attempts_assignments?: any;
   tentative_source_assignments?: any;
   balise_point_overrides?: any;
   updated_at?: string | null;
@@ -103,6 +105,12 @@ const LS_POINTS_SELECTED_GROUP_ID = "gestionPoints.selectedGroupId";
 
 const getDisplayName = (row: any) => String(row?.nom ?? row?.name ?? "Sans nom");
 const folderName = (folder: FolderRow) => String(folder.nom ?? folder.name ?? "Sans nom");
+const formatMaxAttempts = (value: number | null | undefined) =>
+  value == null ? "illimité" : `${value} tentative${value === 1 ? "" : "s"} max`;
+const isMissingColumnError = (error: any, columnName: string) => {
+  const msg = String(error?.message ?? error?.details ?? error?.hint ?? "");
+  return error?.code === "42703" || msg.includes(columnName);
+};
 const folderParentId = (folder: FolderRow) =>
   folder.parent_folder_id ?? folder.parent_parcours_folders_id ?? null;
 const parcoursFolderId = (parcours: ParcoursRow) =>
@@ -137,6 +145,23 @@ const sanitizeAssignments = (value: any): Record<string, number> => {
   Object.entries(obj).forEach(([k, v]) => {
     const n = Number(v);
     if (k && Number.isFinite(n) && n >= 1) out[k] = n;
+  });
+  return out;
+};
+
+const sanitizeMaxAttemptsAssignments = (value: any): Record<string, number | null> => {
+  const obj = parseJsonObject(value);
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return {};
+
+  const out: Record<string, number | null> = {};
+  Object.entries(obj).forEach(([k, v]) => {
+    if (!k) return;
+    if (v == null) {
+      out[k] = null;
+      return;
+    }
+    const n = Number(v);
+    if (Number.isInteger(n) && n >= 1) out[k] = n;
   });
   return out;
 };
@@ -250,6 +275,7 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
   >(null);
 
   const [existingConfigs, setExistingConfigs] = useState<Record<string, number>>({});
+  const [existingMaxAttempts, setExistingMaxAttempts] = useState<Record<string, number | null>>({});
   const [expandedFolderId, setExpandedFolderId] = useState<string | null>(null);
 
   const [loading, setLoading] = useState(true);
@@ -294,6 +320,26 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
     [baremes, existingConfigs, generalPageNumber]
   );
 
+  const getBaremeMaxAttempts = useCallback(
+    (pageNumber: number | null | undefined) => {
+      if (!pageNumber) return null;
+      const bareme = baremes.find((b) => Number(b.page_number) === Number(pageNumber));
+      const n = Number(bareme?.max_attempts);
+      return Number.isInteger(n) && n >= 1 ? n : null;
+    },
+    [baremes]
+  );
+
+  const getEffectiveMaxAttempts = useCallback(
+    (parcoursId: string) => {
+      if (Object.prototype.hasOwnProperty.call(existingMaxAttempts, parcoursId)) {
+        return existingMaxAttempts[parcoursId] ?? null;
+      }
+      return getBaremeMaxAttempts(getEffectivePageNumber(parcoursId));
+    },
+    [existingMaxAttempts, getBaremeMaxAttempts, getEffectivePageNumber]
+  );
+
   const getFolderEffectivePageNumber = useCallback(
     (folderId: string) => {
       const children = getParcoursInFolder(folderId);
@@ -304,6 +350,18 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
       return allSame ? first : null;
     },
     [baremes, generalPageNumber, getEffectivePageNumber, getParcoursInFolder]
+  );
+
+  const getFolderEffectiveMaxAttempts = useCallback(
+    (folderId: string) => {
+      const children = getParcoursInFolder(folderId);
+      if (children.length === 0) return getBaremeMaxAttempts(generalPageNumber ?? baremes[0]?.page_number ?? null);
+      const values = children.map((p) => getEffectiveMaxAttempts(p.id));
+      const first = values[0] ?? null;
+      const allSame = values.every((value) => Number(value ?? -1) === Number(first ?? -1));
+      return allSame ? first : null;
+    },
+    [baremes, generalPageNumber, getBaremeMaxAttempts, getEffectiveMaxAttempts, getParcoursInFolder]
   );
 
   const visibleFolders = useMemo(
@@ -334,7 +392,7 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
 
       const storedGroupId = await readStoredGroupId();
 
-      const [groupsRes, foldersRes, parcoursRes, baremesRes, configsRes] = await Promise.all([
+      const [groupsRes, foldersRes, parcoursRes, baremesResInitial, configsRes] = await Promise.all([
         supabase
           .from("groups")
           .select("*")
@@ -353,7 +411,7 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
 
         supabase
           .from("group_tentative_bareme_pages")
-          .select("id, teacher_id, page_number, page_name, created_at")
+          .select("id, teacher_id, page_number, page_name, max_attempts, created_at")
           .eq("teacher_id", authTeacherId)
           .order("page_number", { ascending: true }),
 
@@ -367,6 +425,14 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
       if (groupsRes.error) throw groupsRes.error;
       if (foldersRes.error) throw foldersRes.error;
       if (parcoursRes.error) throw parcoursRes.error;
+      let baremesRes: any = baremesResInitial;
+      if (baremesRes.error && isMissingColumnError(baremesRes.error, "max_attempts")) {
+        baremesRes = await supabase
+          .from("group_tentative_bareme_pages")
+          .select("id, teacher_id, page_number, page_name, created_at")
+          .eq("teacher_id", authTeacherId)
+          .order("page_number", { ascending: true });
+      }
       if (baremesRes.error) throw baremesRes.error;
       if (configsRes.error) throw configsRes.error;
 
@@ -380,6 +446,9 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
       const nextGroupConfigs = (configsRes.data ?? []) as GroupConfigRow[];
       const currentConfig = getConfigForGroup(targetGroupId, nextGroupConfigs);
       const assignments = sanitizeAssignments(currentConfig?.tentative_page_assignments);
+      const maxAttemptsAssignments = sanitizeMaxAttemptsAssignments(
+        currentConfig?.tentative_max_attempts_assignments
+      );
       const defaultPage =
         currentConfig?.tentative_page_default == null
           ? null
@@ -402,6 +471,7 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
         teacher_id: String(b.teacher_id),
         page_number: Number(b.page_number ?? 1),
         page_name: String(b.page_name || `Barème ${Number(b.page_number ?? 1)}`),
+        max_attempts: b.max_attempts == null ? null : Number(b.max_attempts),
         created_at: b.created_at ?? null,
       })) as BaremePageRow[];
 
@@ -412,6 +482,7 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
       setParcours(nextParcours);
       setBaremes(nextBaremes);
       setExistingConfigs(assignments);
+      setExistingMaxAttempts(maxAttemptsAssignments);
       setGeneralPageNumber(defaultPage ?? nextBaremes[0]?.page_number ?? null);
 
       const firstParcoursId = nextParcours[0]?.id ?? null;
@@ -472,6 +543,7 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
           tentative_page_mode: "personnalise",
           tentative_page_default: generalPageNumber ?? baremes[0]?.page_number ?? 1,
           tentative_page_assignments: {},
+          tentative_max_attempts_assignments: {},
           ...patch,
           updated_at: now,
         },
@@ -558,8 +630,14 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
       const current = getConfigForGroup(selectedGroupId, groupConfigs);
       const sourceAssignments = getSourceAssignments(current);
       const nextAssignments = { ...sanitizeAssignments(current?.tentative_page_assignments) };
+      const nextMaxAttemptsAssignments = {
+        ...sanitizeMaxAttemptsAssignments(current?.tentative_max_attempts_assignments),
+      };
+      const selectedMaxAttempts = getBaremeMaxAttempts(selectedPageNumber);
+
       targetParcoursIds.forEach((parcoursId) => {
         nextAssignments[parcoursId] = selectedPageNumber;
+        nextMaxAttemptsAssignments[parcoursId] = selectedMaxAttempts;
       });
 
       const payload = {
@@ -572,6 +650,7 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
         tentative_page_default:
           current?.tentative_page_default ?? generalPageNumber ?? baremes[0]?.page_number ?? 1,
         tentative_page_assignments: nextAssignments,
+        tentative_max_attempts_assignments: nextMaxAttemptsAssignments,
         tentative_source_parcours_id: current?.tentative_source_parcours_id ?? null,
         tentative_source_assignments: sourceAssignments,
         balise_point_overrides: sourceAssignments.balise_point_overrides,
@@ -591,6 +670,7 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
       );
 
       setExistingConfigs(nextAssignments);
+      setExistingMaxAttempts(nextMaxAttemptsAssignments);
       updateConfigLocal(selectedGroupId, (data as GroupConfigRow) ?? payload);
 
       if (showSuccess) {
@@ -639,6 +719,9 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
       const current = getConfigForGroup(selectedGroupId, groupConfigs);
       const sourceAssignments = getSourceAssignments(current);
       const nextAssignments = sanitizeAssignments(current?.tentative_page_assignments);
+      const nextMaxAttemptsAssignments = sanitizeMaxAttemptsAssignments(
+        current?.tentative_max_attempts_assignments
+      );
       const targetParcoursIds = selectedParcoursId
         ? [selectedParcoursId]
         : selectedFolderId
@@ -646,6 +729,7 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
         : [];
       targetParcoursIds.forEach((parcoursId) => {
         delete nextAssignments[parcoursId];
+        delete nextMaxAttemptsAssignments[parcoursId];
       });
 
       const payload = {
@@ -659,6 +743,7 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
         tentative_page_default:
           current?.tentative_page_default ?? generalPageNumber ?? baremes[0]?.page_number ?? 1,
         tentative_page_assignments: nextAssignments,
+        tentative_max_attempts_assignments: nextMaxAttemptsAssignments,
         tentative_source_parcours_id: current?.tentative_source_parcours_id ?? null,
         tentative_source_assignments: sourceAssignments,
         balise_point_overrides: sourceAssignments.balise_point_overrides,
@@ -678,6 +763,13 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
       );
 
       setExistingConfigs((prev) => {
+        const next = { ...prev };
+        targetParcoursIds.forEach((parcoursId) => {
+          delete next[parcoursId];
+        });
+        return next;
+      });
+      setExistingMaxAttempts((prev) => {
         const next = { ...prev };
         targetParcoursIds.forEach((parcoursId) => {
           delete next[parcoursId];
@@ -731,9 +823,14 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
   );
 
   const hasCustomConfig = selectedParcoursId
-    ? existingConfigs[selectedParcoursId] != null
+    ? existingConfigs[selectedParcoursId] != null ||
+      Object.prototype.hasOwnProperty.call(existingMaxAttempts, selectedParcoursId)
     : selectedFolderId
-    ? getParcoursInFolder(selectedFolderId).some((p) => existingConfigs[p.id] != null)
+    ? getParcoursInFolder(selectedFolderId).some(
+        (p) =>
+          existingConfigs[p.id] != null ||
+          Object.prototype.hasOwnProperty.call(existingMaxAttempts, p.id)
+      )
     : false;
 
   return (
@@ -797,6 +894,10 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
                   : getFolderEffectivePageNumber(folder.id);
                 const folderBareme =
                   baremes.find((b) => Number(b.page_number) === Number(folderPageNumber)) ?? null;
+                const folderMaxAttempts =
+                  folderIsSelected && selectedPageNumber
+                    ? getBaremeMaxAttempts(selectedPageNumber)
+                    : getFolderEffectiveMaxAttempts(folder.id);
 
                 return (
                   <View key={folder.id}>
@@ -823,7 +924,7 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
                         </Text>
 
                         <Text style={styles.optionSub} numberOfLines={1}>
-                          {folderParcours.length} parcours concernés
+                          {folderParcours.length} parcours concernés • {formatMaxAttempts(folderMaxAttempts)}
                         </Text>
                       </View>
 
@@ -857,6 +958,10 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
                           const effectiveBareme =
                             baremes.find((b) => Number(b.page_number) === Number(effectivePageNumber)) ??
                             null;
+                          const effectiveMaxAttempts =
+                            active && selectedPageNumber
+                              ? getBaremeMaxAttempts(selectedPageNumber)
+                              : getEffectiveMaxAttempts(p.id);
 
                           return (
                             <TouchableOpacity
@@ -872,6 +977,9 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
                               <View style={{ flex: 1 }}>
                                 <Text style={styles.parcoursRowTitle} numberOfLines={1}>
                                   {getDisplayName(p)}
+                                </Text>
+                                <Text style={styles.parcoursRowSub} numberOfLines={1}>
+                                  {formatMaxAttempts(effectiveMaxAttempts)}
                                 </Text>
                               </View>
                               <TouchableOpacity
@@ -988,6 +1096,8 @@ export default function PersonnalisationTentatives({ setPage }: Props) {
                         ]}
                       >
                         page {b.page_number}
+                        {" • "}
+                        {formatMaxAttempts(b.max_attempts ?? null)}
                       </Text>
                     </View>
                     {active ? <Feather name="check" size={18} color={C_PURPLE} /> : null}
@@ -1219,6 +1329,13 @@ const styles = StyleSheet.create({
     color: C_TEXT,
     fontSize: 13,
     fontWeight: "900",
+  },
+
+  parcoursRowSub: {
+    color: C_SUB,
+    fontSize: 11,
+    fontWeight: "800",
+    marginTop: 2,
   },
 
   emptyText: {

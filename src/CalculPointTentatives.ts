@@ -91,11 +91,13 @@ export type ParcoursPointsConfig = {
   tentativePageMode: TentativePageMode;
   tentativePageDefault: number | null;
   tentativePageAssignments: Record<string, number>;
+  tentativeMaxAttemptsAssignments: Record<string, number | null>;
 };
 
 export type ResolvedTentativeConfig = {
   pointsConfig: ParcoursPointsConfig;
   resolvedAttemptPage: number | null;
+  resolvedMaxAttempts: number | null;
   resolvedGroupId: string | null;
   resolvedProfesseurId: string | null;
   supportParcoursId: string | null;
@@ -169,6 +171,7 @@ const TABLE_GROUP_CONFIGS = "group_points_configs";
 const TABLE_ATTEMPTS = "eleve_parcours_tentatives";
 const TABLE_STATS = "eleve_parcours_stats";
 const TABLE_BAREMES = "group_tentative_baremes";
+const TABLE_BAREME_PAGES = "group_tentative_bareme_pages";
 const TABLE_GROUPS = "groups";
 const TABLE_PARCOURS = "parcours";
 const TABLE_PARCOURS_TERMINE_BONUSES = "personnaliser_parcours_termines";
@@ -231,6 +234,24 @@ const sanitizeAssignments = (value: any): Record<string, number> => {
   Object.entries(parsed).forEach(([k, v]) => {
     const n = Number(v);
     if (k && Number.isFinite(n) && n >= 1) out[k] = n;
+  });
+
+  return out;
+};
+
+const sanitizePositiveAssignments = (value: any): Record<string, number | null> => {
+  const parsed = safeParseObject(value);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+
+  const out: Record<string, number | null> = {};
+  Object.entries(parsed).forEach(([k, v]) => {
+    if (!k) return;
+    if (v == null) {
+      out[k] = null;
+      return;
+    }
+    const n = Number(v);
+    if (Number.isInteger(n) && n >= 1) out[k] = n;
   });
 
   return out;
@@ -467,6 +488,7 @@ export const getDefaultPointsConfig = (): ParcoursPointsConfig => ({
   tentativePageMode: "general",
   tentativePageDefault: null,
   tentativePageAssignments: {},
+  tentativeMaxAttemptsAssignments: {},
 });
 
 /* =========================================================
@@ -659,6 +681,13 @@ const resolveGroupPointsConfig = (
     configObj?.tentativePageAssignments ??
     settingsObj?.tentative_page_assignments ??
     settingsObj?.tentativePageAssignments;
+  const rawMaxAttemptsAssignments =
+    row?.tentative_max_attempts_assignments ??
+    row?.tentativeMaxAttemptsAssignments ??
+    configObj?.tentative_max_attempts_assignments ??
+    configObj?.tentativeMaxAttemptsAssignments ??
+    settingsObj?.tentative_max_attempts_assignments ??
+    settingsObj?.tentativeMaxAttemptsAssignments;
   const allBaliseOverrides = readBalisePointOverrides(row);
 
   const pointsConfig: ParcoursPointsConfig = {
@@ -672,6 +701,7 @@ const resolveGroupPointsConfig = (
     tentativePageDefault:
       tentativePageDefaultRaw == null ? null : Number(tentativePageDefaultRaw) || null,
     tentativePageAssignments: sanitizeAssignments(rawAssignments),
+    tentativeMaxAttemptsAssignments: sanitizePositiveAssignments(rawMaxAttemptsAssignments),
   };
 
   console.log("CONFIG POINTS RÉSOLUE", pointsConfig);
@@ -702,6 +732,7 @@ export const loadResolvedTentativeConfig = async (
     return {
       pointsConfig: getDefaultPointsConfig(),
       resolvedAttemptPage: null,
+      resolvedMaxAttempts: null,
       resolvedGroupId: null,
       resolvedProfesseurId: null,
       supportParcoursId: null,
@@ -785,9 +816,34 @@ export const loadResolvedTentativeConfig = async (
         : null
       : pointsConfig.tentativePageDefault ?? null;
 
+  let resolvedMaxAttempts =
+    parcoursId &&
+    Object.prototype.hasOwnProperty.call(pointsConfig.tentativeMaxAttemptsAssignments, parcoursId)
+      ? pointsConfig.tentativeMaxAttemptsAssignments[parcoursId]
+      : null;
+  const hasExplicitMaxAttemptsAssignment =
+    !!parcoursId &&
+    Object.prototype.hasOwnProperty.call(pointsConfig.tentativeMaxAttemptsAssignments, parcoursId);
+
+  if (!hasExplicitMaxAttemptsAssignment && resolvedMaxAttempts == null && resolvedAttemptPage && resolvedProfesseurId) {
+    const { data: pageRows, error: pageError } = await supabase
+      .from(TABLE_BAREME_PAGES)
+      .select("max_attempts")
+      .eq("teacher_id", resolvedProfesseurId)
+      .eq("page_number", resolvedAttemptPage)
+      .limit(1);
+
+    if (!pageError) {
+      const rawMax = ((pageRows as any[]) ?? [])[0]?.max_attempts;
+      const n = Number(rawMax);
+      resolvedMaxAttempts = Number.isInteger(n) && n >= 1 ? n : null;
+    }
+  }
+
   return {
     pointsConfig,
     resolvedAttemptPage,
+    resolvedMaxAttempts,
     resolvedGroupId: groupId,
     resolvedProfesseurId,
     supportParcoursId: null,

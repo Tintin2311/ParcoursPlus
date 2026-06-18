@@ -92,7 +92,7 @@ const CHRONO_RESULT_PAUSE_MS = 3 * 60 * 1000;
 
 const parseChronometreMs = (value: any) => {
   const n = Number(value ?? 0);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  return Number.isFinite(n) && n > 0 ? Math.floor(n / 1000) * 1000 : 0;
 };
 
 const formatChronometre = (ms: number) => {
@@ -691,7 +691,7 @@ const AccueilEleve: React.FC<Props> = ({
       await supabase
         .from("eleve_parcours_stats")
         .update({
-          chronometre_ms: activeChronoMs,
+          chronometre_ms: parseChronometreMs(activeChronoMs),
           chronometre_started_at: null,
           chronometre_running: false,
           updated_at: now,
