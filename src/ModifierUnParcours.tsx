@@ -827,6 +827,8 @@ const ModifierUnParcours: React.FC<Props> = ({
   );
 
   const handleSave = useCallback(async () => {
+    if (saving) return;
+
     if (!cleanParcoursId) {
       Alert.alert("Erreur", "Aucun parcours sélectionné.");
       return;
@@ -875,7 +877,7 @@ const ModifierUnParcours: React.FC<Props> = ({
       setSaving(true);
       await updateParcoursInSupabase(cleanParcoursId, payload);
       Alert.alert("Succès", "Le parcours a bien été mis à jour.");
-      setPage("gestionParcours");
+      setPage("MesParcours");
     } catch (e: any) {
       console.error("❌ update parcours:", e);
       Alert.alert("Erreur", e?.message || "Impossible de modifier le parcours.");
@@ -894,6 +896,7 @@ const ModifierUnParcours: React.FC<Props> = ({
     allowDuplicateBalises,
     modeEvaluation,
     selectedEvaluationBaremeId,
+    saving,
     setPage,
   ]);
 
@@ -1159,7 +1162,7 @@ const ModifierUnParcours: React.FC<Props> = ({
                   <TouchableOpacity
                     key={bareme.id}
                     activeOpacity={0.9}
-                    onPress={() => setSelectedEvaluationBaremeId(active ? null : bareme.id)}
+                    onPress={() => setSelectedEvaluationBaremeId(bareme.id)}
                     style={[styles.evaluationBaremeChip, active && styles.evaluationBaremeChipActive]}
                   >
                     <Text style={[styles.evaluationBaremeChipText, active && styles.evaluationBaremeChipTextActive]}>

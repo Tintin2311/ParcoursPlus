@@ -997,6 +997,8 @@ const CreerUnNouveauParcours: React.FC<Props> = ({
   );
 
   const handleSave = useCallback(async () => {
+    if (saving) return;
+
     if (!isStep1Valid(nom)) {
       if (!isEditMode) setCurrentStep(1);
       Alert.alert("Nom manquant", "Le nom du parcours est obligatoire.");
@@ -1045,7 +1047,7 @@ const CreerUnNouveauParcours: React.FC<Props> = ({
       }
 
       resetForm();
-      setPage("gestionParcours");
+      setPage("MesParcours");
     } catch (e: any) {
       console.error("❌ save parcours:", e);
       Alert.alert("Erreur", e?.message || "Impossible d'enregistrer le parcours.");
@@ -1066,6 +1068,7 @@ const CreerUnNouveauParcours: React.FC<Props> = ({
     isEditMode,
     activeParcoursId,
     resetForm,
+    saving,
     setPage,
   ]);
 
@@ -1359,7 +1362,7 @@ const CreerUnNouveauParcours: React.FC<Props> = ({
                   <TouchableOpacity
                     key={bareme.id}
                     activeOpacity={0.9}
-                    onPress={() => setSelectedEvaluationBaremeId(active ? null : bareme.id)}
+                    onPress={() => setSelectedEvaluationBaremeId(bareme.id)}
                     style={[styles.evaluationBaremeChip, active && styles.evaluationBaremeChipActive]}
                   >
                     <Text style={[styles.evaluationBaremeChipText, active && styles.evaluationBaremeChipTextActive]}>
