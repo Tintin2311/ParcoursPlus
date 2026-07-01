@@ -647,21 +647,15 @@ const GestionEleves: React.FC<Props> = ({
 
     setDeletingId(deleteTarget.id);
 
-    const { error } = await supabase
-      .from("students")
-      .update({
-        group_id: null,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", deleteTarget.id)
-      .eq("teacher_id", professeur.user_id)
-      .eq("group_id", groupId);
+    const { error } = await supabase.rpc("delete_student_completely", {
+      p_student_id: deleteTarget.id,
+    });
 
     setDeletingId(null);
 
     if (error) {
-      console.error("Erreur retrait élève:", error.message);
-      Alert.alert("Erreur", "Impossible de retirer l'élève de cette classe.");
+      console.error("Erreur suppression élève:", error.message);
+      Alert.alert("Erreur", "Impossible de supprimer complètement l'élève.");
       return;
     }
 
