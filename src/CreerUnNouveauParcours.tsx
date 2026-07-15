@@ -20,6 +20,7 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
+  Eye,
   FolderOpen,
   Grid2x2,
   QrCode,
@@ -29,9 +30,17 @@ import {
   Trash2,
   X,
 } from "lucide-react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { supabase } from "./supabaseClient";
 import { fetchAllBaliseFormatsCompat } from "./baliseFormatsCompat";
 import BottomBar from "./ui/BottomBar";
+
+const READABLE_CODE_FONT = Platform.select({
+  web: '"Menlo", "Consolas", "Courier New", monospace',
+  ios: "Menlo",
+  android: "monospace",
+  default: "monospace",
+});
 
 /* =======================
    Types
@@ -71,6 +80,8 @@ type ParcoursRecord = {
   nom: string | null;
   description: string | null;
   balises_ordre: string[] | null;
+  balises_formats_ordre?: { balise_id: string; format_type: ParcoursFormatType }[] | null;
+  format_types?: ParcoursFormatType[] | null;
   folder_id: string | null;
   format_type: ParcoursFormatType | null;
   allow_duplicate_balises: boolean;
@@ -80,6 +91,16 @@ type ParcoursRecord = {
 
 type SelectedBaliseOccurrence = Balise & {
   occurrenceKey: string;
+  selectedFormatType: ParcoursFormatType;
+};
+
+type SelectedParcoursBalise = Balise & {
+  selectedFormatType: ParcoursFormatType;
+};
+
+type SuccessFeedback = {
+  title: string;
+  message: string;
 };
 
 type BaliseFormatPayloadMap = Map<string, Partial<Record<ParcoursFormatType, Record<string, any>>>>;
@@ -111,6 +132,7 @@ const C_GREEN = "#10b981";
 
 const BOTTOM_BAR_HEIGHT = 78;
 const STICKY_SAVE_HEIGHT = 84;
+const SUCCESS_MESSAGE_DURATION_MS = 1400;
 
 const IOS_SHADOW = {
   shadowColor: "#000",
@@ -140,6 +162,8 @@ const FORMAT_LABELS: Record<ParcoursFormatType, string> = {
   qrcode: "QR code",
 };
 
+const PARCOURS_FORMAT_ORDER_STORAGE_PREFIX = "@parcoursplus_parcours_format_order:";
+
 /* =======================
    Helpers
 ======================= */
@@ -159,14 +183,81 @@ const reorderBalises = <T,>(items: T[], fromIndex: number, toIndex: number): T[]
   return copy;
 };
 
+const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 const buildOccurrenceKey = (baliseId: string, occurrenceIndex: number) =>
   `${baliseId}__occ__${occurrenceIndex}`;
 
-const buildSelectedOccurrences = (balises: Balise[]): SelectedBaliseOccurrence[] =>
+const buildSelectedOccurrences = (balises: SelectedParcoursBalise[]): SelectedBaliseOccurrence[] =>
   balises.map((b, index) => ({
     ...b,
     occurrenceKey: buildOccurrenceKey(b.id, index + 1),
   }));
+
+const buildFormatKey = (baliseId: string, formatType: ParcoursFormatType) => `${baliseId}::${formatType}`;
+
+const parseBaliseOrderToken = (
+  token: string,
+  fallbackFormatType: ParcoursFormatType | null
+): { baliseId: string; formatType: ParcoursFormatType | null } => {
+  const raw = String(token ?? "").trim();
+  const match = raw.match(/^(.*)::format::(code|tableau|poincon|qrcode)$/);
+  if (match) return { baliseId: match[1], formatType: match[2] as ParcoursFormatType };
+  return { baliseId: raw, formatType: fallbackFormatType };
+};
+
+const buildBaliseFormatOrder = (items: SelectedParcoursBalise[]) =>
+  items.map((item) => ({ balise_id: item.id, format_type: item.selectedFormatType }));
+
+const normalizeBaliseFormatOrder = (value: any): { balise_id: string; format_type: ParcoursFormatType }[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      const baliseId = String(item?.balise_id ?? item?.id ?? "").trim();
+      const formatType = String(item?.format_type ?? "").trim() as ParcoursFormatType;
+      if (!baliseId || !FORMAT_LABELS[formatType]) return null;
+      return { balise_id: baliseId, format_type: formatType };
+    })
+    .filter(Boolean) as { balise_id: string; format_type: ParcoursFormatType }[];
+};
+
+const normalizeParcoursFormatTypes = (value: any, fallback?: ParcoursFormatType | null): ParcoursFormatType[] => {
+  const raw = Array.isArray(value) ? value : [];
+  const clean = raw
+    .map((item) => String(item ?? "").trim() as ParcoursFormatType)
+    .filter((formatType) => !!FORMAT_LABELS[formatType]);
+  if (clean.length) return Array.from(new Set(clean));
+  return fallback && FORMAT_LABELS[fallback] ? [fallback] : [];
+};
+
+const getLocalFormatOrderKey = (parcoursId: string) =>
+  `${PARCOURS_FORMAT_ORDER_STORAGE_PREFIX}${parcoursId}`;
+
+const loadLocalBaliseFormatOrder = async (parcoursId: string) => {
+  try {
+    const raw = await AsyncStorage.getItem(getLocalFormatOrderKey(parcoursId));
+    if (!raw) return [];
+    return normalizeBaliseFormatOrder(JSON.parse(raw));
+  } catch {
+    return [];
+  }
+};
+
+const saveLocalBaliseFormatOrder = async (
+  parcoursId: string,
+  formatOrder: { balise_id: string; format_type: ParcoursFormatType }[] = []
+) => {
+  try {
+    const clean = normalizeBaliseFormatOrder(formatOrder);
+    if (!clean.length) {
+      await AsyncStorage.removeItem(getLocalFormatOrderKey(parcoursId));
+      return;
+    }
+    await AsyncStorage.setItem(getLocalFormatOrderKey(parcoursId), JSON.stringify(clean));
+  } catch {
+    // Le parcours reste sauvegardé dans Supabase même si ce secours local échoue.
+  }
+};
 
 const getFolderPathLabel = (folderId: string | null, folders: FolderItem[]) => {
   if (!folderId) return "Accueil";
@@ -184,15 +275,25 @@ const getFolderPathLabel = (folderId: string | null, folders: FolderItem[]) => {
 };
 
 const isStep1Valid = (nom: string) => nom.trim().length > 0;
-const isStep3Valid = (formatType: ParcoursFormatType | null) => !!formatType;
+const isStep3Valid = (formatTypes: ParcoursFormatType[]) => formatTypes.length > 0;
 
-const getMaxUnlockedStep = (nom: string, formatType: ParcoursFormatType | null): StepId => {
+const getMaxUnlockedStep = (nom: string, formatTypes: ParcoursFormatType[]): StepId => {
   if (!isStep1Valid(nom)) return 1;
-  if (!isStep3Valid(formatType)) return 3;
+  if (!isStep3Valid(formatTypes)) return 3;
   return 4;
 };
 
 const makeCellKey = (row: number, col: number) => `${row}-${col}`;
+
+const toLetter = (index: number) => {
+  let n = index;
+  let out = "";
+  do {
+    out = String.fromCharCode(65 + (n % 26)) + out;
+    n = Math.floor(n / 26) - 1;
+  } while (n >= 0);
+  return out;
+};
 
 const clampGridSize = (value: any, fallback = 4) => {
   const n = Number(value);
@@ -261,14 +362,18 @@ const filterBalisesByFormat = (
   return list.filter((b) => hasFormatForBalise(b, formatType, baliseFormatsMap));
 };
 
+const getBaliseFormatsForSelection = (
+  balise: Balise,
+  selectedFormatTypes: ParcoursFormatType[],
+  baliseFormatsMap: Map<string, Set<ParcoursFormatType>>
+) => selectedFormatTypes.filter((formatType) => hasFormatForBalise(balise, formatType, baliseFormatsMap));
+
 const isStep4Valid = (
-  formatType: ParcoursFormatType | null,
-  selectedBalises: Balise[],
+  selectedBalises: SelectedParcoursBalise[],
   baliseFormatsMap: Map<string, Set<ParcoursFormatType>>
 ) => {
-  if (!formatType) return false;
   if (selectedBalises.length === 0) return false;
-  return selectedBalises.every((b) => hasFormatForBalise(b, formatType, baliseFormatsMap));
+  return selectedBalises.every((b) => hasFormatForBalise(b, b.selectedFormatType, baliseFormatsMap));
 };
 
 const getPayloadForBalise = (
@@ -522,18 +627,22 @@ const fetchParcoursById = async (parcoursId: string): Promise<ParcoursRecord | n
   const primary = await supabase
     .from("parcours")
     .select(
-      "id, nom, description, balises_ordre, folder_id, format_type, allow_duplicate_balises, mode_evaluation, bareme_evaluation_id"
+      "id, nom, description, balises_ordre, balises_formats_ordre, format_types, folder_id, format_type, allow_duplicate_balises, mode_evaluation, bareme_evaluation_id"
     )
     .eq("id", parcoursId)
     .single();
 
   if (!primary.error && primary.data) {
     const d = primary.data;
+    const dbFormatOrder = normalizeBaliseFormatOrder((d as any).balises_formats_ordre);
+    const localFormatOrder = dbFormatOrder.length ? [] : await loadLocalBaliseFormatOrder(parcoursId);
     return {
       id: String(d.id),
       nom: d.nom ?? "",
       description: d.description ?? "",
       balises_ordre: Array.isArray(d.balises_ordre) ? d.balises_ordre : [],
+      balises_formats_ordre: dbFormatOrder.length ? dbFormatOrder : localFormatOrder,
+      format_types: normalizeParcoursFormatTypes((d as any).format_types, (d as any).format_type),
       folder_id: d.folder_id ?? null,
       format_type: ((d as any).format_type ?? null) as ParcoursFormatType | null,
       allow_duplicate_balises: !!(d as any).allow_duplicate_balises,
@@ -542,9 +651,16 @@ const fetchParcoursById = async (parcoursId: string): Promise<ParcoursRecord | n
     };
   }
 
+  const primaryMsg = String(primary.error?.message || "").toLowerCase();
+  const canRetryWithoutNewColumns = primaryMsg.includes("balises_formats_ordre") || primaryMsg.includes("format_types");
+
+  const fallbackSelect = canRetryWithoutNewColumns
+    ? "id, nom, description, balises_ordre, folder_id, format_type, allow_duplicate_balises, mode_evaluation, bareme_evaluation_id"
+    : "id, nom, description, balises_ordre, folder_id";
+
   const fallback = await supabase
     .from("parcours")
-    .select("id, nom, description, balises_ordre, folder_id")
+    .select(fallbackSelect as any)
     .eq("id", parcoursId)
     .single();
 
@@ -553,17 +669,20 @@ const fetchParcoursById = async (parcoursId: string): Promise<ParcoursRecord | n
     return null;
   }
 
-  const d = fallback.data;
+  const d: any = fallback.data;
+  const localFormatOrder = await loadLocalBaliseFormatOrder(parcoursId);
   return {
     id: String(d.id),
     nom: d.nom ?? "",
     description: d.description ?? "",
     balises_ordre: Array.isArray(d.balises_ordre) ? d.balises_ordre : [],
+    balises_formats_ordre: localFormatOrder,
+    format_types: normalizeParcoursFormatTypes(null, (d as any).format_type),
     folder_id: d.folder_id ?? null,
-    format_type: null,
-    allow_duplicate_balises: false,
-    mode_evaluation: false,
-    bareme_evaluation_id: null,
+    format_type: ((d as any).format_type ?? null) as ParcoursFormatType | null,
+    allow_duplicate_balises: !!(d as any).allow_duplicate_balises,
+    mode_evaluation: !!(d as any).mode_evaluation,
+    bareme_evaluation_id: (d as any).bareme_evaluation_id ?? null,
   };
 };
 
@@ -571,6 +690,8 @@ const insertParcoursInSupabase = async (payload: {
   nom: string;
   description: string;
   balises_ordre: string[];
+  balises_formats_ordre?: { balise_id: string; format_type: ParcoursFormatType }[];
+  format_types?: ParcoursFormatType[];
   folder_id: string | null;
   professeur_id?: string | null;
   format_type: ParcoursFormatType;
@@ -580,14 +701,21 @@ const insertParcoursInSupabase = async (payload: {
 }) => {
   const primary = await supabase.from("parcours").insert(payload).select().single();
 
-  if (!primary.error) return primary.data;
+  if (!primary.error) {
+    if (primary.data?.id) {
+      await saveLocalBaliseFormatOrder(String(primary.data.id), payload.balises_formats_ordre);
+    }
+    return primary.data;
+  }
 
   const msg = String(primary.error.message || "").toLowerCase();
   const missingFormat = msg.includes("format_type");
+  const missingFormatTypes = msg.includes("format_types");
+  const missingFormatOrder = msg.includes("balises_formats_ordre");
   const missingDup = msg.includes("allow_duplicate_balises");
   const missingEval = msg.includes("mode_evaluation") || msg.includes("bareme_evaluation_id");
 
-  if (!missingFormat && !missingDup && !missingEval) throw primary.error;
+  if (!missingFormat && !missingFormatTypes && !missingFormatOrder && !missingDup && !missingEval) throw primary.error;
 
   const fallbackPayload: any = {
     nom: payload.nom,
@@ -601,10 +729,9 @@ const insertParcoursInSupabase = async (payload: {
 
   if (fallback.error) throw fallback.error;
 
-  Alert.alert(
-    "Colonnes manquantes",
-    "Le parcours a été créé, mais certaines colonnes récentes n'existent pas encore dans la table parcours."
-  );
+  if (fallback.data?.id) {
+    await saveLocalBaliseFormatOrder(String(fallback.data.id), payload.balises_formats_ordre);
+  }
 
   return fallback.data;
 };
@@ -615,6 +742,8 @@ const updateParcoursInSupabase = async (
     nom: string;
     description: string;
     balises_ordre: string[];
+    balises_formats_ordre?: { balise_id: string; format_type: ParcoursFormatType }[];
+    format_types?: ParcoursFormatType[];
     folder_id: string | null;
     professeur_id?: string | null;
     format_type: ParcoursFormatType;
@@ -623,6 +752,8 @@ const updateParcoursInSupabase = async (
     bareme_evaluation_id: string | null;
   }
 ) => {
+  await saveLocalBaliseFormatOrder(parcoursId, payload.balises_formats_ordre);
+
   const primary = await supabase
     .from("parcours")
     .update(payload)
@@ -634,10 +765,12 @@ const updateParcoursInSupabase = async (
 
   const msg = String(primary.error.message || "").toLowerCase();
   const missingFormat = msg.includes("format_type");
+  const missingFormatTypes = msg.includes("format_types");
+  const missingFormatOrder = msg.includes("balises_formats_ordre");
   const missingDup = msg.includes("allow_duplicate_balises");
   const missingEval = msg.includes("mode_evaluation") || msg.includes("bareme_evaluation_id");
 
-  if (!missingFormat && !missingDup && !missingEval) throw primary.error;
+  if (!missingFormat && !missingFormatTypes && !missingFormatOrder && !missingDup && !missingEval) throw primary.error;
 
   const fallbackPayload: any = {
     nom: payload.nom,
@@ -655,11 +788,6 @@ const updateParcoursInSupabase = async (
     .single();
 
   if (fallback.error) throw fallback.error;
-
-  Alert.alert(
-    "Colonnes manquantes",
-    "Le parcours a été mis à jour, mais certaines colonnes récentes n'existent pas encore dans la table parcours."
-  );
 
   return fallback.data;
 };
@@ -680,17 +808,19 @@ const CreerUnNouveauParcours: React.FC<Props> = ({
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [successFeedback, setSuccessFeedback] = useState<SuccessFeedback | null>(null);
   const [currentStep, setCurrentStep] = useState<StepId>(1);
 
   const [nom, setNom] = useState("");
   const [description, setDescription] = useState("");
-  const [formatType, setFormatType] = useState<ParcoursFormatType | null>(null);
+  const [selectedFormatTypes, setSelectedFormatTypes] = useState<ParcoursFormatType[]>([]);
   const [allowDuplicateBalises, setAllowDuplicateBalises] = useState(false);
   const [modeEvaluation, setModeEvaluation] = useState(false);
   const [selectedEvaluationBaremeId, setSelectedEvaluationBaremeId] = useState<string | null>(null);
+  const [tablePreview, setTablePreview] = useState<{ balise: Balise; payload: Record<string, any> } | null>(null);
 
   const [balises, setBalises] = useState<Balise[]>([]);
-  const [selectedBalises, setSelectedBalises] = useState<Balise[]>([]);
+  const [selectedBalises, setSelectedBalises] = useState<SelectedParcoursBalise[]>([]);
   const [baliseFormatsMap, setBaliseFormatsMap] = useState<Map<string, Set<ParcoursFormatType>>>(
     new Map()
   );
@@ -720,7 +850,7 @@ const CreerUnNouveauParcours: React.FC<Props> = ({
     setActiveParcoursId(null);
     setNom("");
     setDescription("");
-    setFormatType(null);
+    setSelectedFormatTypes([]);
     setAllowDuplicateBalises(false);
     setModeEvaluation(false);
     setSelectedEvaluationBaremeId(null);
@@ -760,7 +890,7 @@ const CreerUnNouveauParcours: React.FC<Props> = ({
         if (!activeParcoursId) {
           setNom("");
           setDescription("");
-          setFormatType(null);
+          setSelectedFormatTypes([]);
           setAllowDuplicateBalises(false);
           setModeEvaluation(false);
           setSelectedEvaluationBaremeId(null);
@@ -784,7 +914,7 @@ const CreerUnNouveauParcours: React.FC<Props> = ({
 
         setNom(parcours.nom || "");
         setDescription(parcours.description || "");
-        setFormatType(parcours.format_type || null);
+        setSelectedFormatTypes(normalizeParcoursFormatTypes(parcours.format_types, parcours.format_type));
         setAllowDuplicateBalises(!!parcours.allow_duplicate_balises);
         setModeEvaluation(!!parcours.mode_evaluation);
         setSelectedEvaluationBaremeId(parcours.bareme_evaluation_id || null);
@@ -794,9 +924,27 @@ const CreerUnNouveauParcours: React.FC<Props> = ({
 
         const orderedIds = Array.isArray(parcours.balises_ordre) ? parcours.balises_ordre : [];
 
-        const orderedBalises = orderedIds
-          .map((id) => allBalises.find((b) => b.id === id))
-          .filter(Boolean) as Balise[];
+        const savedFormatOrder = normalizeBaliseFormatOrder(parcours.balises_formats_ordre);
+        const orderedBalises =
+          savedFormatOrder.length > 0
+            ? (savedFormatOrder
+                .map((entry) => {
+                  const balise = allBalises.find((b) => b.id === entry.balise_id);
+                  if (!balise) return null;
+                  return { ...balise, selectedFormatType: entry.format_type };
+                })
+                .filter(Boolean) as SelectedParcoursBalise[])
+            : (orderedIds
+                .map((token) => {
+                  const parsed = parseBaliseOrderToken(String(token), parcours.format_type || null);
+                  const balise = allBalises.find((b) => b.id === parsed.baliseId);
+                  if (!balise || !parsed.formatType) return null;
+                  return { ...balise, selectedFormatType: parsed.formatType };
+                })
+                .filter(Boolean) as SelectedParcoursBalise[]);
+
+        const formatsFromOrder = Array.from(new Set(orderedBalises.map((b) => b.selectedFormatType)));
+        if (formatsFromOrder.length) setSelectedFormatTypes(formatsFromOrder);
 
         setSelectedBalises(orderedBalises);
       } catch (e) {
@@ -823,50 +971,56 @@ const CreerUnNouveauParcours: React.FC<Props> = ({
     [selectedBalises]
   );
 
-  const selectedIds = useMemo(() => new Set(selectedBalises.map((b) => b.id)), [selectedBalises]);
+  const selectedKeys = useMemo(
+    () => new Set(selectedBalises.map((b) => buildFormatKey(b.id, b.selectedFormatType))),
+    [selectedBalises]
+  );
 
   const selectedCountMap = useMemo(() => {
     const map = new Map<string, number>();
     selectedBalises.forEach((b) => {
-      map.set(b.id, (map.get(b.id) ?? 0) + 1);
+      const key = buildFormatKey(b.id, b.selectedFormatType);
+      map.set(key, (map.get(key) ?? 0) + 1);
     });
     return map;
   }, [selectedBalises]);
 
-  const maxUnlockedStep = useMemo(() => getMaxUnlockedStep(nom, formatType), [nom, formatType]);
+  const maxUnlockedStep = useMemo(() => getMaxUnlockedStep(nom, selectedFormatTypes), [nom, selectedFormatTypes]);
 
-  const filteredBalises = useMemo(() => {
+  const filteredBaliseEntries = useMemo(() => {
     const q = searchBalise.trim().toLowerCase();
 
-    return balises.filter((b) => {
-      if (formatType && !hasFormatForBalise(b, formatType, baliseFormatsMap)) {
-        return false;
-      }
+    return balises.flatMap((b) => {
+      const formats = getBaliseFormatsForSelection(b, selectedFormatTypes, baliseFormatsMap);
+      if (!formats.length) return [];
 
       const matchesSearch =
         !q || String(b.code || "").toLowerCase().includes(q) || String(b.numero_balise).includes(q);
 
       const matchesFrozen = !showOnlyFrozen || b.frozen;
-      return matchesSearch && matchesFrozen;
+      if (!matchesSearch || !matchesFrozen) return [];
+
+      return formats.map((formatType) => ({ balise: b, formatType }));
     });
-  }, [balises, searchBalise, showOnlyFrozen, formatType, baliseFormatsMap]);
+  }, [balises, searchBalise, showOnlyFrozen, selectedFormatTypes, baliseFormatsMap]);
 
   const toggleBalise = useCallback(
-    (balise: Balise) => {
+    (balise: Balise, selectedFormatType: ParcoursFormatType) => {
       setSelectedBalises((prev) => {
-        const exists = prev.some((b) => b.id === balise.id);
+        const exists = prev.some((b) => b.id === balise.id && b.selectedFormatType === selectedFormatType);
+        const nextItem = { ...balise, selectedFormatType };
 
         if (allowDuplicateBalises) {
-          return [...prev, balise];
+          return [...prev, nextItem];
         }
 
         if (exists) {
-          const firstIndex = prev.findIndex((b) => b.id === balise.id);
+          const firstIndex = prev.findIndex((b) => b.id === balise.id && b.selectedFormatType === selectedFormatType);
           if (firstIndex < 0) return prev;
           return prev.filter((_, index) => index !== firstIndex);
         }
 
-        return [...prev, balise];
+        return [...prev, nextItem];
       });
     },
     [allowDuplicateBalises]
@@ -908,26 +1062,26 @@ const CreerUnNouveauParcours: React.FC<Props> = ({
         return false;
       }
 
-      if (step === 3 && !isStep3Valid(formatType)) {
-        Alert.alert("Étape 3", "Choisis un format de balise.");
+      if (step === 3 && !isStep3Valid(selectedFormatTypes)) {
+        Alert.alert("Étape 3", "Choisis au moins un format de balise.");
         return false;
       }
 
       if (step === 4) {
-        if (!formatType) {
-          Alert.alert("Étape 3", "Choisis d'abord un format.");
+        if (selectedFormatTypes.length === 0) {
+          Alert.alert("Étape 3", "Choisis d'abord au moins un format.");
           setCurrentStep(3);
           return false;
         }
-        if (!isStep4Valid(formatType, selectedBalises, baliseFormatsMap)) {
-          Alert.alert("Étape 4", "Choisis au moins une balise compatible avec ce format.");
+        if (!isStep4Valid(selectedBalises, baliseFormatsMap)) {
+          Alert.alert("Étape 4", "Choisis au moins une balise compatible avec les formats choisis.");
           return false;
         }
       }
 
       return true;
     },
-    [nom, formatType, selectedBalises, baliseFormatsMap]
+    [nom, selectedFormatTypes, selectedBalises, baliseFormatsMap]
   );
 
   const goPrev = useCallback(() => {
@@ -939,61 +1093,19 @@ const CreerUnNouveauParcours: React.FC<Props> = ({
     setCurrentStep((prev) => (prev < 4 ? ((prev + 1) as StepId) : prev));
   }, [currentStep, validateStep]);
 
-  const handleChangeFormatInEdit = useCallback(
+  const handleToggleFormat = useCallback(
     (nextFormat: ParcoursFormatType) => {
-      if (!isEditMode) {
-        setFormatType(nextFormat);
-        return;
-      }
-
-      if (formatType === nextFormat) {
-        setFormatType(nextFormat);
-        return;
-      }
-
-      const compatible = filterBalisesByFormat(selectedBalises, nextFormat, baliseFormatsMap);
-      const removedCount = selectedBalises.length - compatible.length;
-
-      Alert.alert(
-        "Changer le format ?",
-        removedCount > 0
-          ? `Certaines balises n'ont pas ce format.\n\nOui = on garde seulement les balises compatibles (${compatible.length}) et on supprime les ${removedCount} autres.\n\nReset = on vide toute la liste.\n\nAnnuler = on ne change rien.`
-          : "Toutes les balises actuelles sont compatibles avec ce format.\n\nVeux-tu utiliser ce nouveau format ?",
-        removedCount > 0
-          ? [
-              { text: "Annuler", style: "cancel" },
-              {
-                text: "Reset",
-                style: "destructive",
-                onPress: () => {
-                  setFormatType(nextFormat);
-                  setSelectedBalises([]);
-                  setSearchBalise("");
-                },
-              },
-              {
-                text: "Oui",
-                onPress: () => {
-                  setFormatType(nextFormat);
-                  setSelectedBalises(compatible);
-                  setSearchBalise("");
-                },
-              },
-            ]
-          : [
-              { text: "Annuler", style: "cancel" },
-              {
-                text: "Oui",
-                onPress: () => {
-                  setFormatType(nextFormat);
-                  setSelectedBalises(compatible);
-                  setSearchBalise("");
-                },
-              },
-            ]
-      );
+      setSelectedFormatTypes((prev) => {
+        const exists = prev.includes(nextFormat);
+        const next = exists ? prev.filter((format) => format !== nextFormat) : [...prev, nextFormat];
+        if (exists) {
+          setSelectedBalises((current) => current.filter((b) => b.selectedFormatType !== nextFormat));
+        }
+        setSearchBalise("");
+        return next;
+      });
     },
-    [isEditMode, formatType, selectedBalises, baliseFormatsMap]
+    []
   );
 
   const handleSave = useCallback(async () => {
@@ -1005,13 +1117,13 @@ const CreerUnNouveauParcours: React.FC<Props> = ({
       return;
     }
 
-    if (!formatType) {
+    if (selectedFormatTypes.length === 0) {
       if (!isEditMode) setCurrentStep(3);
-      Alert.alert("Format manquant", "Choisis un format de balise.");
+      Alert.alert("Format manquant", "Choisis au moins un format de balise.");
       return;
     }
 
-    if (!isStep4Valid(formatType, selectedBalises, baliseFormatsMap)) {
+    if (!isStep4Valid(selectedBalises, baliseFormatsMap)) {
       if (!isEditMode) setCurrentStep(4);
       Alert.alert("Balises manquantes", "Choisis au moins une balise compatible.");
       return;
@@ -1027,9 +1139,11 @@ const CreerUnNouveauParcours: React.FC<Props> = ({
       nom: nom.trim(),
       description: description.trim(),
       balises_ordre: selectedBalises.map((b) => b.id),
+      balises_formats_ordre: buildBaliseFormatOrder(selectedBalises),
+      format_types: selectedFormatTypes,
       folder_id: selectedFolderId,
       professeur_id: professeur?.user_id ?? null,
-      format_type: formatType,
+      format_type: selectedFormatTypes[0],
       allow_duplicate_balises: allowDuplicateBalises,
       mode_evaluation: modeEvaluation,
       bareme_evaluation_id: modeEvaluation ? selectedEvaluationBaremeId : null,
@@ -1040,16 +1154,25 @@ const CreerUnNouveauParcours: React.FC<Props> = ({
 
       if (isEditMode && activeParcoursId) {
         await updateParcoursInSupabase(activeParcoursId, payload);
-        Alert.alert("Succès", "Le parcours a bien été mis à jour.");
+        setSuccessFeedback({
+          title: "Mis à jour avec succès",
+          message: "Le parcours a bien été enregistré.",
+        });
       } else {
         await insertParcoursInSupabase(payload);
-        Alert.alert("Succès", "Le parcours a bien été créé.");
+        setSuccessFeedback({
+          title: "Parcours créé",
+          message: "Le parcours a bien été enregistré.",
+        });
       }
 
+      await wait(SUCCESS_MESSAGE_DURATION_MS);
+      setSuccessFeedback(null);
       resetForm();
       setPage("MesParcours");
     } catch (e: any) {
       console.error("❌ save parcours:", e);
+      setSuccessFeedback(null);
       Alert.alert("Erreur", e?.message || "Impossible d'enregistrer le parcours.");
     } finally {
       setSaving(false);
@@ -1057,7 +1180,7 @@ const CreerUnNouveauParcours: React.FC<Props> = ({
   }, [
     nom,
     description,
-    formatType,
+    selectedFormatTypes,
     selectedBalises,
     baliseFormatsMap,
     selectedFolderId,
@@ -1073,7 +1196,7 @@ const CreerUnNouveauParcours: React.FC<Props> = ({
   ]);
 
   const renderBalisePreview = useCallback(
-    (balise: Balise, size: number) => {
+    (balise: Balise, formatType: ParcoursFormatType, size: number) => {
       if (formatType === "poincon") {
         const payload = getPayloadForBalise(balise.id, "poincon", baliseFormatPayloadMap);
         return <PoinconPreview payload={payload} size={Math.max(42, Math.floor(size * 0.66))} />;
@@ -1102,15 +1225,15 @@ const CreerUnNouveauParcours: React.FC<Props> = ({
         </Text>
       );
     },
-    [formatType, baliseFormatPayloadMap]
+    [baliseFormatPayloadMap]
   );
 
   const getSelectedSubtitle = useCallback(
-    (balise: Balise) => {
-      if (!formatType || formatType === "code") return balise.code || "Sans code";
-      return FORMAT_LABELS[formatType];
+    (balise: SelectedParcoursBalise) => {
+      if (balise.selectedFormatType === "code") return balise.code || "Sans code";
+      return FORMAT_LABELS[balise.selectedFormatType];
     },
-    [formatType]
+    []
   );
 
   if (loading) {
@@ -1127,19 +1250,13 @@ const CreerUnNouveauParcours: React.FC<Props> = ({
   }
 
   const renderFormatButton = (option: { id: ParcoursFormatType; label: string }) => {
-    const active = formatType === option.id;
+    const active = selectedFormatTypes.includes(option.id);
 
     return (
       <TouchableOpacity
         key={option.id}
         activeOpacity={0.92}
-        onPress={() => {
-          if (isEditMode) {
-            handleChangeFormatInEdit(option.id);
-          } else {
-            setFormatType(option.id);
-          }
-        }}
+        onPress={() => handleToggleFormat(option.id)}
         style={[styles.formatCard, active && styles.formatCardActive]}
       >
         <View style={styles.formatCardIconWrap}>
@@ -1182,7 +1299,7 @@ const CreerUnNouveauParcours: React.FC<Props> = ({
                 <Text style={styles.selectedOrderBadgeText}>{index + 1}</Text>
               </View>
 
-              {formatType === "poincon" ? (
+              {b.selectedFormatType === "poincon" ? (
                 <View style={styles.selectedMiniPreview}>
                   <PoinconPreview
                     payload={getPayloadForBalise(b.id, "poincon", baliseFormatPayloadMap)}
@@ -1272,58 +1389,80 @@ const CreerUnNouveauParcours: React.FC<Props> = ({
         keyboardShouldPersistTaps="handled"
       >
         <Text style={styles.helperText}>
-          {filteredBalises.length} balise{filteredBalises.length > 1 ? "s" : ""}
+          {filteredBaliseEntries.length} choix compatible{filteredBaliseEntries.length > 1 ? "s" : ""}
         </Text>
 
         <View style={[styles.grid, { gap }]}> 
-          {filteredBalises.map((b) => {
-            const count = selectedCountMap.get(b.id) ?? 0;
-            const isSelected = selectedIds.has(b.id);
+          {filteredBaliseEntries.map(({ balise: b, formatType }) => {
+            const formatKey = buildFormatKey(b.id, formatType);
+            const count = selectedCountMap.get(formatKey) ?? 0;
+            const isSelected = selectedKeys.has(formatKey);
 
             return (
-              <TouchableOpacity
-                key={b.id}
-                onPress={() => toggleBalise(b)}
-                activeOpacity={0.92}
-                style={[
-                  styles.tile,
-                  { width: tileSize, height: tileSize },
-                  isSelected && !allowDuplicateBalises && styles.tileSelected,
-                  count > 0 && allowDuplicateBalises && styles.tileDuplicateMode,
-                  b.frozen && styles.tileFrozen,
-                ]}
-              >
-                <View style={styles.numBadge}>
-                  <Text style={styles.numBadgeTxt}>{b.numero_balise}</Text>
-                </View>
-
-                {b.frozen && (
-                  <View style={styles.frozenDot}>
-                    <Snowflake size={12} color="#1e3a8a" />
+              <View key={formatKey} style={[styles.tileWrap, { width: tileSize }]}>
+                <TouchableOpacity
+                  onPress={() => toggleBalise(b, formatType)}
+                  activeOpacity={0.92}
+                  style={[
+                    styles.tile,
+                    { width: tileSize, height: tileSize },
+                    isSelected && !allowDuplicateBalises && styles.tileSelected,
+                    count > 0 && allowDuplicateBalises && styles.tileDuplicateMode,
+                    b.frozen && styles.tileFrozen,
+                  ]}
+                >
+                  <View style={styles.numBadge}>
+                    <Text style={styles.numBadgeTxt}>{b.numero_balise}</Text>
                   </View>
-                )}
 
-                {isSelected && !allowDuplicateBalises && (
-                  <View style={styles.selectedCheck}>
-                    <Check size={12} color="#fff" />
+                  {b.frozen && (
+                    <View style={styles.frozenDot}>
+                      <Snowflake size={12} color="#1e3a8a" />
+                    </View>
+                  )}
+
+                  {isSelected && !allowDuplicateBalises && (
+                    <View style={styles.selectedCheck}>
+                      <Check size={12} color="#fff" />
+                    </View>
+                  )}
+
+                  {count > 0 && allowDuplicateBalises && (
+                    <View style={styles.countBubble}>
+                      <Text style={styles.countBubbleText}>x{count}</Text>
+                    </View>
+                  )}
+
+                  {renderBalisePreview(b, formatType, tileSize)}
+                  <View style={styles.tileFormatBadge}>
+                    <Text style={styles.tileFormatBadgeText} numberOfLines={1}>
+                      {FORMAT_LABELS[formatType]}
+                    </Text>
                   </View>
-                )}
+                </TouchableOpacity>
 
-                {count > 0 && allowDuplicateBalises && (
-                  <View style={styles.countBubble}>
-                    <Text style={styles.countBubbleText}>x{count}</Text>
-                  </View>
-                )}
-
-                {renderBalisePreview(b, tileSize)}
-              </TouchableOpacity>
+                {formatType === "tableau" ? (
+                  <TouchableOpacity
+                    onPress={() =>
+                      setTablePreview({
+                        balise: b,
+                        payload: getPayloadForBalise(b.id, "tableau", baliseFormatPayloadMap) ?? {},
+                      })
+                    }
+                    style={styles.previewEyeBtn}
+                    activeOpacity={0.86}
+                  >
+                    <Eye size={14} color={C_BLUE_STRONG} />
+                  </TouchableOpacity>
+                ) : null}
+              </View>
             );
           })}
         </View>
 
-        {filteredBalises.length === 0 && (
+        {filteredBaliseEntries.length === 0 && (
           <View style={styles.emptyBox}>
-            <Text style={styles.emptyText}>Aucune balise compatible avec ce format</Text>
+            <Text style={styles.emptyText}>Aucune balise compatible avec les formats choisis</Text>
           </View>
         )}
       </ScrollView>
@@ -1687,6 +1826,78 @@ const CreerUnNouveauParcours: React.FC<Props> = ({
               </TouchableOpacity>
             ))}
           </ScrollView>
+        </View>
+      </Modal>
+
+      <Modal visible={!!tablePreview} transparent animationType="fade" onRequestClose={() => setTablePreview(null)}>
+        <View style={styles.tablePreviewModalRoot}>
+          <TouchableOpacity activeOpacity={1} onPress={() => setTablePreview(null)} style={styles.tablePreviewBackdrop} />
+          <View style={styles.tablePreviewCard}>
+            <View style={styles.tablePreviewHeader}>
+              <View>
+                <Text style={styles.tablePreviewTitle}>Balise {tablePreview?.balise.numero_balise ?? ""}</Text>
+                <Text style={styles.tablePreviewSubtitle}>Tableau complet</Text>
+              </View>
+              <TouchableOpacity onPress={() => setTablePreview(null)} style={styles.closeIconBtn} activeOpacity={0.9}>
+                <X size={18} color={C_TEXT} />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView horizontal showsHorizontalScrollIndicator contentContainerStyle={styles.tablePreviewHorizontal}>
+              <ScrollView showsVerticalScrollIndicator style={styles.tablePreviewVertical}>
+                <View style={styles.tablePreviewGrid}>
+                  {(() => {
+                    const payload = tablePreview?.payload ?? {};
+                    const rows = clampGridSize(payload.rows, 4);
+                    const cols = clampGridSize(payload.cols, 4);
+                    const cells = payload.cells && typeof payload.cells === "object" && !Array.isArray(payload.cells) ? payload.cells : {};
+
+                    return (
+                      <>
+                        <View style={styles.tablePreviewRow}>
+                          <View style={styles.tablePreviewCorner} />
+                          {Array.from({ length: cols }).map((_, c) => (
+                            <View key={`head-${c}`} style={styles.tablePreviewColumnHeadCell}>
+                              <Text style={styles.tablePreviewHeadText}>{toLetter(c)}</Text>
+                            </View>
+                          ))}
+                        </View>
+                        {Array.from({ length: rows }).map((_, r) => (
+                          <View key={`row-${r}`} style={styles.tablePreviewRow}>
+                            <View style={styles.tablePreviewHeadCell}>
+                              <Text style={styles.tablePreviewHeadText}>{r + 1}</Text>
+                            </View>
+                            {Array.from({ length: cols }).map((__, c) => {
+                              const key = makeCellKey(r, c);
+                              return (
+                                <View key={key} style={styles.tablePreviewValueCell}>
+                                  <Text selectable={(Platform.OS === "web") as any} numberOfLines={1} style={styles.tablePreviewValueText}>
+                                    {String(cells[key] ?? "") || "—"}
+                                  </Text>
+                                </View>
+                              );
+                            })}
+                          </View>
+                        ))}
+                      </>
+                    );
+                  })()}
+                </View>
+              </ScrollView>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={!!successFeedback} transparent animationType="fade">
+        <View style={styles.successOverlayRoot}>
+          <View style={styles.successOverlayCard}>
+            <View style={styles.successIconBubble}>
+              <Check size={30} color="#fff" />
+            </View>
+            <Text style={styles.successOverlayTitle}>{successFeedback?.title}</Text>
+            <Text style={styles.successOverlayText}>{successFeedback?.message}</Text>
+          </View>
         </View>
       </Modal>
 
@@ -2328,6 +2539,27 @@ const styles = StyleSheet.create({
     color: C_TEXT,
     fontWeight: "900",
     paddingHorizontal: 4,
+    fontFamily: READABLE_CODE_FONT,
+    fontVariant: ["tabular-nums"],
+  },
+  tileFormatBadge: {
+    position: "absolute",
+    left: 5,
+    right: 5,
+    bottom: 5,
+    minHeight: 18,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.92)",
+    borderWidth: 1,
+    borderColor: "rgba(15,23,42,0.08)",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 5,
+  },
+  tileFormatBadgeText: {
+    color: C_TEXT,
+    fontWeight: "900",
+    fontSize: 9,
   },
 
   previewCenter: {
@@ -2406,6 +2638,20 @@ const styles = StyleSheet.create({
     color: "#fff",
     fontWeight: "900",
     fontSize: 10,
+  },
+  tileWrap: {
+    alignItems: "center",
+  },
+  previewEyeBtn: {
+    marginTop: 6,
+    width: 34,
+    height: 28,
+    borderRadius: 999,
+    backgroundColor: "#EEF6FF",
+    borderWidth: 1,
+    borderColor: "rgba(37,99,235,0.28)",
+    alignItems: "center",
+    justifyContent: "center",
   },
 
   stickySaveBar: {
@@ -2524,6 +2770,56 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  tablePreviewModalRoot: { flex: 1, alignItems: "center", justifyContent: "center", padding: 18 },
+  tablePreviewBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(15,23,42,0.48)" },
+  tablePreviewCard: { width: "100%", maxWidth: 720, maxHeight: "82%", backgroundColor: "#fff", borderRadius: 24, borderWidth: 1, borderColor: C_BORDER, padding: 16 },
+  tablePreviewHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 12 },
+  tablePreviewTitle: { color: C_TEXT, fontWeight: "900", fontSize: 20 },
+  tablePreviewSubtitle: { color: C_MUTED, fontWeight: "700", fontSize: 13, marginTop: 2 },
+  tablePreviewHorizontal: { paddingBottom: 6 },
+  tablePreviewVertical: { maxHeight: 440 },
+  tablePreviewGrid: { padding: 4 },
+  tablePreviewRow: { flexDirection: "row", gap: 6, marginBottom: 6 },
+  tablePreviewCorner: { width: 44, height: 42, borderRadius: 10, backgroundColor: "#F8FAFC" },
+  tablePreviewHeadCell: { width: 44, height: 42, borderRadius: 10, backgroundColor: "#EAF3F9", borderWidth: 1, borderColor: "#C9D5DF", alignItems: "center", justifyContent: "center" },
+  tablePreviewColumnHeadCell: { width: 96, height: 42, borderRadius: 10, backgroundColor: "#EAF3F9", borderWidth: 1, borderColor: "#C9D5DF", alignItems: "center", justifyContent: "center" },
+  tablePreviewHeadText: { color: C_HEADER, fontWeight: "900", fontSize: 13 },
+  tablePreviewValueCell: { width: 96, height: 42, borderRadius: 10, backgroundColor: "#fff", borderWidth: 1, borderColor: "rgba(15,23,42,0.12)", alignItems: "center", justifyContent: "center", paddingHorizontal: 8 },
+  tablePreviewValueText: { color: C_TEXT, fontWeight: "900", fontSize: 13 },
+  successOverlayRoot: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(15,23,42,0.34)",
+    padding: 24,
+  },
+  successOverlayCard: {
+    width: "100%",
+    maxWidth: 360,
+    borderRadius: 22,
+    backgroundColor: "#fff",
+    borderWidth: 1,
+    borderColor: C_BORDER,
+    paddingHorizontal: 20,
+    paddingVertical: 24,
+    alignItems: "center",
+    shadowColor: "#000",
+    shadowOpacity: 0.18,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 12,
+  },
+  successIconBubble: {
+    width: 58,
+    height: 58,
+    borderRadius: 999,
+    backgroundColor: C_GREEN,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 12,
+  },
+  successOverlayTitle: { color: C_TEXT, fontWeight: "900", fontSize: 20, textAlign: "center" },
+  successOverlayText: { color: C_MUTED, fontWeight: "700", fontSize: 14, textAlign: "center", marginTop: 6 },
 
   folderRow: {
     minHeight: 48,

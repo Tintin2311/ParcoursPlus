@@ -17,6 +17,7 @@ import {
   View,
   useWindowDimensions,
 } from "react-native";
+import { BarCodeScanner } from "expo-barcode-scanner";
 import { LinearGradient } from "expo-linear-gradient";
 import { Feather } from "@expo/vector-icons";
 import { supabase } from "./supabaseClient";
@@ -39,6 +40,14 @@ import {
   saveTentativeWithStats,
 } from "./CalculPointTentatives";
 import { fetchBaliseFormatsByBaliseIdsCompat } from "./baliseFormatsCompat";
+
+const READABLE_CODE_FONT = Platform.select({
+  web: '"Menlo", "Consolas", "Courier New", monospace',
+  ios: "Menlo",
+  android: "monospace",
+  default: "monospace",
+});
+const TABLE_USER_PREFS_KEY = "tableau_generation_preferences";
 
 type SetPageFn = (page: any) => void;
 
@@ -73,6 +82,7 @@ type ParcoursActif = {
   nom?: string | null;
   name?: string | null;
   balises_ordre?: any;
+  balises_formats_ordre?: any;
   format_type?: ParcoursFormatType | null;
   user_id?: string | null;
   professeur_id?: string | null;
@@ -99,6 +109,16 @@ type PoinconFormat = {
   rows: number;
   cols: number;
   cells: PoinconCell;
+};
+
+type TableauFormat = {
+  rows: number;
+  cols: number;
+  cells: Record<string, string>;
+};
+
+type QrCodeFormat = {
+  value: string;
 };
 
 type BaliseFormatRow = {
@@ -128,8 +148,15 @@ type BaliseAffichee = BaliseRow & {
   instanceKey: string;
   originalBaliseId: string;
   tokenSource: string;
+  selectedFormatType?: ParcoursFormatType | null;
   poinconFormat?: PoinconFormat | null;
   poinconFormatMissing?: boolean;
+  tableauFormat?: TableauFormat | null;
+  tableauAssignedCellKey?: string | null;
+  tableauExpectedCode?: string | null;
+  tableauFormatMissing?: boolean;
+  qrcodeFormat?: QrCodeFormat | null;
+  qrcodeFormatMissing?: boolean;
 };
 
 type Props = {
@@ -153,6 +180,20 @@ const C_ORANGE = "#F97316";
 const C_RED = "#DC2626";
 const C_RED_FLASH = "#FF1F1F";
 const CHRONO_ERROR_REVIEW_MS = 30_000;
+
+const normalizeQrValue = (value: any) =>
+  String(value ?? "")
+    .replace(/\u0000/g, "")
+    .replace(/\r\n/g, "\n")
+    .trim();
+
+const normalizeQrPayload = (payload: any): QrCodeFormat | null => {
+  const source = payload && typeof payload === "object" ? payload : {};
+  const value = normalizeQrValue(source.value ?? source.url ?? source.text ?? source.code);
+  return value ? { value } : null;
+};
+
+const getQrBarCodeTypes = () => [BarCodeScanner.Constants.BarCodeType.qr];
 
 const getChronoPauseStorageKey = (studentId: string, parcoursId: string) =>
   `chronoResultPauseUntil:${studentId}:${parcoursId}`;
@@ -314,6 +355,59 @@ const DEFAULT_POINCON_FORMAT: PoinconFormat = {
   rows: 4,
   cols: 4,
   cells: emptyPoincon(4, 4),
+};
+
+const toColumnLabel = (index: number) => {
+  let n = Math.max(0, Math.floor(index));
+  let out = "";
+
+  do {
+    out = String.fromCharCode(65 + (n % 26)) + out;
+    n = Math.floor(n / 26) - 1;
+  } while (n >= 0);
+
+  return out;
+};
+
+const makeTableauCellKey = (row: number, col: number) => `${toColumnLabel(col)}${row + 1}`;
+
+const buildTableauCellKeys = (rows: number, cols: number) =>
+  Array.from({ length: rows * cols }, (_, index) => {
+    const row = Math.floor(index / cols);
+    const col = index % cols;
+    return makeTableauCellKey(row, col);
+  });
+
+const getAssignedTableauCellKey = (assignedIndex: number, rows: number, cols: number) => {
+  const keys = buildTableauCellKeys(rows, cols);
+  if (!keys.length) return "A1";
+  const safeIndex = Math.max(0, Math.floor(Number(assignedIndex) || 0));
+  return keys[safeIndex % keys.length];
+};
+
+const normalizeTableauPayload = (payload: any): TableauFormat | null => {
+  const p = parseJsonObject(payload);
+  const rowsRaw = Number(p.rows ?? p.lignes ?? p.height ?? p.size ?? 4);
+  const colsRaw = Number(p.cols ?? p.columns ?? p.colonnes ?? p.width ?? p.size ?? 4);
+
+  if (!Number.isFinite(rowsRaw) || !Number.isFinite(colsRaw)) return null;
+
+  const rows = Math.max(1, Math.min(9, Math.floor(rowsRaw || 4)));
+  const cols = Math.max(1, Math.min(9, Math.floor(colsRaw || 4)));
+  const rawCells = p.cells && typeof p.cells === "object" && !Array.isArray(p.cells) ? p.cells : {};
+  const cells: Record<string, string> = {};
+
+  Object.entries(rawCells).forEach(([key, value]) => {
+    if (key === "__settings") return;
+    const rawKey = String(key).trim().toUpperCase();
+    const numericMatch = rawKey.match(/^(\d+)-(\d+)$/);
+    const displayKey = numericMatch
+      ? makeTableauCellKey(Number(numericMatch[1]), Number(numericMatch[2]))
+      : rawKey;
+    cells[displayKey] = String(value ?? "");
+  });
+
+  return { rows, cols, cells };
 };
 
 const isActiveCellValue = (value: any) =>
@@ -580,6 +674,34 @@ const extractTokens = (value: any): string[] => {
   return [];
 };
 
+const parseBaliseOrderToken = (
+  token: string,
+  fallbackFormatType: ParcoursFormatType | null = null
+): { lookupToken: string; selectedFormatType: ParcoursFormatType | null } => {
+  const raw = String(token ?? "").trim();
+  const match = raw.match(/^(.*)::format::(code|tableau|poincon|qrcode)$/);
+  if (match) {
+    return {
+      lookupToken: match[1],
+      selectedFormatType: match[2] as ParcoursFormatType,
+    };
+  }
+
+  return { lookupToken: raw, selectedFormatType: fallbackFormatType };
+};
+
+const normalizeBaliseFormatOrder = (value: any): { lookupToken: string; selectedFormatType: ParcoursFormatType }[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      const lookupToken = String(item?.balise_id ?? item?.id ?? "").trim();
+      const selectedFormatType = String(item?.format_type ?? "").trim() as ParcoursFormatType;
+      if (!lookupToken || !["code", "poincon", "qrcode", "tableau"].includes(selectedFormatType)) return null;
+      return { lookupToken, selectedFormatType };
+    })
+    .filter(Boolean) as { lookupToken: string; selectedFormatType: ParcoursFormatType }[];
+};
+
 const orderBalisesFromTokens = (tokens: string[], balises: BaliseRow[]): BaliseAffichee[] => {
   const byId = new Map<string, BaliseRow>();
   const byNumero = new Map<string, BaliseRow>();
@@ -596,13 +718,15 @@ const orderBalisesFromTokens = (tokens: string[], balises: BaliseRow[]): BaliseA
 
   tokens.forEach((token, index) => {
     const t = String(token).trim();
-    if (!t) return;
+    const parsed = parseBaliseOrderToken(t);
+    const lookupToken = parsed.lookupToken;
+    if (!lookupToken) return;
 
     let balise: BaliseRow | undefined;
 
-    if (isUuidLike(t)) balise = byId.get(t);
-    if (!balise && isIntegerLike(t)) balise = byNumero.get(String(Number(t)));
-    if (!balise) balise = byCode.get(sanitize(t));
+    if (isUuidLike(lookupToken)) balise = byId.get(lookupToken);
+    if (!balise && isIntegerLike(lookupToken)) balise = byNumero.get(String(Number(lookupToken)));
+    if (!balise) balise = byCode.get(sanitize(lookupToken));
 
     if (!balise) return;
     if (balise.frozen === true) return;
@@ -619,9 +743,16 @@ const orderBalisesFromTokens = (tokens: string[], balises: BaliseRow[]): BaliseA
       originalBaliseId,
       instanceKey,
       tokenSource: t,
+      selectedFormatType: parsed.selectedFormatType,
       ordre: results.length + 1,
       poinconFormat: null,
       poinconFormatMissing: false,
+      tableauFormat: null,
+      tableauAssignedCellKey: null,
+      tableauExpectedCode: null,
+      tableauFormatMissing: false,
+      qrcodeFormat: null,
+      qrcodeFormatMissing: false,
     });
   });
 
@@ -965,6 +1096,24 @@ const normalizeCompatPoinconRows = (data: any): BaliseFormatRow[] => {
     .filter((row) => !!row.balise_id && row.format_type === "poincon");
 };
 
+const normalizeCompatFormatRows = (data: any): BaliseFormatRow[] => {
+  const rows = Array.isArray(data) ? data : [];
+
+  return rows
+    .map((row: any) => {
+      const formatType = String(row?.format_type ?? "").trim().toLowerCase() as ParcoursFormatType;
+      if (!["code", "poincon", "qrcode", "tableau"].includes(formatType)) return null;
+
+      return {
+        id: row?.id ? String(row.id) : undefined,
+        balise_id: String(row?.balise_id ?? "").trim(),
+        format_type: formatType,
+        payload: row?.payload && typeof row.payload === "object" ? row.payload : {},
+      };
+    })
+    .filter((row) => !!row?.balise_id) as BaliseFormatRow[];
+};
+
 const loadPoinconFormatsForBalises = async (ids: string[]): Promise<BaliseFormatRow[]> => {
   if (!ids.length) return [];
 
@@ -1028,6 +1177,109 @@ const loadPoinconFormatsForBalises = async (ids: string[]): Promise<BaliseFormat
   return Array.from(rowsByBaliseId.values());
 };
 
+const loadFormatsForBalises = async (ids: string[]): Promise<BaliseFormatRow[]> => {
+  const cleanIds = Array.from(
+    new Set(ids.map((id) => String(id ?? "").trim()).filter(Boolean))
+  );
+
+  if (!cleanIds.length) return [];
+
+  try {
+    return normalizeCompatFormatRows(await fetchBaliseFormatsByBaliseIdsCompat(supabase, cleanIds));
+  } catch (e) {
+    console.warn("Lecture des formats de balises impossible:", e);
+    return [];
+  }
+};
+
+const loadOrCreateTableauAssignment = async ({
+  professeurId,
+  groupId,
+  studentId,
+}: {
+  professeurId: string | null;
+  groupId: string | null;
+  studentId: string | null;
+}): Promise<number | null> => {
+  if (!professeurId || !groupId || !studentId) return null;
+
+  try {
+    const existing = await supabase
+      .from("tableau_student_assignments")
+      .select("assigned_index")
+      .eq("professeur_id", professeurId)
+      .eq("group_id", groupId)
+      .eq("student_id", studentId)
+      .maybeSingle();
+
+    if (!existing.error && existing.data?.assigned_index != null) {
+      const n = Number(existing.data.assigned_index);
+      return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
+    }
+
+    const { data: studentsData, error: studentsError } = await supabase
+      .from("students")
+      .select("id, name, order_index")
+      .eq("group_id", groupId)
+      .order("order_index", { ascending: true, nullsFirst: false })
+      .order("name", { ascending: true });
+
+    if (studentsError) throw studentsError;
+
+    const students = ((studentsData as any[]) || [])
+      .filter((student) => student?.id)
+      .map((student) => String(student.id));
+
+    let preferredRows = 4;
+    let preferredCols = 4;
+
+    try {
+      const { data: prefData, error: prefError } = await supabase
+        .from("user_preferences")
+        .select("value")
+        .eq("user_id", professeurId)
+        .eq("key", TABLE_USER_PREFS_KEY)
+        .maybeSingle();
+
+      const value = (prefData as any)?.value;
+      if (!prefError && value) {
+        preferredRows = Math.max(1, Math.min(9, Number(value.rows) || 4));
+        preferredCols = Math.max(1, Math.min(9, Number(value.cols) || 4));
+      }
+    } catch (prefError) {
+      console.warn("Préférences tableau indisponibles:", prefError);
+    }
+
+    const assignedIndex = Math.max(0, students.indexOf(String(studentId)));
+    const assignedCellKey = getAssignedTableauCellKey(assignedIndex, preferredRows, preferredCols);
+
+    const saved = await supabase
+      .from("tableau_student_assignments")
+      .upsert(
+        {
+          professeur_id: professeurId,
+          group_id: groupId,
+          student_id: studentId,
+          assigned_index: assignedIndex,
+          assigned_cell_key: assignedCellKey,
+        },
+        { onConflict: "professeur_id,group_id,student_id" }
+      )
+      .select("assigned_index")
+      .maybeSingle();
+
+    if (!saved.error && saved.data?.assigned_index != null) {
+      const n = Number(saved.data.assigned_index);
+      return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : assignedIndex;
+    }
+
+    return assignedIndex;
+  } catch (e) {
+    console.warn("Attribution tableau Supabase indisponible:", e);
+    return null;
+  }
+};
+
 const EcrireCodeBaliseEleve: React.FC<Props> = ({
   setPage,
   eleveConnecte,
@@ -1047,6 +1299,9 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   const focusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scrollTimerRefs = useRef<Array<ReturnType<typeof setTimeout>>>([]);
   const autoFocusLockRef = useRef<string | null>(null);
+  const qrWebVideoRef = useRef<any>(null);
+  const qrWebStreamRef = useRef<any>(null);
+  const qrWebScanTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const chronometreStartedAtRef = useRef<number | null>(null);
   const chronometreBaseMsRef = useRef(0);
 
@@ -1058,6 +1313,11 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   const [loggingOut, setLoggingOut] = useState(false);
   const [confirmChronometreVisible, setConfirmChronometreVisible] = useState(false);
   const [confirmVerifyVisible, setConfirmVerifyVisible] = useState(false);
+  const [qrScannerVisible, setQrScannerVisible] = useState(false);
+  const [qrScannerBaliseKey, setQrScannerBaliseKey] = useState<string | null>(null);
+  const [qrScanLocked, setQrScanLocked] = useState(false);
+  const [qrWebScannerActive, setQrWebScannerActive] = useState(false);
+  const [qrScannerMessage, setQrScannerMessage] = useState("");
   const [appMessage, setAppMessage] = useState<{
     title: string;
     message: string;
@@ -1078,6 +1338,30 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   const [poinconsSaisis, setPoinconsSaisis] = useState<Record<string, PoinconCell>>({});
   const [resultats, setResultats] = useState<Record<string, boolean | null>>({});
   const [inputSelections, setInputSelections] = useState<Record<string, { start: number; end: number }>>({});
+
+  const stopWebQrScanner = useCallback(() => {
+    if (qrWebScanTimerRef.current) {
+      clearInterval(qrWebScanTimerRef.current);
+      qrWebScanTimerRef.current = null;
+    }
+    qrWebStreamRef.current?.getTracks?.().forEach((track: any) => track.stop?.());
+    qrWebStreamRef.current = null;
+    setQrWebScannerActive(false);
+  }, []);
+
+  const closeQrScanner = useCallback(() => {
+    stopWebQrScanner();
+    setQrScannerVisible(false);
+    setQrScannerBaliseKey(null);
+    setQrScanLocked(false);
+    setQrScannerMessage("");
+  }, [stopWebQrScanner]);
+
+  useEffect(() => {
+    return () => {
+      stopWebQrScanner();
+    };
+  }, [stopWebQrScanner]);
 
   const [savedScore, setSavedScore] = useState(0);
   const [tentativesCount, setTentativesCount] = useState(0);
@@ -1132,7 +1416,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   const boxGap = isCompact ? 5 : 7;
 
   const isPoinconParcours = useMemo(
-    () => balises.length > 0 && balises.every((b) => !!b.poinconFormat),
+    () => balises.length > 0 && balises.some((b) => !!b.poinconFormat),
     [balises]
   );
 
@@ -1535,6 +1819,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
   }, []);
 
   const getExpectedLength = useCallback((balise: BaliseAffichee) => {
+    if (balise.tableauExpectedCode) return Math.max(1, sanitize(balise.tableauExpectedCode).length);
     return Math.max(1, sanitize(balise.code ?? "").length);
   }, []);
 
@@ -2158,7 +2443,12 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       setEvaluationRequiresTime(needsEvaluationTimeGate);
 
       const rawBalisesOrdre = parcoursDb?.balises_ordre ?? parcoursActif?.balises_ordre ?? null;
-      const tokens = extractTokens(rawBalisesOrdre);
+      const savedFormatOrder = normalizeBaliseFormatOrder(
+        parcoursDb?.balises_formats_ordre ?? parcoursActif?.balises_formats_ordre ?? null
+      );
+      const tokens = savedFormatOrder.length
+        ? savedFormatOrder.map((item) => `${item.lookupToken}::format::${item.selectedFormatType}`)
+        : extractTokens(rawBalisesOrdre);
 
       const ownerId = String(
         parcoursDb?.user_id ??
@@ -2174,9 +2464,10 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       let orderedBalises: BaliseAffichee[] = [];
 
       if (tokens.length) {
-        const uuidTokens = Array.from(new Set(tokens.filter(isUuidLike)));
-        const numeroTokens = Array.from(new Set(tokens.filter(isIntegerLike).map((t) => Number(t))));
-        const codeTokensRaw = Array.from(new Set(tokens.filter((t) => !isUuidLike(t) && !isIntegerLike(t))));
+        const lookupTokens = tokens.map((token) => parseBaliseOrderToken(token).lookupToken);
+        const uuidTokens = Array.from(new Set(lookupTokens.filter(isUuidLike)));
+        const numeroTokens = Array.from(new Set(lookupTokens.filter(isIntegerLike).map((t) => Number(t))));
+        const codeTokensRaw = Array.from(new Set(lookupTokens.filter((t) => !isUuidLike(t) && !isIntegerLike(t))));
 
         const fetchedBalises: BaliseRow[] = [];
 
@@ -2231,14 +2522,80 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
 
       if (orderedBalises.length) {
         const ids = Array.from(new Set(orderedBalises.map((b) => b.originalBaliseId)));
+        const tableauAssignmentIndex = await loadOrCreateTableauAssignment({
+          professeurId: ownerId,
+          groupId: resolved.groupId,
+          studentId: resolved.studentId,
+        });
 
-        let formatsDataFinal: BaliseFormatRow[] = await loadPoinconFormatsForBalises(ids);
+        const formatsDataFinal: BaliseFormatRow[] = await loadFormatsForBalises(ids);
+        const poinconIds = new Set(
+          formatsDataFinal
+            .filter((format) => format.format_type === "poincon")
+            .map((format) => String(format.balise_id))
+        );
+        const missingPoinconIds = ids.filter((id) => !poinconIds.has(String(id)));
+
+        if (missingPoinconIds.length) {
+          const poinconFallbackRows = await loadPoinconFormatsForBalises(missingPoinconIds);
+          const existingKeys = new Set(
+            formatsDataFinal.map((format) => `${format.balise_id}:${format.format_type}`)
+          );
+
+          poinconFallbackRows.forEach((format) => {
+            const key = `${format.balise_id}:${format.format_type}`;
+            if (!existingKeys.has(key)) {
+              existingKeys.add(key);
+              formatsDataFinal.push(format);
+            }
+          });
+        }
 
         const formatsByBaliseId = new Map<string, PoinconFormat>();
+        const tableauxByBaliseId = new Map<string, TableauFormat>();
+        const qrcodesByBaliseId = new Map<string, QrCodeFormat>();
 
         formatsDataFinal.forEach((format) => {
+          if (format.format_type === "poincon") {
+            const normalized = normalizePoinconPayload(format.payload);
+            if (normalized) {
+              formatsByBaliseId.set(String(format.balise_id), normalized);
+            }
+          }
+
+          if (format.format_type === "tableau") {
+            const normalized = normalizeTableauPayload(format.payload);
+            if (normalized) {
+              tableauxByBaliseId.set(String(format.balise_id), normalized);
+            }
+          }
+
+          if (format.format_type === "qrcode") {
+            const normalized = normalizeQrPayload(format.payload);
+            if (normalized) {
+              qrcodesByBaliseId.set(String(format.balise_id), normalized);
+            }
+          }
+        });
+
+        if (formatsDataFinal.some((format) => format.format_type !== "poincon")) {
+          const poinconFallbackRows = await loadPoinconFormatsForBalises(
+            ids.filter((id) => !formatsByBaliseId.has(id))
+          );
+
+          poinconFallbackRows.forEach((format) => {
+            const normalized = normalizePoinconPayload(format.payload);
+            if (normalized) {
+              formatsDataFinal.push(format);
+              formatsByBaliseId.set(String(format.balise_id), normalized);
+            }
+          });
+        }
+
+        formatsDataFinal.forEach((format) => {
+          if (format.format_type !== "poincon") return;
           const normalized = normalizePoinconPayload(format.payload);
-          if (normalized) {
+          if (normalized && !formatsByBaliseId.has(String(format.balise_id))) {
             formatsByBaliseId.set(String(format.balise_id), normalized);
           }
         });
@@ -2257,8 +2614,16 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         const normalizeIdKey = (value: any) => String(value ?? "").trim().toLowerCase();
 
         const formatsByCleanBaliseId = new Map<string, PoinconFormat>();
+        const tableauxByCleanBaliseId = new Map<string, TableauFormat>();
+        const qrcodesByCleanBaliseId = new Map<string, QrCodeFormat>();
         formatsByBaliseId.forEach((format, baliseId) => {
           formatsByCleanBaliseId.set(normalizeIdKey(baliseId), format);
+        });
+        tableauxByBaliseId.forEach((format, baliseId) => {
+          tableauxByCleanBaliseId.set(normalizeIdKey(baliseId), format);
+        });
+        qrcodesByBaliseId.forEach((format, baliseId) => {
+          qrcodesByCleanBaliseId.set(normalizeIdKey(baliseId), format);
         });
 
         const poinconFormatsInOrder = formatsDataFinal
@@ -2274,19 +2639,61 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
             formatsByBaliseId.get(directKey) ??
             formatsByCleanBaliseId.get(cleanKey) ??
             null;
+          const savedTableauFormat =
+            tableauxByBaliseId.get(directKey) ??
+            tableauxByCleanBaliseId.get(cleanKey) ??
+            null;
+          const savedQrCodeFormat =
+            qrcodesByBaliseId.get(directKey) ??
+            qrcodesByCleanBaliseId.get(cleanKey) ??
+            null;
 
           if (!savedPoinconFormat && poinconFormatsInOrder.length === orderedBalises.length) {
             savedPoinconFormat = poinconFormatsInOrder[index] ?? null;
           }
 
-          const shouldUsePoincon = parcoursFormatType === "poincon" || !!savedPoinconFormat;
+          const shouldUsePoincon =
+            b.selectedFormatType === "poincon" ||
+            (!b.selectedFormatType && parcoursFormatType === "poincon") ||
+            (!!savedPoinconFormat && !b.selectedFormatType);
+          const shouldUseTableau =
+            b.selectedFormatType === "tableau" ||
+            (!b.selectedFormatType && parcoursFormatType === "tableau") ||
+            (!!savedTableauFormat && !b.selectedFormatType);
+          const shouldUseQrCode =
+            b.selectedFormatType === "qrcode" ||
+            (!b.selectedFormatType && parcoursFormatType === "qrcode") ||
+            (!!savedQrCodeFormat && !b.selectedFormatType);
+          const assignedCellKey =
+            shouldUseTableau && savedTableauFormat
+              ? getAssignedTableauCellKey(
+                  tableauAssignmentIndex ?? 0,
+                  savedTableauFormat.rows,
+                  savedTableauFormat.cols
+                )
+              : null;
+          const tableauExpectedCode =
+            assignedCellKey && savedTableauFormat
+              ? String(savedTableauFormat.cells[assignedCellKey] ?? "").trim()
+              : null;
 
           return {
             ...b,
+            code: shouldUseQrCode && savedQrCodeFormat?.value
+              ? savedQrCodeFormat.value
+              : shouldUseTableau && tableauExpectedCode
+                ? tableauExpectedCode
+                : b.code,
             poinconFormat: shouldUsePoincon
               ? savedPoinconFormat ?? DEFAULT_POINCON_FORMAT
               : null,
             poinconFormatMissing: shouldUsePoincon && !savedPoinconFormat,
+            tableauFormat: shouldUseTableau ? savedTableauFormat : null,
+            tableauAssignedCellKey: assignedCellKey,
+            tableauExpectedCode,
+            tableauFormatMissing: shouldUseTableau && (!savedTableauFormat || !tableauExpectedCode),
+            qrcodeFormat: shouldUseQrCode ? savedQrCodeFormat : null,
+            qrcodeFormatMissing: shouldUseQrCode && !savedQrCodeFormat,
           };
         });
 
@@ -2394,6 +2801,126 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       }, 90);
     },
     [focusNextBalise, getExpectedLength, maxAttemptsReached, validatedSet]
+  );
+
+  const applyQrScanValue = useCallback(
+    (baliseKey: string, value: any) => {
+      const cleanValue = normalizeQrValue(value);
+      if (!cleanValue) return;
+
+      setActiveBaliseKey(baliseKey);
+      setCodesSaisis((prev) => ({ ...prev, [baliseKey]: cleanValue }));
+      setResultats((prev) => ({ ...prev, [baliseKey]: null }));
+      closeQrScanner();
+    },
+    [closeQrScanner]
+  );
+
+  const openQrScannerForBalise = useCallback(
+    async (balise: BaliseAffichee) => {
+      const key = balise.instanceKey;
+      if (maxAttemptsReached || validatedSet.has(key)) return;
+      if (!balise.qrcodeFormat?.value) {
+        setAppMessage({
+          title: "QR code introuvable",
+          message: "La réponse QR de cette balise n'a pas été trouvée.",
+          tone: "warning",
+        });
+        return;
+      }
+
+      setActiveBaliseKey(key);
+      setQrScannerBaliseKey(key);
+      setQrScanLocked(false);
+
+      if (Platform.OS === "web") {
+        const BarcodeDetectorCtor = (globalThis as any).BarcodeDetector;
+
+        if (!BarcodeDetectorCtor || !navigator?.mediaDevices?.getUserMedia) {
+          setAppMessage({
+            title: "Scanner indisponible",
+            message: "Ce navigateur ne permet pas le scan QR en direct. Utilise un navigateur Chrome ou Edge récent.",
+            tone: "warning",
+          });
+          return;
+        }
+
+        try {
+          stopWebQrScanner();
+          setQrScannerMessage("Ouverture de la caméra...");
+          setQrWebScannerActive(true);
+          setQrScannerVisible(true);
+
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: "environment" },
+            audio: false,
+          });
+          qrWebStreamRef.current = stream;
+
+          requestAnimationFrame(() => {
+            const video = qrWebVideoRef.current as HTMLVideoElement | null;
+            if (!video) return;
+
+            video.srcObject = stream;
+            video.setAttribute("playsInline", "true");
+            video.play?.().catch(() => null);
+            setQrScannerMessage("Place le QR code dans le cadre.");
+
+            const detector = new BarcodeDetectorCtor({ formats: ["qr_code"] });
+            qrWebScanTimerRef.current = setInterval(async () => {
+              try {
+                const results = await detector.detect(video);
+                const nextValue = normalizeQrValue(results?.[0]?.rawValue);
+                if (!nextValue) return;
+                applyQrScanValue(key, nextValue);
+              } catch {
+                // On réessaie à l'image suivante.
+              }
+            }, 450);
+          });
+        } catch (e: any) {
+          closeQrScanner();
+          setAppMessage({
+            title: "Caméra indisponible",
+            message: e?.message || "Impossible d'ouvrir la caméra.",
+            tone: "error",
+          });
+        }
+        return;
+      }
+
+      try {
+        const permission = await BarCodeScanner.requestPermissionsAsync();
+        if (permission.status !== "granted") {
+          setAppMessage({
+            title: "Caméra refusée",
+            message: "Autorise l'accès à la caméra pour scanner le QR code.",
+            tone: "warning",
+          });
+          return;
+        }
+
+        setQrWebScannerActive(false);
+        setQrScannerMessage("Place le QR code dans le cadre.");
+        setQrScannerVisible(true);
+      } catch (e: any) {
+        setAppMessage({
+          title: "Scanner indisponible",
+          message: e?.message || "Impossible d'ouvrir le scanner QR.",
+          tone: "error",
+        });
+      }
+    },
+    [applyQrScanValue, closeQrScanner, maxAttemptsReached, stopWebQrScanner, validatedSet]
+  );
+
+  const handleQrScanned = useCallback(
+    ({ data }: { data: string }) => {
+      if (qrScanLocked || !qrScannerBaliseKey) return;
+      setQrScanLocked(true);
+      applyQrScanValue(qrScannerBaliseKey, data);
+    },
+    [applyQrScanValue, qrScanLocked, qrScannerBaliseKey]
   );
 
   const computeGainBreakdown = useCallback(
@@ -2708,8 +3235,15 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
           return;
         }
 
+        if (balise.qrcodeFormat) {
+          const saisi = normalizeQrValue(codesSaisis[key]);
+          const attendu = normalizeQrValue(balise.qrcodeFormat.value);
+          nextResults[key] = !!saisi && !!attendu && saisi === attendu;
+          return;
+        }
+
         const saisi = sanitize(codesSaisis[key]);
-        const attendu = sanitize(balise.code ?? "");
+        const attendu = sanitize(balise.tableauExpectedCode ?? balise.code ?? "");
         nextResults[key] = !!saisi && !!attendu && saisi === attendu;
       });
 
@@ -2870,6 +3404,10 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         return !current?.some((row) => row.some(Boolean));
       }
 
+      if (balise.qrcodeFormat) {
+        return !normalizeQrValue(codesSaisis[key]);
+      }
+
       const expectedLength = getExpectedLength(balise);
       return sanitize(codesSaisis[key]).length < expectedLength;
     });
@@ -2914,13 +3452,28 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
       const selection = inputSelections[key];
 
       return (
-        <Pressable
-          onPress={() => {
-            if (!alreadyValidated && !maxAttemptsReached) focusBalise(item, true, true);
-          }}
-          style={[styles.codeBoxesWrap, { gap: boxGap }, webPanYStyle]}
-        >
-          <TextInput
+	        <Pressable
+	          onPress={() => {
+	            if (!alreadyValidated && !maxAttemptsReached) focusBalise(item, true, true);
+	          }}
+	          style={[styles.codeBoxesWrap, { gap: boxGap }, webPanYStyle]}
+	        >
+	          {item.tableauAssignedCellKey ? (
+	            <View style={styles.tableauStudentTargetPill}>
+	              <Feather name="grid" size={14} color="#0F5E8C" />
+	              <Text style={styles.tableauStudentTargetText}>
+	                Case {item.tableauAssignedCellKey}
+	              </Text>
+	            </View>
+	          ) : null}
+
+	          {item.tableauFormatMissing ? (
+	            <Text style={styles.tableauStudentMissingText}>
+	              Code de tableau introuvable
+	            </Text>
+	          ) : null}
+
+	          <TextInput
             ref={(ref) => setInputRef(key, ref)}
             value={alreadyValidated ? "" : typedValue}
             editable={!alreadyValidated && !maxAttemptsReached}
@@ -3068,6 +3621,48 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
     [activeBaliseKey, isCompact, maxAttemptsReached, poinconsSaisis, resultats, validatedSet]
   );
 
+  const renderQrCodeInput = useCallback(
+    (item: BaliseAffichee) => {
+      const key = item.instanceKey;
+      const alreadyValidated = validatedSet.has(key);
+      const result = alreadyValidated ? true : resultats[key];
+      const scanned = !!normalizeQrValue(codesSaisis[key]);
+      const isActive = activeBaliseKey === key;
+
+      return (
+        <View
+          style={[
+            styles.qrStudentWrap,
+            isActive && styles.qrStudentWrapActive,
+            result === true && styles.qrStudentWrapOk,
+            result === false && styles.qrStudentWrapKo,
+            alreadyValidated && styles.qrStudentWrapValidated,
+          ]}
+        >
+          {item.qrcodeFormatMissing ? (
+            <Text style={styles.qrStudentMissingText}>QR code introuvable</Text>
+          ) : null}
+
+          <TouchableOpacity
+            activeOpacity={0.88}
+            disabled={alreadyValidated || maxAttemptsReached || item.qrcodeFormatMissing}
+            onPress={() => openQrScannerForBalise(item)}
+            style={[
+              styles.qrStudentScanBtn,
+              (alreadyValidated || maxAttemptsReached || item.qrcodeFormatMissing) && styles.qrStudentScanBtnDisabled,
+            ]}
+          >
+            <Feather name={alreadyValidated ? "check-circle" : scanned ? "check" : "camera"} size={18} color="#FFFFFF" />
+            <Text style={styles.qrStudentScanText}>
+              {alreadyValidated ? "Validée" : scanned ? "QR scanné" : "Scanner le QR code"}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      );
+    },
+    [activeBaliseKey, codesSaisis, maxAttemptsReached, openQrScannerForBalise, resultats, validatedSet]
+  );
+
   const renderBalise = useCallback(
     ({ item, index }: { item: BaliseAffichee; index: number }) => {
       const key = item.instanceKey;
@@ -3100,7 +3695,12 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
           <TouchableOpacity
             activeOpacity={0.95}
             onPress={() => {
-              if (!alreadyValidated) focusBalise(item, true, true);
+              if (alreadyValidated) return;
+              if (item.qrcodeFormat || item.qrcodeFormatMissing) {
+                openQrScannerForBalise(item);
+                return;
+              }
+              focusBalise(item, true, true);
             }}
             style={[styles.baliseLineTouchable, webPanYStyle]}
           >
@@ -3122,7 +3722,11 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
             </LinearGradient>
 
             <View style={styles.baliseInputZone}>
-              {item.poinconFormat ? renderPoinconInput(item) : renderCodeBoxes(item, index)}
+              {item.poinconFormat
+                ? renderPoinconInput(item)
+                : item.qrcodeFormat || item.qrcodeFormatMissing
+                  ? renderQrCodeInput(item)
+                  : renderCodeBoxes(item, index)}
 
               {(alreadyValidated || result === false) && (
                 <View style={styles.baliseMetaRow}>
@@ -3140,12 +3744,13 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         </View>
       );
     },
-    [activeBaliseKey, focusBalise, pointsConfig, renderCodeBoxes, renderPoinconInput, resultats, validatedSet]
+    [activeBaliseKey, focusBalise, openQrScannerForBalise, pointsConfig, renderCodeBoxes, renderPoinconInput, renderQrCodeInput, resultats, validatedSet]
   );
 
   const renderBigPoinconBalise = useCallback(
     ({ item, index }: { item: BaliseAffichee; index: number }) => {
       const key = item.instanceKey;
+      const isPoinconItem = !!item.poinconFormat;
       const format = item.poinconFormat ?? DEFAULT_POINCON_FORMAT;
       const alreadyValidated = validatedSet.has(key);
       const result = alreadyValidated ? true : resultats[key];
@@ -3225,7 +3830,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
               ) : null}
             </View>
 
-            {isMissingSupabaseAnswer ? (
+            {isPoinconItem && isMissingSupabaseAnswer ? (
               <View style={styles.poinconMissingBox}>
                 <Text style={styles.poinconMissingTitle}>Réponse Supabase introuvable</Text>
                 <Text style={styles.poinconMissingText}>
@@ -3234,40 +3839,46 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
               </View>
             ) : null}
 
-            <View style={[styles.bigPoinconGridWrap, { gap: gridGap }]}> 
-              {current.map((row, r) => (
-                <View key={`${key}_big_row_${r}`} style={[styles.bigPoinconRow, { gap: gridGap }]}> 
-                  {row.map((active, c) => (
-                    <TouchableOpacity
-                      key={`${key}_big_cell_${r}_${c}`}
-                      activeOpacity={0.82}
-                      disabled={alreadyValidated || maxAttemptsReached}
-                      onPress={() => {
-                        setActiveBaliseKey(key);
-                        setResultats((prev) => ({ ...prev, [key]: null }));
-                        setPoinconsSaisis((prev) => {
-                          const base = prev[key] ?? emptyPoincon(format.rows, format.cols);
-                          const next = base.map((line) => [...line]);
-                          next[r][c] = !next[r][c];
-                          return { ...prev, [key]: next };
-                        });
-                      }}
-                      style={[
-                        styles.bigPoinconCell,
-                        { width: cellSize, height: cellSize, borderRadius: Math.max(13, Math.floor(cellSize / 3.1)) },
-                        active && styles.bigPoinconCellActive,
-                        result === true && styles.bigPoinconCellOk,
-                        result === false && styles.bigPoinconCellKo,
-                        alreadyValidated && styles.bigPoinconCellValidated,
-                      ]}
-                    >
-                      {active ? <View style={[styles.bigPoinconDot, { width: cellSize * 0.34, height: cellSize * 0.34 }]} /> : null}
-                      {alreadyValidated ? <Text style={styles.bigPoinconCheck}>✓</Text> : null}
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              ))}
-            </View>
+            {isPoinconItem ? (
+              <View style={[styles.bigPoinconGridWrap, { gap: gridGap }]}>
+                {current.map((row, r) => (
+                  <View key={`${key}_big_row_${r}`} style={[styles.bigPoinconRow, { gap: gridGap }]}>
+                    {row.map((active, c) => (
+                      <TouchableOpacity
+                        key={`${key}_big_cell_${r}_${c}`}
+                        activeOpacity={0.82}
+                        disabled={alreadyValidated || maxAttemptsReached}
+                        onPress={() => {
+                          setActiveBaliseKey(key);
+                          setResultats((prev) => ({ ...prev, [key]: null }));
+                          setPoinconsSaisis((prev) => {
+                            const base = prev[key] ?? emptyPoincon(format.rows, format.cols);
+                            const next = base.map((line) => [...line]);
+                            next[r][c] = !next[r][c];
+                            return { ...prev, [key]: next };
+                          });
+                        }}
+                        style={[
+                          styles.bigPoinconCell,
+                          { width: cellSize, height: cellSize, borderRadius: Math.max(13, Math.floor(cellSize / 3.1)) },
+                          active && styles.bigPoinconCellActive,
+                          result === true && styles.bigPoinconCellOk,
+                          result === false && styles.bigPoinconCellKo,
+                          alreadyValidated && styles.bigPoinconCellValidated,
+                        ]}
+                      >
+                        {active ? <View style={[styles.bigPoinconDot, { width: cellSize * 0.34, height: cellSize * 0.34 }]} /> : null}
+                        {alreadyValidated ? <Text style={styles.bigPoinconCheck}>✓</Text> : null}
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                ))}
+              </View>
+            ) : (
+              <View style={styles.bigCodeEntryWrap}>
+                {renderCodeBoxes(item, index)}
+              </View>
+            )}
 
             {(alreadyValidated || result === false) ? (
               <View style={styles.bigPoinconFooterStatus}>
@@ -3278,7 +3889,7 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
         </View>
       );
     },
-    [activeBaliseKey, balises.length, getPoinconBigCellSize, goToPoinconIndex, isCompact, maxAttemptsReached, poinconCardMinHeight, poinconCardWidth, poinconsSaisis, pointsConfig, resultats, validatedSet, width]
+    [activeBaliseKey, balises.length, getPoinconBigCellSize, goToPoinconIndex, isCompact, maxAttemptsReached, poinconCardMinHeight, poinconCardWidth, poinconsSaisis, pointsConfig, renderCodeBoxes, resultats, validatedSet, width]
   );
 
   return (
@@ -3664,6 +4275,42 @@ const EcrireCodeBaliseEleve: React.FC<Props> = ({
                     {saving ? <ActivityIndicator color="#fff" /> : <Text style={styles.verifyConfirmText}>Vérifier</Text>}
                   </Pressable>
                 </View>
+              </View>
+            </View>
+          </Modal>
+
+          <Modal transparent visible={qrScannerVisible} animationType="slide" onRequestClose={closeQrScanner}>
+            <View style={styles.qrStudentScannerBackdrop}>
+              <View style={styles.qrStudentScannerPanel}>
+                <View style={styles.qrStudentScannerHeader}>
+                  <Text style={styles.qrStudentScannerTitle}>Scanner le QR code</Text>
+                  <Pressable style={styles.qrStudentScannerClose} onPress={closeQrScanner}>
+                    <Feather name="x" size={18} color="#FFFFFF" />
+                  </Pressable>
+                </View>
+
+                <View style={styles.qrStudentCameraWrap}>
+                  {Platform.OS === "web" && qrWebScannerActive ? (
+                    React.createElement("video", {
+                      ref: qrWebVideoRef,
+                      muted: true,
+                      playsInline: true,
+                      autoPlay: true,
+                      style: styles.qrStudentCamera as any,
+                    })
+                  ) : (
+                    <BarCodeScanner
+                      onBarCodeScanned={qrScanLocked ? undefined : handleQrScanned}
+                      barCodeTypes={getQrBarCodeTypes()}
+                      style={styles.qrStudentCamera}
+                    />
+                  )}
+                  <View style={styles.qrStudentScannerFrame} />
+                </View>
+
+                <Text style={styles.qrStudentScannerHint}>
+                  {qrScannerMessage || "Place le QR code trouvé dans le cadre."}
+                </Text>
               </View>
             </View>
           </Modal>
@@ -4144,6 +4791,30 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "flex-start",
   },
+  tableauStudentTargetPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    height: 30,
+    borderRadius: 999,
+    backgroundColor: "#E0F2FE",
+    borderWidth: 1,
+    borderColor: "rgba(14,165,233,0.32)",
+    paddingHorizontal: 10,
+    marginRight: 2,
+  },
+  tableauStudentTargetText: {
+    color: "#0F5E8C",
+    fontWeight: "900",
+    fontSize: 13,
+  },
+  tableauStudentMissingText: {
+    width: "100%",
+    color: C_RED,
+    fontWeight: "800",
+    fontSize: 12,
+    marginBottom: 4,
+  },
   hiddenInput: {
     position: "absolute",
     left: 0,
@@ -4176,6 +4847,9 @@ const styles = StyleSheet.create({
     color: C_TEXT,
     textAlign: "center",
     fontWeight: "900",
+    fontFamily: READABLE_CODE_FONT,
+    fontVariant: ["tabular-nums"],
+    letterSpacing: 0.4,
     includeFontPadding: false,
     textAlignVertical: "center",
   },
@@ -4200,6 +4874,56 @@ const styles = StyleSheet.create({
   },
   codeBoxTextKo: {
     color: "#7F1D1D",
+  },
+
+  qrStudentWrap: {
+    minHeight: 52,
+    borderRadius: 16,
+    borderWidth: 2,
+    borderColor: "rgba(31,91,134,0.12)",
+    backgroundColor: "rgba(255,255,255,0.42)",
+    paddingHorizontal: 8,
+    paddingVertical: 7,
+    justifyContent: "center",
+  },
+  qrStudentWrapActive: {
+    borderColor: "#38BDF8",
+    backgroundColor: "rgba(224,242,254,0.78)",
+  },
+  qrStudentWrapOk: {
+    borderColor: "rgba(22,163,74,0.70)",
+    backgroundColor: "rgba(220,252,231,0.78)",
+  },
+  qrStudentWrapKo: {
+    borderColor: "rgba(220,38,38,0.70)",
+    backgroundColor: "rgba(254,226,226,0.78)",
+  },
+  qrStudentWrapValidated: {
+    borderColor: "rgba(22,163,74,0.70)",
+  },
+  qrStudentScanBtn: {
+    minHeight: 42,
+    borderRadius: 14,
+    backgroundColor: "#2563EB",
+    paddingHorizontal: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
+  qrStudentScanBtnDisabled: {
+    opacity: 0.68,
+  },
+  qrStudentScanText: {
+    color: "#FFFFFF",
+    fontSize: 14,
+    fontWeight: "900",
+  },
+  qrStudentMissingText: {
+    color: C_RED,
+    fontSize: 12,
+    fontWeight: "800",
+    marginBottom: 5,
   },
 
   poinconStudentWrap: {
@@ -4336,6 +5060,14 @@ const styles = StyleSheet.create({
   bigPoinconCardKo: {
     borderColor: "rgba(220,38,38,0.78)",
     backgroundColor: "rgba(254,242,242,0.96)",
+  },
+  bigCodeEntryWrap: {
+    flex: 1,
+    width: "100%",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 14,
+    paddingVertical: 22,
   },
   bigPoinconHeader: {
     flexDirection: "row",
@@ -4614,6 +5346,69 @@ const styles = StyleSheet.create({
   confirmText: {
     color: "#fff",
     fontWeight: "900",
+  },
+
+  qrStudentScannerBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(15,23,42,0.84)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 18,
+  },
+  qrStudentScannerPanel: {
+    width: "100%",
+    maxWidth: 430,
+    borderRadius: 22,
+    backgroundColor: "#0F172A",
+    borderWidth: 1,
+    borderColor: "rgba(226,232,240,0.18)",
+    padding: 14,
+    gap: 12,
+  },
+  qrStudentScannerHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  qrStudentScannerTitle: {
+    color: "#F8FAFC",
+    fontSize: 17,
+    fontWeight: "900",
+  },
+  qrStudentScannerClose: {
+    width: 36,
+    height: 36,
+    borderRadius: 13,
+    backgroundColor: "rgba(255,255,255,0.12)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  qrStudentCameraWrap: {
+    height: 330,
+    borderRadius: 18,
+    overflow: "hidden",
+    backgroundColor: "#020617",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  qrStudentCamera: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  qrStudentScannerFrame: {
+    width: 220,
+    height: 220,
+    borderRadius: 22,
+    borderWidth: 3,
+    borderColor: "#38BDF8",
+    backgroundColor: "transparent",
+  },
+  qrStudentScannerHint: {
+    color: "#CBD5E1",
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: "700",
+    textAlign: "center",
   },
 
   appMessageOverlay: {

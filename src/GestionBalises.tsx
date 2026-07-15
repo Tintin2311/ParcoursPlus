@@ -25,12 +25,20 @@ import {
   QrCode,
   Search,
   Snowflake,
+  Star,
   Table2,
 } from "lucide-react-native";
 import { supabase } from "./supabaseClient";
 import { fetchAllBaliseFormatsCompat } from "./baliseFormatsCompat";
 import InformationBalises from "./InformationBalises";
 import BottomBar from "./ui/BottomBar";
+
+const READABLE_CODE_FONT = Platform.select({
+  web: '"Menlo", "Consolas", "Courier New", monospace',
+  ios: "Menlo",
+  android: "monospace",
+  default: "monospace",
+});
 
 /* =========================
    Types
@@ -83,6 +91,7 @@ const isViewMode = (value: any): value is ViewMode => {
 const STORAGE_KEY = "@parcoursplus_balises_v3";
 const BALISE_EDIT_DRAFT_KEY = "@parcoursplus_balise_edit_draft";
 const VIEW_MODE_STORAGE_KEY = "@parcoursplus_gestion_balises_view_mode";
+const DEFAULT_VIEW_MODE_STORAGE_KEY = "@parcoursplus_gestion_balises_default_view_mode";
 const SCROLL_Y_STORAGE_KEY = "@parcoursplus_gestion_balises_scroll_y";
 const BOTTOM_BAR_HEIGHT = 78;
 
@@ -112,18 +121,22 @@ const IOS_SHADOW = {
 };
 
 const VIEW_MODE_OPTIONS: { id: ViewMode; title: string; subtitle: string }[] = [
-  { id: "numero", title: "Numéro seul", subtitle: "Voir uniquement les numéros des balises" },
-  { id: "resume", title: "Numéro + formats", subtitle: "Voir le numéro et les symboles des formats existants" },
-  { id: "code", title: "Numéro + code simple", subtitle: "Masquer les balises sans code simple" },
-  { id: "tableau", title: "Numéro + tableau", subtitle: "Masquer les balises sans tableau" },
-  { id: "poincon", title: "Numéro + poinçon", subtitle: "Masquer les balises sans poinçon" },
-  { id: "qrcode", title: "Numéro + QR code", subtitle: "Masquer les balises sans QR code" },
+  { id: "numero", title: "Numéros", subtitle: "" },
+  { id: "resume", title: "Formats", subtitle: "" },
+  { id: "code", title: "Codes simples", subtitle: "" },
+  { id: "tableau", title: "Tableaux", subtitle: "" },
+  { id: "poincon", title: "Poinçons", subtitle: "" },
+  { id: "qrcode", title: "QR codes", subtitle: "" },
 ];
 
 /* =========================
    Helpers
 ========================= */
-const normalizeToken = (value: any) => String(value ?? "").trim().toLowerCase();
+const normalizeToken = (value: any) =>
+  String(value ?? "")
+    .trim()
+    .replace(/::format::(code|tableau|poincon|qrcode)$/i, "")
+    .toLowerCase();
 
 const toNumeroString = (value: any) => {
   if (value == null) return "";
@@ -329,6 +342,52 @@ const PunchSymbol = ({ size = 18, color = "#1f2937" }: { size?: number; color?: 
   );
 };
 
+const ViewModePreview = ({ mode }: { mode: ViewMode }) => {
+  if (mode === "numero") {
+    return (
+      <View style={styles.viewModePreviewBox}>
+        <Text style={styles.viewModePreviewNumber}>12</Text>
+      </View>
+    );
+  }
+
+  if (mode === "code") {
+    return (
+      <View style={styles.viewModePreviewBox}>
+        <Text style={styles.viewModeCodeA}>A</Text>
+        <Text style={styles.viewModeCodeK}>k</Text>
+        <Text style={styles.viewModeCode5}>5</Text>
+      </View>
+    );
+  }
+
+  if (mode === "tableau") {
+    return (
+      <View style={styles.viewModePreviewBox}>
+        <MiniTablePreview payload={{ rows: 4, cols: 4, cells: { "0-0": "A1", "1-1": "B2", "2-2": "C3" } }} />
+      </View>
+    );
+  }
+
+  if (mode === "poincon") {
+    return (
+      <View style={styles.viewModePreviewBox}>
+        <MiniPoinconPreview payload={{ rows: 4, cols: 4, dots: { "0-1": true, "1-2": true, "2-0": true, "3-3": true } }} />
+      </View>
+    );
+  }
+
+  if (mode === "qrcode") {
+    return (
+      <View style={styles.viewModePreviewBox}>
+        <MiniQrPreview value="QR-DEMO" />
+      </View>
+    );
+  }
+
+  return null;
+};
+
 /* =========================
    Supabase helpers
 ========================= */
@@ -443,9 +502,9 @@ const updateBaliseFrozenInSupabase = async ({
   return !!data.frozen;
 };
 
-const fetchSavedViewMode = async (userId: string): Promise<ViewMode> => {
+const fetchSavedDefaultViewMode = async (userId: string): Promise<ViewMode> => {
   try {
-    const localValue = await AsyncStorage.getItem(VIEW_MODE_STORAGE_KEY);
+    const localValue = await AsyncStorage.getItem(DEFAULT_VIEW_MODE_STORAGE_KEY);
     if (isViewMode(localValue)) return localValue;
   } catch {
     // noop
@@ -456,23 +515,23 @@ const fetchSavedViewMode = async (userId: string): Promise<ViewMode> => {
       .from("user_preferences")
       .select("value")
       .eq("user_id", userId)
-      .eq("key", "gestion_balises_view_mode")
+      .eq("key", "gestion_balises_default_view_mode")
       .maybeSingle();
 
-    if (error) return "resume";
+    if (error) return "numero";
 
     const value = (data as any)?.value;
-    const savedValue = typeof value === "string" ? value : value?.viewMode;
+    const savedValue = typeof value === "string" ? value : value?.defaultViewMode;
 
     if (isViewMode(savedValue)) {
-      await AsyncStorage.setItem(VIEW_MODE_STORAGE_KEY, savedValue).catch(() => {});
+      await AsyncStorage.setItem(DEFAULT_VIEW_MODE_STORAGE_KEY, savedValue).catch(() => {});
       return savedValue;
     }
   } catch {
     // La table user_preferences peut ne pas encore exister.
   }
 
-  return "resume";
+  return "numero";
 };
 
 const saveViewModePreference = async (userId: string, nextViewMode: ViewMode) => {
@@ -484,6 +543,24 @@ const saveViewModePreference = async (userId: string, nextViewMode: ViewMode) =>
         user_id: userId,
         key: "gestion_balises_view_mode",
         value: { viewMode: nextViewMode },
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "user_id,key" }
+    );
+  } catch {
+    // Si la table n'existe pas encore, AsyncStorage garde quand même le choix sur l'appareil.
+  }
+};
+
+const saveDefaultViewModePreference = async (userId: string, nextViewMode: ViewMode) => {
+  await AsyncStorage.setItem(DEFAULT_VIEW_MODE_STORAGE_KEY, nextViewMode).catch(() => {});
+
+  try {
+    await supabase.from("user_preferences").upsert(
+      {
+        user_id: userId,
+        key: "gestion_balises_default_view_mode",
+        value: { defaultViewMode: nextViewMode },
         updated_at: new Date().toISOString(),
       },
       { onConflict: "user_id,key" }
@@ -590,7 +667,8 @@ const GestionBalises: React.FC<Props> = ({ setPage = () => {} }) => {
   const [showInfo, setShowInfo] = useState(false);
   const [showViewPicker, setShowViewPicker] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
-  const [viewMode, setViewMode] = useState<ViewMode>("resume");
+  const [viewMode, setViewMode] = useState<ViewMode>("numero");
+  const [defaultViewMode, setDefaultViewMode] = useState<ViewMode>("numero");
   const [viewModeLoaded, setViewModeLoaded] = useState(false);
   const [currentUserId, setCurrentUserId] = useState("");
   const [frozenSavingMap, setFrozenSavingMap] = useState<FrozenSavingMap>({});
@@ -646,8 +724,9 @@ const GestionBalises: React.FC<Props> = ({ setPage = () => {} }) => {
       setCurrentUserId(userId);
 
       if (!viewModeLoaded) {
-        const savedViewMode = await fetchSavedViewMode(userId);
-        setViewMode(savedViewMode);
+        const savedDefaultViewMode = await fetchSavedDefaultViewMode(userId);
+        setDefaultViewMode(savedDefaultViewMode);
+        setViewMode(savedDefaultViewMode);
         setViewModeLoaded(true);
       }
 
@@ -863,6 +942,22 @@ const GestionBalises: React.FC<Props> = ({ setPage = () => {} }) => {
     [currentUserId]
   );
 
+  const selectDefaultViewMode = useCallback(
+    async (nextViewMode: ViewMode) => {
+      setDefaultViewMode(nextViewMode);
+      setViewMode(nextViewMode);
+
+      try {
+        const userId = currentUserId || (await getAuthenticatedUserId());
+        if (!currentUserId) setCurrentUserId(userId);
+        await saveDefaultViewModePreference(userId, nextViewMode);
+      } catch (e) {
+        console.error("❌ saveDefaultViewModePreference:", e);
+      }
+    },
+    [currentUserId]
+  );
+
   return (
     <SafeAreaView style={styles.root}>
       <View style={styles.header}>
@@ -1013,11 +1108,32 @@ const GestionBalises: React.FC<Props> = ({ setPage = () => {} }) => {
                         </View>
                       ) : viewMode === "resume" ? (
                         <View style={styles.tileContentMulti}>
-                          <View style={styles.tileMiniRowLarge}>
-                            {hasCode ? <View style={styles.largeIconChip}><FileText size={18} color="#1f2937" /></View> : null}
-                            {tableauFormat ? <View style={styles.largeIconChip}><Table2 size={18} color="#1f2937" /></View> : null}
-                            {poinconFormat ? <View style={styles.largeIconChip}><PunchSymbol size={18} color="#1f2937" /></View> : null}
-                            {qrFormat ? <View style={styles.largeIconChip}><QrCode size={18} color="#1f2937" /></View> : null}
+                          <View style={styles.formatPreviewGrid}>
+                            {hasCode ? (
+                              <View style={styles.formatPreviewChip}>
+                                <View style={styles.formatPreviewIconBox}>
+                                  <Text style={styles.formatPreviewCodeText}>ABC</Text>
+                                </View>
+                              </View>
+                            ) : null}
+                            {tableauFormat ? (
+                              <View style={styles.formatPreviewChip}>
+                                <MiniTablePreview payload={tableauFormat.payload || {}} />
+                              </View>
+                            ) : null}
+                            {poinconFormat ? (
+                              <View style={styles.formatPreviewChip}>
+                                <MiniPoinconPreview payload={poinconFormat.payload || {}} />
+                              </View>
+                            ) : null}
+                            {qrFormat ? (
+                              <View style={styles.formatPreviewChip}>
+                                <MiniQrPreview value={String(qrFormat.payload?.value ?? "")} />
+                              </View>
+                            ) : null}
+                            {!hasCode && !tableauFormat && !poinconFormat && !qrFormat ? (
+                              <Text style={styles.formatPreviewEmpty}>—</Text>
+                            ) : null}
                           </View>
                         </View>
                       ) : viewMode === "code" ? (
@@ -1093,13 +1209,24 @@ const GestionBalises: React.FC<Props> = ({ setPage = () => {} }) => {
             <ScrollView showsVerticalScrollIndicator={false}>
               {VIEW_MODE_OPTIONS.map((option) => {
                 const active = option.id === viewMode;
+                const defaultActive = option.id === defaultViewMode;
                 return (
                   <TouchableOpacity key={option.id} activeOpacity={0.9} onPress={() => selectViewMode(option.id)} style={[styles.viewOptionRow, active && styles.viewOptionRowActive]}>
                     <View style={[styles.viewOptionDot, active && styles.viewOptionDotActive]} />
+                    {option.id !== "resume" ? <ViewModePreview mode={option.id} /> : null}
                     <View style={styles.viewOptionTextWrap}>
                       <Text style={styles.viewOptionTitle}>{option.title}</Text>
-                      <Text style={styles.viewOptionSubtitle}>{option.subtitle}</Text>
                     </View>
+                    <Pressable
+                      onPress={(event) => {
+                        event.stopPropagation?.();
+                        selectDefaultViewMode(option.id);
+                      }}
+                      style={({ pressed }) => [styles.viewOptionStarBtn, defaultActive && styles.viewOptionStarBtnActive, pressed && styles.pressedStyle]}
+                      hitSlop={8}
+                    >
+                      <Star size={20} color={defaultActive ? "#f59e0b" : "rgba(15,23,42,0.38)"} fill={defaultActive ? "#f59e0b" : "transparent"} />
+                    </Pressable>
                   </TouchableOpacity>
                 );
               })}
@@ -1170,6 +1297,24 @@ const styles = StyleSheet.create({
   tileContentMulti: { width: "100%", height: "100%", alignItems: "center", justifyContent: "center", paddingTop: 18, paddingBottom: 8, paddingHorizontal: 6 },
   tileMiniRowLarge: { flexDirection: "row", alignItems: "center", justifyContent: "center", flexWrap: "wrap", gap: 6, maxWidth: "86%" },
   largeIconChip: { width: 34, height: 34, borderRadius: 10, borderWidth: 1, borderColor: "rgba(0,0,0,0.12)", backgroundColor: "#fff", alignItems: "center", justifyContent: "center" },
+  formatPreviewGrid: { flexDirection: "row", alignItems: "center", justifyContent: "center", flexWrap: "wrap", gap: 8, maxWidth: "88%" },
+  formatPreviewChip: {
+    width: 42,
+    height: 42,
+    borderRadius: 13,
+    backgroundColor: "rgba(255,255,255,0.92)",
+    borderWidth: 1,
+    borderColor: "rgba(15,23,42,0.12)",
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: "#000",
+    shadowOpacity: 0.08,
+    shadowOffset: { width: 0, height: 2 },
+    shadowRadius: 4,
+  },
+  formatPreviewIconBox: { width: 28, height: 28, borderRadius: 8, alignItems: "center", justifyContent: "center", backgroundColor: "#fff", borderWidth: 1, borderColor: "rgba(0,0,0,0.12)" },
+  formatPreviewCodeText: { color: C_TEXT, fontSize: 13, fontWeight: "900", fontFamily: READABLE_CODE_FONT, fontVariant: ["tabular-nums"] },
+  formatPreviewEmpty: { color: "rgba(15,23,42,0.45)", fontSize: 26, fontWeight: "900" },
   singlePreviewWrap: { width: "100%", height: "100%", alignItems: "center", justifyContent: "center", paddingTop: 14, paddingBottom: 8, paddingHorizontal: 8 },
   singlePreviewWrapBig: { width: "100%", height: "100%", alignItems: "center", justifyContent: "center", paddingTop: 14, paddingBottom: 8, paddingHorizontal: 2 },
   tileCodeFocused: {
@@ -1179,6 +1324,8 @@ const styles = StyleSheet.create({
     lineHeight: 30,
     textAlign: "center",
     width: "92%",
+    fontFamily: READABLE_CODE_FONT,
+    fontVariant: ["tabular-nums"],
   },
   tileCodeFocusedSmall: {
     fontSize: 20,
@@ -1214,12 +1361,18 @@ const styles = StyleSheet.create({
   modalBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.45)" },
   modalCard: { width: "100%", maxWidth: 620, backgroundColor: "#fff", borderRadius: 24, padding: 18, borderWidth: 1, borderColor: C_BORDER, maxHeight: "82%" },
   modalTitle: { color: C_TEXT, fontSize: 20, fontWeight: "900", marginBottom: 14 },
-  viewOptionRow: { flexDirection: "row", alignItems: "center", gap: 12, borderWidth: 1, borderColor: "rgba(0,0,0,0.08)", backgroundColor: "rgba(0,0,0,0.02)", borderRadius: 16, paddingHorizontal: 14, paddingVertical: 14, marginBottom: 10 },
+  viewModePreviewBox: { width: 42, height: 42, borderRadius: 12, borderWidth: 1, borderColor: "rgba(0,0,0,0.12)", backgroundColor: "#fff", alignItems: "center", justifyContent: "center", flexDirection: "row" },
+  viewModePreviewNumber: { color: C_TEXT, fontSize: 20, fontWeight: "900" },
+  viewModeCodeA: { color: "#1e293b", fontSize: 18, fontWeight: "900" },
+  viewModeCodeK: { color: "#2563eb", fontSize: 17, fontWeight: "900", marginLeft: 1 },
+  viewModeCode5: { color: "#f59e0b", fontSize: 18, fontWeight: "900", marginLeft: 1 },
+  viewOptionRow: { flexDirection: "row", alignItems: "center", gap: 12, borderWidth: 1, borderColor: "rgba(0,0,0,0.08)", backgroundColor: "rgba(0,0,0,0.02)", borderRadius: 16, paddingHorizontal: 12, paddingVertical: 10, marginBottom: 9 },
   viewOptionRowActive: { backgroundColor: "rgba(37,99,235,0.08)", borderColor: "rgba(37,99,235,0.3)" },
   viewOptionDot: { width: 14, height: 14, borderRadius: 999, borderWidth: 2, borderColor: "rgba(0,0,0,0.3)", backgroundColor: "#fff" },
   viewOptionDotActive: { borderColor: "#2563eb", backgroundColor: "#2563eb" },
   viewOptionTextWrap: { flex: 1 },
-  viewOptionTitle: { color: C_TEXT, fontSize: 15, fontWeight: "900", marginBottom: 2 },
-  viewOptionSubtitle: { color: "rgba(15,23,42,0.68)", fontSize: 13, lineHeight: 18 },
+  viewOptionTitle: { color: C_TEXT, fontSize: 16, fontWeight: "900" },
+  viewOptionStarBtn: { width: 38, height: 38, borderRadius: 12, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(15,23,42,0.04)", borderWidth: 1, borderColor: "rgba(15,23,42,0.08)" },
+  viewOptionStarBtnActive: { backgroundColor: "rgba(245,158,11,0.12)", borderColor: "rgba(245,158,11,0.35)" },
   pressedStyle: { opacity: 0.82 },
 });

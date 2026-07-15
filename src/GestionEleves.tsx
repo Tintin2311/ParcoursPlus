@@ -31,6 +31,7 @@ import {
   ChevronLeft,
   Download,
   Edit3,
+  Grid2x2,
   RotateCcw,
   Save,
   Search,
@@ -69,6 +70,11 @@ interface Eleve {
   order_index: number | null;
 }
 
+type TableauAssignment = {
+  assigned_index: number;
+  assigned_cell_key: string;
+};
+
 type Props = {
   setPage: SetPageFn;
   professeur: ProfesseurMinimal;
@@ -104,6 +110,13 @@ const BLUE_SOFT = "#F2F8FC";
 const BLUE_BORDER = "#CFE0EC";
 const GREEN = HEADER_BG;
 const RED = "#DC2626";
+const READABLE_CODE_FONT = Platform.select({
+  web: '"Menlo", "Consolas", "Courier New", monospace',
+  ios: "Menlo",
+  android: "monospace",
+  default: "monospace",
+});
+const TABLE_USER_PREFS_KEY = "tableau_generation_preferences";
 
 const BOTTOM_BAR_HEIGHT = 78;
 const DEFAULT_BOTTOM_SPACE = 104;
@@ -182,6 +195,47 @@ function getStudentCardColors(genre: GenreEleve) {
   };
 }
 
+function toColumnLabel(index: number) {
+  let n = Math.max(0, Math.floor(index));
+  let out = "";
+
+  do {
+    out = String.fromCharCode(65 + (n % 26)) + out;
+    n = Math.floor(n / 26) - 1;
+  } while (n >= 0);
+
+  return out;
+}
+
+function makeTableauCellKeyFromIndex(index: number, rows = 9, cols = 9) {
+  const total = Math.max(1, rows * cols);
+  const safeIndex = Math.max(0, Math.floor(Number(index) || 0)) % total;
+  const row = Math.floor(safeIndex / cols);
+  const col = safeIndex % cols;
+  return `${toColumnLabel(col)}${row + 1}`;
+}
+
+function cellKeyToIndex(cellKey: string, rows = 9, cols = 9) {
+  const clean = String(cellKey || "").trim().toUpperCase();
+  const match = clean.match(/^([A-Z]+)(\d+)$/);
+  if (!match) return null;
+
+  const letters = match[1];
+  const row = Number(match[2]) - 1;
+  let col = 0;
+
+  for (let i = 0; i < letters.length; i += 1) {
+    col = col * 26 + (letters.charCodeAt(i) - 64);
+  }
+  col -= 1;
+
+  if (!Number.isInteger(row) || !Number.isInteger(col) || row < 0 || col < 0 || row >= rows || col >= cols) {
+    return null;
+  }
+
+  return row * cols + col;
+}
+
 /* ======================= Composant principal ======================= */
 const GestionEleves: React.FC<Props> = ({
   setPage,
@@ -214,6 +268,9 @@ const GestionEleves: React.FC<Props> = ({
   );
 
   const [eleves, setEleves] = useState<Eleve[]>([]);
+  const [tableauAssignments, setTableauAssignments] = useState<Record<string, TableauAssignment>>({});
+  const [tableauPrefRows, setTableauPrefRows] = useState(4);
+  const [tableauPrefCols, setTableauPrefCols] = useState(4);
   const [isLoaded, setIsLoaded] = useState(false);
 
   const [searchTerm, setSearchTerm] = useState("");
@@ -227,6 +284,7 @@ const GestionEleves: React.FC<Props> = ({
   const [editedEleveName, setEditedEleveName] = useState("");
   const [editedEleveGenre, setEditedEleveGenre] = useState<GenreEleve>("M");
   const [editedEleveCode, setEditedEleveCode] = useState("");
+  const [editedTableauCell, setEditedTableauCell] = useState("A1");
 
   const [newEleveName, setNewEleveName] = useState("");
   const [newEleveGenre, setNewEleveGenre] = useState<GenreEleve>("M");
@@ -306,6 +364,91 @@ const GestionEleves: React.FC<Props> = ({
     }
 
     setEleves(mapped);
+
+    let preferredRows = 4;
+    let preferredCols = 4;
+
+    try {
+      const { data: prefData, error: prefError } = await supabase
+        .from("user_preferences")
+        .select("value")
+        .eq("user_id", professeur.user_id)
+        .eq("key", TABLE_USER_PREFS_KEY)
+        .maybeSingle();
+
+      const value = (prefData as any)?.value;
+      if (!prefError && value) {
+        preferredRows = Math.max(1, Math.min(9, Number(value.rows) || 4));
+        preferredCols = Math.max(1, Math.min(9, Number(value.cols) || 4));
+      }
+    } catch (prefError) {
+      console.warn("Préférences tableau indisponibles:", prefError);
+    }
+
+    setTableauPrefRows(preferredRows);
+    setTableauPrefCols(preferredCols);
+
+    const defaultAssignments = new Map<string, TableauAssignment>();
+    mapped.forEach((eleve, index) => {
+      const assignedIndex =
+        typeof eleve.order_index === "number" && eleve.order_index > 0
+          ? eleve.order_index - 1
+          : index;
+      defaultAssignments.set(eleve.id, {
+        assigned_index: assignedIndex,
+        assigned_cell_key: makeTableauCellKeyFromIndex(assignedIndex, preferredRows, preferredCols),
+      });
+    });
+
+    try {
+      const existingAssignmentStudentIds = new Set<string>();
+      const { data: assignmentRows, error: assignmentError } = await supabase
+        .from("tableau_student_assignments")
+        .select("student_id, assigned_index, assigned_cell_key")
+        .eq("professeur_id", professeur.user_id)
+        .eq("group_id", groupId);
+
+      if (!assignmentError) {
+        ((assignmentRows as any[]) || []).forEach((row) => {
+          const studentId = String(row?.student_id ?? "");
+          if (!studentId) return;
+          existingAssignmentStudentIds.add(studentId);
+          const assignedIndex = Math.max(0, Math.floor(Number(row?.assigned_index) || 0));
+          defaultAssignments.set(studentId, {
+            assigned_index: assignedIndex,
+            assigned_cell_key: makeTableauCellKeyFromIndex(assignedIndex, preferredRows, preferredCols),
+          });
+        });
+
+        const missingAssignments = mapped
+          .filter((eleve) => !existingAssignmentStudentIds.has(eleve.id))
+          .map((eleve, index) => {
+            const currentAssignment = defaultAssignments.get(eleve.id);
+            const assignedIndex = currentAssignment?.assigned_index ?? index;
+            return {
+              professeur_id: professeur.user_id,
+              group_id: groupId,
+              student_id: eleve.id,
+              assigned_index: assignedIndex,
+              assigned_cell_key: makeTableauCellKeyFromIndex(assignedIndex, preferredRows, preferredCols),
+            };
+          });
+
+        if (missingAssignments.length > 0) {
+          const { error: upsertDefaultsError } = await supabase
+            .from("tableau_student_assignments")
+            .upsert(missingAssignments, { onConflict: "professeur_id,group_id,student_id" });
+
+          if (upsertDefaultsError) {
+            console.warn("Attributions tableau par défaut non enregistrées:", upsertDefaultsError.message);
+          }
+        }
+      }
+    } catch (assignmentError) {
+      console.warn("Attributions tableau indisponibles:", assignmentError);
+    }
+
+    setTableauAssignments(Object.fromEntries(defaultAssignments));
     setIsLoaded(true);
   }, [professeur?.user_id, groupId]);
 
@@ -379,13 +522,15 @@ const GestionEleves: React.FC<Props> = ({
     setEditedEleveName(eleve.name);
     setEditedEleveGenre(eleve.genre ?? "M");
     setEditedEleveCode(eleve.code);
-  }, []);
+    setEditedTableauCell(tableauAssignments[eleve.id]?.assigned_cell_key ?? "A1");
+  }, [tableauAssignments]);
 
   const cancelEditing = useCallback(() => {
     setEditingEleveId(null);
     setEditedEleveName("");
     setEditedEleveGenre("M");
     setEditedEleveCode("");
+    setEditedTableauCell("A1");
     Keyboard.dismiss();
   }, []);
 
@@ -443,10 +588,11 @@ const GestionEleves: React.FC<Props> = ({
     const rows = recapEleves
       .map(
         (eleve) => `
-          <tr>
-            <td>${escapeHtml(getFirstName(eleve.name))}</td>
-            <td>${escapeHtml(eleve.code)}</td>
-          </tr>`
+	          <tr>
+	            <td>${escapeHtml(getFirstName(eleve.name))}</td>
+	            <td>${escapeHtml(eleve.code)}</td>
+	            <td>${escapeHtml(tableauAssignments[eleve.id]?.assigned_cell_key ?? "A1")}</td>
+	          </tr>`
       )
       .join("");
 
@@ -491,15 +637,16 @@ const GestionEleves: React.FC<Props> = ({
     <table>
       <thead>
         <tr>
-          <th>Prénom</th>
-          <th>Code</th>
-        </tr>
+	          <th>Prénom</th>
+	          <th>Code</th>
+	          <th>Case tableau</th>
+	        </tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>
   </body>
 </html>`;
-  }, [headerName, recapEleves]);
+  }, [headerName, recapEleves, tableauAssignments]);
 
   const downloadTextFile = useCallback((content: string, filename: string, mimeType: string) => {
     const globalAny = globalThis as any;
@@ -614,6 +761,17 @@ const GestionEleves: React.FC<Props> = ({
       return;
     }
 
+    const cleanTableauCell = String(editedTableauCell || "A1").trim().toUpperCase();
+    const assignedIndex = cellKeyToIndex(cleanTableauCell, tableauPrefRows, tableauPrefCols);
+
+    if (assignedIndex == null) {
+      Alert.alert(
+        "Case incorrecte",
+        `Utilise une case entre A1 et ${makeTableauCellKeyFromIndex(tableauPrefRows * tableauPrefCols - 1, tableauPrefRows, tableauPrefCols)}.`
+      );
+      return;
+    }
+
     const { error } = await supabase
       .from("students")
       .update({ name: trimmedName, genre: editedEleveGenre, code: editedEleveCode || generateEleveCode(eleveId) })
@@ -625,6 +783,24 @@ const GestionEleves: React.FC<Props> = ({
       console.error("Erreur MAJ élève:", error.message);
       Alert.alert("Erreur", "Impossible de mettre à jour l'élève.");
       return;
+    }
+
+    const assignmentResult = await supabase
+      .from("tableau_student_assignments")
+      .upsert(
+        {
+          professeur_id: professeur.user_id,
+          group_id: groupId,
+          student_id: eleveId,
+          assigned_index: assignedIndex,
+          assigned_cell_key: makeTableauCellKeyFromIndex(assignedIndex, tableauPrefRows, tableauPrefCols),
+        },
+        { onConflict: "professeur_id,group_id,student_id" }
+      );
+
+    if (assignmentResult.error) {
+      console.warn("Erreur MAJ attribution tableau:", assignmentResult.error.message);
+      Alert.alert("Élève enregistré", "L'élève a été enregistré, mais la case tableau n'a pas pu être modifiée.");
     }
 
     cancelEditing();
@@ -796,8 +972,9 @@ const GestionEleves: React.FC<Props> = ({
             }
             renderItem={({ item }) => {
               const cardColors = getStudentCardColors(item.genre);
+              const tableauAssignment = tableauAssignments[item.id];
 
-	              return (
+		              return (
 	                <View style={[styles.itemOuter, { width: cardWidth }]}>
 	                  <TouchableOpacity
 	                    activeOpacity={0.9}
@@ -860,14 +1037,21 @@ const GestionEleves: React.FC<Props> = ({
 	                        {item.name || "Sans nom"}
 	                      </Text>
 
-	                      <View style={styles.codeBox}>
-	                        <Text style={styles.codeLabel}>Code</Text>
-	                        <Text style={styles.codeMono} numberOfLines={1}>
-	                          {item.code}
-	                        </Text>
-	                      </View>
-	                    </View>
-	                  </TouchableOpacity>
+		                      <View style={styles.codeBox}>
+		                        <Text style={styles.codeLabel}>Code</Text>
+		                        <Text style={styles.codeMono} numberOfLines={1}>
+		                          {item.code}
+		                        </Text>
+		                      </View>
+                          <View style={styles.tableauAssignmentBox}>
+                            <Grid2x2 size={13} color={HEADER_BG} strokeWidth={2.5} />
+                            <Text style={styles.tableauAssignmentLabel}>Tableau</Text>
+                            <Text style={styles.tableauAssignmentValue}>
+                              {tableauAssignment?.assigned_cell_key ?? "A1"}
+                            </Text>
+                          </View>
+		                    </View>
+		                  </TouchableOpacity>
                 </View>
               );
             }}
@@ -975,8 +1159,8 @@ const GestionEleves: React.FC<Props> = ({
 
                 <View style={styles.modalBody}>
                   <Text style={styles.label}>Prénom</Text>
-                  <TextInput
-                    placeholder="Ex : Jean"
+	                  <TextInput
+	                    placeholder="Ex : Jean"
                     placeholderTextColor="rgba(35,53,72,0.45)"
                     value={editedEleveName}
                     onChangeText={setEditedEleveName}
@@ -1006,11 +1190,11 @@ const GestionEleves: React.FC<Props> = ({
                     </TouchableOpacity>
                   </View>
 
-                  <Text style={[styles.label, { marginTop: 12 }]}>Code</Text>
-                  <View style={styles.codeEditRow}>
-                    <View style={styles.codeEditBox}>
-                      <Text style={styles.codeEditText}>{editedEleveCode || "—"}</Text>
-                    </View>
+	                  <Text style={[styles.label, { marginTop: 12 }]}>Code</Text>
+	                  <View style={styles.codeEditRow}>
+	                    <View style={styles.codeEditBox}>
+	                      <Text style={styles.codeEditText}>{editedEleveCode || "—"}</Text>
+	                    </View>
 
                     <TouchableOpacity
                       onPress={resetEditedEleveCode}
@@ -1018,10 +1202,28 @@ const GestionEleves: React.FC<Props> = ({
                       accessibilityLabel="Réinitialiser le code"
                     >
                       <RotateCcw size={18} color={HEADER_BG} strokeWidth={2.5} />
-                    </TouchableOpacity>
-                  </View>
+	                    </TouchableOpacity>
+	                  </View>
 
-                  <View style={styles.modalActions}>
+                    <Text style={[styles.label, { marginTop: 12 }]}>Case tableau</Text>
+                    <Text style={styles.tableauEditHint}>
+                      Selon le tableau favori {tableauPrefRows} x {tableauPrefCols}. Les parcours plus petits ou plus grands adaptent automatiquement cette case.
+                    </Text>
+                    <View style={styles.tableauEditRow}>
+                      <Grid2x2 size={17} color={HEADER_BG} strokeWidth={2.5} />
+                      <TextInput
+                        value={editedTableauCell}
+                        onChangeText={(value) =>
+                          setEditedTableauCell(value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 3))
+                        }
+                        placeholder="A1"
+                        placeholderTextColor="rgba(35,53,72,0.45)"
+                        style={styles.tableauEditInput}
+                        autoCapitalize="characters"
+                      />
+                    </View>
+
+	                  <View style={styles.modalActions}>
                     <TouchableOpacity onPress={cancelEditing} style={styles.secondaryBtn}>
                       <Text style={styles.secondaryBtnText}>Annuler</Text>
                     </TouchableOpacity>
@@ -1423,7 +1625,34 @@ const styles = StyleSheet.create({
     color: CARD_TITLE,
     fontSize: 11.5,
     fontWeight: "900",
-    fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
+    fontFamily: READABLE_CODE_FONT,
+    fontVariant: ["tabular-nums"],
+  },
+  tableauAssignmentBox: {
+    marginTop: 6,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    alignSelf: "flex-start",
+    maxWidth: "100%",
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 12,
+    backgroundColor: "#E0F2FE",
+    borderWidth: 1,
+    borderColor: "#BAE6FD",
+  },
+  tableauAssignmentLabel: {
+    color: HEADER_BG,
+    fontSize: 10.5,
+    fontWeight: "900",
+  },
+  tableauAssignmentValue: {
+    color: CARD_TITLE,
+    fontSize: 12,
+    fontWeight: "900",
+    fontFamily: READABLE_CODE_FONT,
+    fontVariant: ["tabular-nums"],
   },
 
   iconBtn: {
@@ -1657,7 +1886,8 @@ const styles = StyleSheet.create({
     color: CARD_TITLE,
     fontSize: 16,
     fontWeight: "900",
-    fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
+    fontFamily: READABLE_CODE_FONT,
+    fontVariant: ["tabular-nums"],
   },
 
   resetCodeBtn: {
@@ -1669,6 +1899,33 @@ const styles = StyleSheet.create({
     borderColor: BLUE_BORDER,
     alignItems: "center",
     justifyContent: "center",
+  },
+  tableauEditRow: {
+    minHeight: 46,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: "#F6FAFD",
+    borderWidth: 1,
+    borderColor: BLUE_BORDER,
+    borderRadius: 14,
+    paddingHorizontal: 12,
+  },
+  tableauEditHint: {
+    color: CARD_MUTED,
+    fontSize: 12,
+    fontWeight: "700",
+    marginTop: -5,
+    marginBottom: 8,
+  },
+  tableauEditInput: {
+    flex: 1,
+    minHeight: 42,
+    color: CARD_TITLE,
+    fontSize: 16,
+    fontWeight: "900",
+    fontFamily: READABLE_CODE_FONT,
+    fontVariant: ["tabular-nums"],
   },
 
   exportIntro: {

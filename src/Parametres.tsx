@@ -25,10 +25,42 @@ import {
   Share2,
   Bell,
   Globe,
+  Grid2x2,
   ChevronRight,
   Save,
 } from "lucide-react-native";
 import type { SupabaseClient } from "@supabase/supabase-js";
+
+const READABLE_CODE_FONT = Platform.select({
+  web: '"Menlo", "Consolas", "Courier New", monospace',
+  ios: "Menlo",
+  android: "monospace",
+  default: "monospace",
+});
+
+const normalizeExcludedChars = (value: string) => {
+  const seen = new Set<string>();
+  let out = "";
+
+  String(value ?? "")
+    .replace(/\s+/g, "")
+    .split("")
+    .forEach((char) => {
+      if (!char || seen.has(char)) return;
+      seen.add(char);
+      out += char;
+    });
+
+  return out;
+};
+
+const EXCLUDABLE_CHAR_GROUPS = [
+  { title: "Chiffres", chars: "0123456789" },
+  { title: "Lettres majuscules", chars: "ABCDEFGHIJKLMNOPQRSTUVWXYZ" },
+  { title: "Lettres minuscules", chars: "abcdefghijklmnopqrstuvwxyz" },
+  { title: "Symboles", chars: "!@#$%&*?" },
+];
+const TABLEAU_PREFS_KEY = "tableau_generation_preferences";
 
 /* ========================
    Types
@@ -53,6 +85,7 @@ type TabId =
   | "account"
   | "personal"
   | "appearance"
+  | "tableaux"
   | "content"
   | "shares"
   | "notifications"
@@ -93,6 +126,17 @@ export default function Parametres({
   const [nomDraft, setNomDraft] = useState(professeur?.nom || "");
   const [prenomDraft, setPrenomDraft] = useState(professeur?.prenom || "");
   const [savingPersonal, setSavingPersonal] = useState(false);
+  const [tableauRows, setTableauRows] = useState(4);
+  const [tableauCols, setTableauCols] = useState(4);
+  const [tableauCharCount, setTableauCharCount] = useState(3);
+  const [tableauUseUppercase, setTableauUseUppercase] = useState(true);
+  const [tableauUseLowercase, setTableauUseLowercase] = useState(false);
+  const [tableauUseNumbers, setTableauUseNumbers] = useState(true);
+  const [tableauUseSymbols, setTableauUseSymbols] = useState(false);
+  const [tableauExcludedChars, setTableauExcludedChars] = useState("");
+  const [showExcludedCharsSelector, setShowExcludedCharsSelector] = useState(false);
+  const [tableauPersonalizeAssignments, setTableauPersonalizeAssignments] = useState(true);
+  const [savingTableauPrefs, setSavingTableauPrefs] = useState(false);
 
   const isFetchingRef = useRef(false);
   const mountedRef = useRef(true);
@@ -161,6 +205,63 @@ export default function Parametres({
   useEffect(() => {
     setNouveauCodeUnique((professeur?.code ?? "").toUpperCase());
   }, [professeur?.code]);
+
+  useEffect(() => {
+    const loadTableauPrefs = async () => {
+      if (!professeur?.user_id) return;
+
+      const applyPrefs = (prefs: any) => {
+        if (!prefs || typeof prefs !== "object") return false;
+        setTableauRows(Math.max(1, Math.min(9, Number(prefs.rows) || 4)));
+        setTableauCols(Math.max(1, Math.min(9, Number(prefs.cols) || 4)));
+        setTableauCharCount(Math.max(1, Math.min(9, Number(prefs.charCount ?? prefs.char_count) || 3)));
+        setTableauUseUppercase(prefs.useUppercase ?? prefs.use_uppercase ?? true);
+        setTableauUseLowercase(prefs.useLowercase ?? prefs.use_lowercase ?? false);
+        setTableauUseNumbers(prefs.useNumbers ?? prefs.useDigits ?? prefs.use_numbers ?? true);
+        setTableauUseSymbols(prefs.useSymbols ?? prefs.use_symbols ?? false);
+        setTableauExcludedChars(normalizeExcludedChars(prefs.excludedChars ?? prefs.excluded_chars ?? ""));
+        setTableauPersonalizeAssignments(prefs.personalizeAssignments !== false);
+        return true;
+      };
+
+      try {
+        const { data, error } = await supabase
+          .from("user_preferences")
+          .select("value")
+          .eq("user_id", professeur.user_id)
+          .eq("key", TABLEAU_PREFS_KEY)
+          .maybeSingle();
+
+        if (!error && applyPrefs((data as any)?.value)) return;
+      } catch {
+        // Anciennes bases : on tente l'ancien emplacement juste après.
+      }
+
+      try {
+        const { data, error } = await supabase
+          .from("professeur_tableau_preferences")
+          .select("rows, cols, char_count, use_uppercase, use_lowercase, use_numbers, use_symbols, payload")
+          .eq("professeur_id", professeur.user_id)
+          .maybeSingle();
+
+        if (error || !data) return;
+        applyPrefs({
+          rows: (data as any).rows,
+          cols: (data as any).cols,
+          char_count: (data as any).char_count,
+          use_uppercase: (data as any).use_uppercase,
+          use_lowercase: (data as any).use_lowercase,
+          use_numbers: (data as any).use_numbers,
+          use_symbols: (data as any).use_symbols,
+          ...((data as any).payload || {}),
+        });
+      } catch {
+        // Pas grave : on garde les valeurs par défaut.
+      }
+    };
+
+    loadTableauPrefs();
+  }, [professeur?.user_id, supabase]);
 
   const onSaveCode = async () => {
     if (!professeur?.user_id) return;
@@ -254,6 +355,50 @@ export default function Parametres({
     }
   };
 
+  const onSaveTableauPrefs = async () => {
+    if (!professeur?.user_id || savingTableauPrefs) return;
+
+    setSavingTableauPrefs(true);
+
+    try {
+      const excludedChars = normalizeExcludedChars(tableauExcludedChars);
+      const prefs = {
+        rows: tableauRows,
+        cols: tableauCols,
+        charCount: tableauCharCount,
+        useUppercase: tableauUseUppercase,
+        useLowercase: tableauUseLowercase,
+        useNumbers: tableauUseNumbers,
+        useDigits: tableauUseNumbers,
+        useSymbols: tableauUseSymbols,
+        excludedChars,
+        personalizeAssignments: tableauPersonalizeAssignments,
+      };
+
+      const { error } = await supabase
+        .from("user_preferences")
+        .upsert(
+          {
+            user_id: professeur.user_id,
+            key: TABLEAU_PREFS_KEY,
+            value: prefs,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: "user_id,key" }
+        );
+
+      if (error) {
+        Alert.alert("Erreur", "Impossible d’enregistrer les préférences tableau.");
+        return;
+      }
+
+      setTableauExcludedChars(excludedChars);
+      Alert.alert("Succès", "Les préférences tableau ont bien été enregistrées.");
+    } finally {
+      setSavingTableauPrefs(false);
+    }
+  };
+
   const onToggleRefuserPartage = async () => {
     if (!professeur?.user_id || savingRefuser) return;
     const newVal = !(professeur.refuserPartage ?? false);
@@ -304,6 +449,13 @@ export default function Parametres({
         accent: "#A78BFA",
       },
       {
+        id: "tableaux",
+        title: "Tableaux",
+        subtitle: "Codes et cases élèves",
+        icon: Grid2x2,
+        accent: "#38BDF8",
+      },
+      {
         id: "content",
         title: "Contenus",
         subtitle: "Ressources pédagogiques",
@@ -336,6 +488,85 @@ export default function Parametres({
   );
 
   const activeMenu = menuItems.find((m) => m.id === selectedMenu);
+  const excludedCharSet = useMemo(() => new Set(tableauExcludedChars.split("")), [tableauExcludedChars]);
+  const toggleExcludedChar = (char: string) => {
+    setTableauExcludedChars((current) => {
+      const chars = current.split("");
+      if (chars.includes(char)) return chars.filter((item) => item !== char).join("");
+      return normalizeExcludedChars(`${current}${char}`);
+    });
+  };
+
+  if (showExcludedCharsSelector) {
+    return (
+      <LinearGradient
+        colors={["#0b1220", "#0f172a", "#111827"]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={styles.screen}
+      >
+        <ScrollView
+          contentContainerStyle={[
+            styles.charSelectorScroll,
+            {
+              paddingTop: isDesktop ? 24 : isTablet ? 18 : 12,
+              paddingHorizontal: isDesktop ? 24 : isTablet ? 18 : 12,
+              paddingBottom: isPhone ? 110 : 32,
+            },
+          ]}
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={styles.charSelectorHeader}>
+            <TouchableOpacity
+              onPress={() => setShowExcludedCharsSelector(false)}
+              activeOpacity={0.88}
+              style={styles.backBtn}
+            >
+              <ArrowLeft color="#E5EEF8" size={18} />
+              <Text style={styles.backBtnText}>Retour</Text>
+            </TouchableOpacity>
+
+            <View style={styles.charSelectorTitleWrap}>
+              <Text style={styles.charSelectorTitle}>Caractères à éviter</Text>
+              <Text style={styles.charSelectorSubtitle}>
+                Touchez un caractère pour l’éviter dans les codes des tableaux.
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.charSelectedPanel}>
+            <Text style={styles.charSelectedLabel}>Sélection actuelle</Text>
+            <Text style={styles.charSelectedValue}>
+              {tableauExcludedChars ? tableauExcludedChars.split("").join("  ") : "Aucun caractère évité"}
+            </Text>
+          </View>
+
+          {EXCLUDABLE_CHAR_GROUPS.map((group) => (
+            <View key={group.title} style={styles.charGroupCard}>
+              <Text style={styles.charGroupTitle}>{group.title}</Text>
+              <View style={styles.charGrid}>
+                {group.chars.split("").map((char) => {
+                  const active = excludedCharSet.has(char);
+                  return (
+                    <TouchableOpacity
+                      key={`${group.title}-${char}`}
+                      onPress={() => toggleExcludedChar(char)}
+                      activeOpacity={0.86}
+                      style={[styles.charChoice, active && styles.charChoiceExcluded]}
+                    >
+                      <Text style={[styles.charChoiceText, active && styles.charChoiceTextExcluded]}>
+                        {char}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
+          ))}
+        </ScrollView>
+      </LinearGradient>
+    );
+  }
 
   return (
     <LinearGradient
@@ -666,6 +897,119 @@ export default function Parametres({
               </SectionCard>
             )}
 
+            {selectedMenu === "tableaux" && (
+              <SectionCard
+                icon={<Grid2x2 color="#DBF7FF" size={20} />}
+                title="Balises tableau"
+                subtitle="Réglages favoris et attribution des cases élèves."
+                accent={["#0284C7", "#38BDF8"]}
+              >
+                <View style={styles.tableauPrefsGrid}>
+                  <StepperSetting
+                    label="Lignes"
+                    value={tableauRows}
+                    min={1}
+                    max={9}
+                    onChange={setTableauRows}
+                  />
+                  <StepperSetting
+                    label="Colonnes"
+                    value={tableauCols}
+                    min={1}
+                    max={9}
+                    onChange={setTableauCols}
+                  />
+                  <StepperSetting
+                    label="Caractères"
+                    value={tableauCharCount}
+                    min={1}
+                    max={9}
+                    onChange={setTableauCharCount}
+                  />
+                </View>
+
+                <View style={styles.tableauToggleGrid}>
+                  <MiniToggle label="A-Z" active={tableauUseUppercase} onPress={() => setTableauUseUppercase((v) => !v)} />
+                  <MiniToggle label="a-z" active={tableauUseLowercase} onPress={() => setTableauUseLowercase((v) => !v)} />
+                  <MiniToggle label="0-9" active={tableauUseNumbers} onPress={() => setTableauUseNumbers((v) => !v)} />
+                  <MiniToggle label="Symboles" active={tableauUseSymbols} onPress={() => setTableauUseSymbols((v) => !v)} />
+                </View>
+
+                <View style={styles.tableauPreviewBox}>
+                  <Grid2x2 color="#7DD3FC" size={18} />
+                  <Text style={styles.tableauPreviewText}>
+                    Favori : {tableauRows} x {tableauCols}, {tableauCharCount} caractère{tableauCharCount > 1 ? "s" : ""}
+                  </Text>
+                </View>
+
+                <View style={styles.excludedCharsBox}>
+                  <Text style={styles.excludedCharsLabel}>Caractères à éviter</Text>
+                  <TouchableOpacity
+                    onPress={() => setShowExcludedCharsSelector(true)}
+                    activeOpacity={0.88}
+                    style={styles.excludedCharsButton}
+                  >
+                    <View style={styles.excludedCharsButtonTextWrap}>
+                      <Text style={styles.excludedCharsButtonTitle}>Choisir les caractères</Text>
+                      <Text style={styles.excludedCharsSummary} numberOfLines={2}>
+                        {tableauExcludedChars ? tableauExcludedChars.split("").join("  ") : "Aucun caractère évité"}
+                      </Text>
+                    </View>
+                    <ChevronRight color="#D6F4FF" size={18} />
+                  </TouchableOpacity>
+                  <Text style={styles.excludedCharsHint}>
+                    Ces caractères ne seront plus utilisés quand les codes du tableau seront générés.
+                  </Text>
+                </View>
+
+                <TouchableOpacity
+                  onPress={() => setTableauPersonalizeAssignments((v) => !v)}
+                  activeOpacity={0.88}
+                  style={[
+                    styles.tableauAssignmentOption,
+                    tableauPersonalizeAssignments && styles.tableauAssignmentOptionActive,
+                  ]}
+                >
+                  <View style={styles.tableauAssignmentIcon}>
+                    <Grid2x2 color={tableauPersonalizeAssignments ? "#1D4ED8" : "#94AAC2"} size={18} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text
+                      style={[
+                        styles.tableauAssignmentTitle,
+                        tableauPersonalizeAssignments && styles.tableauAssignmentTitleActive,
+                      ]}
+                    >
+                      Cases élèves personnalisables
+                    </Text>
+                    <Text style={styles.tableauAssignmentText}>
+                      Les cartes élèves suivent ce tableau favori, puis les parcours adaptent automatiquement la case au tableau réel.
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+
+                <Text style={styles.mutedText}>
+                  La case de chaque élève se modifie directement depuis sa carte dans la classe.
+                </Text>
+
+                <TouchableOpacity
+                  onPress={onSaveTableauPrefs}
+                  disabled={savingTableauPrefs}
+                  style={[styles.primaryBtn, styles.greenBtn, savingTableauPrefs && styles.disabledBtn, { alignSelf: "flex-start" }]}
+                  activeOpacity={0.9}
+                >
+                  {savingTableauPrefs ? (
+                    <ActivityIndicator color="#FFFFFF" />
+                  ) : (
+                    <>
+                      <Save color="#fff" size={16} />
+                      <Text style={styles.primaryBtnText}>Enregistrer</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </SectionCard>
+            )}
+
             {selectedMenu === "content" && (
               <SectionCard
                 icon={<BookOpen color="#FFE8C9" size={20} />}
@@ -844,6 +1188,55 @@ function ComingSoonText({ text }: { text: string }) {
   return <Text style={styles.mutedText}>{text}</Text>;
 }
 
+function StepperSetting({
+  label,
+  value,
+  min,
+  max,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <View style={styles.stepperCard}>
+      <Text style={styles.stepperLabel}>{label}</Text>
+      <View style={styles.stepperRow}>
+        <TouchableOpacity
+          onPress={() => onChange(Math.max(min, value - 1))}
+          style={styles.stepperBtn}
+          activeOpacity={0.85}
+        >
+          <Text style={styles.stepperBtnText}>-</Text>
+        </TouchableOpacity>
+        <Text style={styles.stepperValue}>{value}</Text>
+        <TouchableOpacity
+          onPress={() => onChange(Math.min(max, value + 1))}
+          style={styles.stepperBtn}
+          activeOpacity={0.85}
+        >
+          <Text style={styles.stepperBtnText}>+</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+}
+
+function MiniToggle({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
+  return (
+    <TouchableOpacity
+      onPress={onPress}
+      activeOpacity={0.88}
+      style={[styles.miniToggle, active && styles.miniToggleActive]}
+    >
+      <Text style={[styles.miniToggleText, active && styles.miniToggleTextActive]}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
+
 /* ========================
    Styles
 ======================== */
@@ -885,6 +1278,113 @@ const styles = StyleSheet.create({
   backBtnText: {
     color: "#E5EEF8",
     fontWeight: "700",
+  },
+
+  charSelectorScroll: {
+    flexGrow: 1,
+    gap: 14,
+  },
+
+  charSelectorHeader: {
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: "rgba(148,163,184,0.16)",
+    backgroundColor: "rgba(255,255,255,0.06)",
+    padding: 16,
+    gap: 14,
+  },
+
+  charSelectorTitleWrap: {
+    gap: 4,
+  },
+
+  charSelectorTitle: {
+    color: "#F8FBFF",
+    fontSize: 25,
+    lineHeight: 30,
+    fontWeight: "900",
+  },
+
+  charSelectorSubtitle: {
+    color: "#AABED3",
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: "700",
+  },
+
+  charSelectedPanel: {
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: "rgba(248,113,113,0.30)",
+    backgroundColor: "rgba(127,29,29,0.18)",
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+
+  charSelectedLabel: {
+    color: "#FECACA",
+    fontSize: 12,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
+
+  charSelectedValue: {
+    color: "#FFFFFF",
+    marginTop: 5,
+    fontSize: 20,
+    lineHeight: 26,
+    fontWeight: "900",
+    fontFamily: READABLE_CODE_FONT,
+    fontVariant: ["tabular-nums"],
+  },
+
+  charGroupCard: {
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: "rgba(148,163,184,0.16)",
+    backgroundColor: "rgba(255,255,255,0.06)",
+    padding: 14,
+    gap: 12,
+  },
+
+  charGroupTitle: {
+    color: "#D7E4F2",
+    fontSize: 16,
+    fontWeight: "900",
+  },
+
+  charGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 9,
+  },
+
+  charChoice: {
+    width: 46,
+    height: 46,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(148,163,184,0.22)",
+    backgroundColor: "rgba(255,255,255,0.94)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  charChoiceExcluded: {
+    backgroundColor: "#DC2626",
+    borderColor: "#FCA5A5",
+  },
+
+  charChoiceText: {
+    color: "#0F172A",
+    fontSize: 20,
+    fontWeight: "900",
+    fontFamily: READABLE_CODE_FONT,
+    fontVariant: ["tabular-nums"],
+  },
+
+  charChoiceTextExcluded: {
+    color: "#FFFFFF",
   },
 
   heroBadge: {
@@ -1148,10 +1648,8 @@ const styles = StyleSheet.create({
     fontWeight: "900",
     letterSpacing: 1.2,
     textTransform: "uppercase",
-    fontFamily: Platform.select({
-      web: "ui-monospace, Menlo, monospace",
-      default: undefined,
-    }),
+    fontFamily: READABLE_CODE_FONT,
+    fontVariant: ["tabular-nums"],
   },
 
   loadingInline: {
@@ -1214,6 +1712,229 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     flexWrap: "wrap",
     gap: 10,
+  },
+
+  tableauPrefsGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+  },
+
+  stepperCard: {
+    minWidth: 118,
+    flex: 1,
+    backgroundColor: "rgba(255,255,255,0.04)",
+    borderWidth: 1,
+    borderColor: "rgba(148,163,184,0.16)",
+    borderRadius: 16,
+    padding: 12,
+  },
+
+  stepperLabel: {
+    color: "#D9E8F7",
+    fontWeight: "800",
+    fontSize: 13,
+    marginBottom: 8,
+  },
+
+  stepperRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+
+  stepperBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(56,189,248,0.16)",
+    borderWidth: 1,
+    borderColor: "rgba(125,211,252,0.22)",
+  },
+
+  stepperBtnText: {
+    color: "#D6F4FF",
+    fontSize: 20,
+    fontWeight: "900",
+    lineHeight: 22,
+  },
+
+  stepperValue: {
+    color: "#F8FBFF",
+    fontWeight: "900",
+    fontSize: 20,
+    minWidth: 22,
+    textAlign: "center",
+  },
+
+  tableauToggleGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+
+  miniToggle: {
+    minHeight: 38,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(148,163,184,0.18)",
+    backgroundColor: "rgba(255,255,255,0.04)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  miniToggleActive: {
+    backgroundColor: "#2563EB",
+    borderColor: "#60A5FA",
+  },
+
+  miniToggleText: {
+    color: "#B7C8DA",
+    fontWeight: "900",
+    fontSize: 13,
+  },
+
+  miniToggleTextActive: {
+    color: "#FFFFFF",
+  },
+
+  tableauPreviewBox: {
+    minHeight: 46,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "rgba(125,211,252,0.22)",
+    backgroundColor: "rgba(14,165,233,0.10)",
+    paddingHorizontal: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+
+  tableauPreviewText: {
+    color: "#D6F4FF",
+    fontWeight: "800",
+    flex: 1,
+  },
+
+  excludedCharsBox: {
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "rgba(125,211,252,0.20)",
+    backgroundColor: "rgba(255,255,255,0.05)",
+    padding: 12,
+  },
+
+  excludedCharsLabel: {
+    color: "#D7E4F2",
+    fontSize: 13,
+    fontWeight: "900",
+    marginBottom: 8,
+  },
+
+  excludedCharsButton: {
+    minHeight: 58,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "rgba(125,211,252,0.22)",
+    backgroundColor: "rgba(14,165,233,0.12)",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+
+  excludedCharsButtonTextWrap: {
+    flex: 1,
+    minWidth: 0,
+    gap: 4,
+  },
+
+  excludedCharsButtonTitle: {
+    color: "#D6F4FF",
+    fontSize: 14,
+    fontWeight: "900",
+  },
+
+  excludedCharsSummary: {
+    color: "#FFFFFF",
+    fontSize: 16,
+    lineHeight: 21,
+    fontWeight: "900",
+    fontFamily: READABLE_CODE_FONT,
+    fontVariant: ["tabular-nums"],
+  },
+
+  excludedCharsInput: {
+    minHeight: 46,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(148,163,184,0.22)",
+    backgroundColor: "rgba(255,255,255,0.92)",
+    color: "#0F172A",
+    paddingHorizontal: 12,
+    fontSize: 18,
+    fontWeight: "900",
+    fontFamily: READABLE_CODE_FONT,
+    fontVariant: ["tabular-nums"],
+    letterSpacing: 1,
+  },
+
+  excludedCharsHint: {
+    color: "#94AAC2",
+    marginTop: 8,
+    fontSize: 12,
+    fontWeight: "700",
+    lineHeight: 16,
+  },
+
+  tableauAssignmentOption: {
+    minHeight: 72,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "rgba(148,163,184,0.18)",
+    backgroundColor: "rgba(255,255,255,0.04)",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+
+  tableauAssignmentOptionActive: {
+    borderColor: "rgba(96,165,250,0.75)",
+    backgroundColor: "rgba(37,99,235,0.16)",
+  },
+
+  tableauAssignmentIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    backgroundColor: "rgba(255,255,255,0.92)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  tableauAssignmentTitle: {
+    color: "#D7E4F2",
+    fontSize: 14,
+    fontWeight: "900",
+  },
+
+  tableauAssignmentTitleActive: {
+    color: "#FFFFFF",
+  },
+
+  tableauAssignmentText: {
+    color: "#94AAC2",
+    marginTop: 3,
+    fontSize: 12,
+    fontWeight: "700",
+    lineHeight: 16,
   },
 
   primaryBtn: {

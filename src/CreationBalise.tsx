@@ -21,15 +21,23 @@ import {
   useWindowDimensions,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { BarCodeScanner } from "expo-barcode-scanner";
+import * as ImagePicker from "expo-image-picker";
 import * as Print from "expo-print";
 import * as Sharing from "expo-sharing";
+import QRCode from "react-native-qrcode-svg";
 import {
   ArrowLeft,
+  Camera,
   ChevronDown,
   FileText,
+  Link as LinkIcon,
   Plus,
+  ScanLine,
+  Sparkles,
   Snowflake,
   Trash2,
+  Upload,
   X,
 } from "lucide-react-native";
 import { supabase } from "./supabaseClient";
@@ -129,6 +137,30 @@ const FORMAT_OPTIONS: { id: BaliseFormatType; label: string }[] = [
 ];
 
 const GRID_SIZE_OPTIONS = [2, 3, 4, 5, 6];
+const TABLE_CODE_LENGTH_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+const TABLE_PREFS_KEY = "@parcoursplus_tableau_generation_prefs";
+const TABLE_USER_PREFS_KEY = "tableau_generation_preferences";
+const TABLE_UPPERCASE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const TABLE_DIGIT_CHARS = "0123456789";
+const TABLE_SYMBOL_CHARS = "!@#$%&*?";
+const TABLE_LOWERCASE_CHARS = "abcdefghijklmnopqrstuvwxyz";
+const READABLE_CODE_FONT = Platform.select({
+  web: '"Menlo", "Consolas", "Courier New", monospace',
+  ios: "Menlo",
+  android: "monospace",
+  default: "monospace",
+});
+const TABLE_SETTINGS_CELL_KEY = "__settings";
+const DEFAULT_TABLE_SETTINGS = {
+  rows: 4,
+  cols: 4,
+  codeLength: 3,
+  useUppercase: true,
+  useDigits: true,
+  useSymbols: false,
+  useLowercase: false,
+  excludedChars: "",
+};
 
 /* =========================
    Helpers
@@ -157,6 +189,7 @@ const toPointsNumber = (value: any): number => {
 const normalizeToken = (value: any) =>
   String(value ?? "")
     .trim()
+    .replace(/::format::(code|tableau|poincon|qrcode)$/i, "")
     .toLowerCase();
 
 const splitLooseString = (raw: string): string[] =>
@@ -283,15 +316,56 @@ const toLetter = (index: number) => {
   return out;
 };
 
-const defaultTablePlaceholder = (row: number, col: number) => `${toLetter(row)}${col + 1}`;
+const defaultTablePlaceholder = (row: number, col: number) => `${toLetter(col)}${row + 1}`;
+
+const normalizeQrValue = (value: any) =>
+  String(value ?? "")
+    .replace(/\u0000/g, "")
+    .replace(/\r\n/g, "\n")
+    .trim();
 
 const generateQrSeedValue = () => {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+  const bytes =
+    typeof globalThis.crypto?.getRandomValues === "function"
+      ? globalThis.crypto.getRandomValues(new Uint8Array(24))
+      : Array.from({ length: 24 }, () => Math.floor(Math.random() * 256));
   let out = "QR-";
-  for (let i = 0; i < 12; i++) {
-    out += chars[Math.floor(Math.random() * chars.length)];
+  for (let i = 0; i < 24; i += 1) {
+    out += chars[bytes[i] % chars.length];
   }
   return out;
+};
+
+const getQrBarCodeTypes = () => [BarCodeScanner.Constants.BarCodeType.qr];
+
+const decodeQrFromImageWithBrowser = async (uri: string) => {
+  const BarcodeDetectorCtor = (globalThis as any).BarcodeDetector;
+  if (!BarcodeDetectorCtor || typeof createImageBitmap !== "function") {
+    throw new Error("L'analyse d'image QR n'est pas disponible dans ce navigateur.");
+  }
+
+  const response = await fetch(uri);
+  const blob = await response.blob();
+  const image = await createImageBitmap(blob);
+  const detector = new BarcodeDetectorCtor({ formats: ["qr_code"] });
+  const results = await detector.detect(image);
+  const value = normalizeQrValue(results?.[0]?.rawValue);
+  if (!value) throw new Error("Aucun QR code lisible n'a été trouvé dans cette image.");
+  return value;
+};
+
+const decodeQrFromImageUri = async (uri: string) => {
+  try {
+    const results = await BarCodeScanner.scanFromURLAsync(uri, getQrBarCodeTypes());
+    const value = normalizeQrValue(results?.[0]?.data ?? results?.[0]?.raw);
+    if (value) return value;
+  } catch (e) {
+    if (Platform.OS !== "web") throw e;
+  }
+
+  if (Platform.OS === "web") return decodeQrFromImageWithBrowser(uri);
+  throw new Error("Aucun QR code lisible n'a été trouvé dans cette image.");
 };
 
 const buildFakeQrMatrix = (value: string, size = 19) => {
@@ -330,6 +404,168 @@ const clampGridSize = (value: any, fallback = 4) => {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(2, Math.min(6, Math.round(n)));
+};
+
+const clampTableCodeLength = (value: any, fallback = DEFAULT_TABLE_SETTINGS.codeLength) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(1, Math.min(8, Math.round(n)));
+};
+
+const normalizeExcludedChars = (value: any) => {
+  const raw = Array.isArray(value) ? value.join("") : String(value ?? "");
+  const seen = new Set<string>();
+  let out = "";
+
+  raw
+    .replace(/\s+/g, "")
+    .split("")
+    .forEach((char) => {
+      if (!char || seen.has(char)) return;
+      seen.add(char);
+      out += char;
+    });
+
+  return out;
+};
+
+const hasOwnValue = (target: any, key: string) =>
+  !!target && typeof target === "object" && Object.prototype.hasOwnProperty.call(target, key);
+
+const pickTableExcludedChars = (payload: Record<string, any>, settings: Record<string, any>, fallbackSettings?: Partial<typeof DEFAULT_TABLE_SETTINGS>) => {
+  if (hasOwnValue(fallbackSettings, "excludedChars")) return fallbackSettings?.excludedChars;
+  if (hasOwnValue(settings, "excludedChars")) return settings.excludedChars;
+  if (hasOwnValue(settings, "excluded_chars")) return settings.excluded_chars;
+  if (hasOwnValue(payload, "excludedChars")) return payload.excludedChars;
+  if (hasOwnValue(payload, "excluded_chars")) return payload.excluded_chars;
+  return fallbackSettings?.excludedChars ?? DEFAULT_TABLE_SETTINGS.excludedChars;
+};
+
+const normalizeTableSettings = (
+  payload: Record<string, any> = {},
+  fallbackSettings: Partial<typeof DEFAULT_TABLE_SETTINGS> = {}
+) => {
+  const cells = payload.cells && typeof payload.cells === "object" && !Array.isArray(payload.cells) ? payload.cells : {};
+  const storedSettings =
+    cells[TABLE_SETTINGS_CELL_KEY] && typeof cells[TABLE_SETTINGS_CELL_KEY] === "object"
+      ? cells[TABLE_SETTINGS_CELL_KEY]
+      : null;
+  const settings = payload.settings && typeof payload.settings === "object" ? payload.settings : storedSettings ?? payload;
+  const useUppercase = settings.useUppercase ?? fallbackSettings.useUppercase ?? true;
+  const useDigits = settings.useDigits ?? settings.useNumbers ?? fallbackSettings.useDigits ?? true;
+  const useSymbols = settings.useSymbols ?? fallbackSettings.useSymbols ?? false;
+  const useLowercase = settings.useLowercase ?? fallbackSettings.useLowercase ?? false;
+
+  const hasAnyType = useUppercase || useDigits || useSymbols || useLowercase;
+  const codeLength = settings.codeLength ?? settings.charCount ?? settings.char_count ?? fallbackSettings.codeLength;
+
+  return {
+    rows: clampGridSize(payload.rows ?? settings.rows ?? fallbackSettings.rows, DEFAULT_TABLE_SETTINGS.rows),
+    cols: clampGridSize(payload.cols ?? settings.cols ?? fallbackSettings.cols, DEFAULT_TABLE_SETTINGS.cols),
+    codeLength: clampTableCodeLength(codeLength, DEFAULT_TABLE_SETTINGS.codeLength),
+    useUppercase: hasAnyType ? useUppercase : true,
+    useDigits: hasAnyType ? useDigits : true,
+    useSymbols,
+    useLowercase,
+    excludedChars: normalizeExcludedChars(pickTableExcludedChars(payload, settings, fallbackSettings)),
+  };
+};
+
+const getTableCharset = (settings: ReturnType<typeof normalizeTableSettings>) => {
+  let chars = "";
+  if (settings.useUppercase) chars += TABLE_UPPERCASE_CHARS;
+  if (settings.useDigits) chars += TABLE_DIGIT_CHARS;
+  if (settings.useSymbols) chars += TABLE_SYMBOL_CHARS;
+  if (settings.useLowercase) chars += TABLE_LOWERCASE_CHARS;
+  const excluded = new Set(normalizeExcludedChars(settings.excludedChars).split(""));
+  const filtered = Array.from(chars).filter((char) => !excluded.has(char)).join("");
+  const fallback = Array.from(TABLE_UPPERCASE_CHARS + TABLE_DIGIT_CHARS + TABLE_SYMBOL_CHARS + TABLE_LOWERCASE_CHARS)
+    .filter((char) => !excluded.has(char))
+    .join("");
+  return filtered || fallback;
+};
+
+const generateTableCode = (chars: string, length: number) => {
+  if (!chars) return "";
+  let out = "";
+  for (let i = 0; i < length; i += 1) {
+    out += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return out;
+};
+
+const makeAllowedTableSuffix = (index: number, chars: string) => {
+  if (!chars) return "";
+  let n = Math.max(0, index);
+  let out = "";
+  do {
+    out = chars[n % chars.length] + out;
+    n = Math.floor(n / chars.length) - 1;
+  } while (n >= 0);
+  return out;
+};
+
+const generateTableCells = (
+  rows: number,
+  cols: number,
+  settings: ReturnType<typeof normalizeTableSettings>,
+  existingCells?: Record<string, any>,
+  preserveExisting = false
+) => {
+  const chars = getTableCharset(settings);
+  const total = rows * cols;
+  const maxCombinations = Math.pow(chars.length, settings.codeLength);
+  const used = new Set<string>();
+  const cells: Record<string, any> = {};
+
+  for (let r = 0; r < rows; r += 1) {
+    for (let c = 0; c < cols; c += 1) {
+      const key = makeCellKey(r, c);
+      const existing = String(existingCells?.[key] ?? "").trim();
+      if (preserveExisting && existing) {
+        cells[key] = existing;
+        used.add(cells[key]);
+        continue;
+      }
+
+      let next = "";
+      let guard = 0;
+      do {
+        next = generateTableCode(chars, settings.codeLength);
+        guard += 1;
+      } while (used.has(next) && guard < 200);
+
+      if (used.has(next) && maxCombinations <= total) {
+        next = `${next}${makeAllowedTableSuffix(r * cols + c, chars)}`;
+      }
+
+      used.add(next);
+      cells[key] = next;
+    }
+  }
+
+  return cells;
+};
+
+const normalizeTablePayloadForSave = (
+  payload: Record<string, any> = {},
+  preserveExisting = true,
+  fallbackSettings: Partial<typeof DEFAULT_TABLE_SETTINGS> = {}
+) => {
+  const settings = normalizeTableSettings(payload, fallbackSettings);
+  const rows = clampGridSize(payload.rows, settings.rows);
+  const cols = clampGridSize(payload.cols, settings.cols);
+  const rawCells = payload.cells && typeof payload.cells === "object" && !Array.isArray(payload.cells) ? payload.cells : {};
+  const cells = generateTableCells(rows, cols, settings, rawCells, preserveExisting);
+  cells[TABLE_SETTINGS_CELL_KEY] = settings as any;
+
+  return {
+    ...payload,
+    rows,
+    cols,
+    settings,
+    cells,
+  };
 };
 
 const dotsToCells = (dots: Record<string, any>, rows: number, cols: number) => {
@@ -384,7 +620,8 @@ const normalizePoinconPayloadForSave = (payload: Record<string, any> = {}) => {
 const createDefaultFormat = (
   type: BaliseFormatType,
   baliseId?: string | null,
-  userId?: string | null
+  userId?: string | null,
+  tableSettings: Partial<typeof DEFAULT_TABLE_SETTINGS> = {}
 ): BaliseFormat => {
   const base = {
     id: `local-format-${Date.now()}-${Math.random()}`,
@@ -411,19 +648,17 @@ const createDefaultFormat = (
     };
   }
 
+  const settings = normalizeTableSettings({ ...DEFAULT_TABLE_SETTINGS, ...tableSettings });
+
   return {
     ...base,
-    payload: { rows: 4, cols: 4, cells: {} },
+    payload: normalizeTablePayloadForSave({
+      rows: settings.rows,
+      cols: settings.cols,
+      settings,
+      cells: {},
+    }, false),
   };
-};
-
-const ensureCodeFormat = (
-  formats: BaliseFormat[],
-  baliseId?: string | null,
-  userId?: string | null
-): BaliseFormat[] => {
-  if (formats.some((f) => f.format_type === "code")) return formats;
-  return [createDefaultFormat("code", baliseId, userId), ...formats];
 };
 
 const areFormatsEqual = (a: BaliseFormat[], b: BaliseFormat[]) => JSON.stringify(a) === JSON.stringify(b);
@@ -433,7 +668,12 @@ const normalizeFormatsForCompare = (formats: BaliseFormat[]) =>
     ...f,
     is_default: false,
     label: FIXED_FORMAT_LABELS[f.format_type],
-    payload: f.format_type === "poincon" ? normalizePoinconPayloadForSave(f.payload ?? {}) : f.payload ?? {},
+    payload:
+      f.format_type === "poincon"
+        ? normalizePoinconPayloadForSave(f.payload ?? {})
+        : f.format_type === "tableau"
+          ? normalizeTablePayloadForSave(f.payload ?? {})
+          : f.payload ?? {},
   }));
 
 const hasUnsavedChanges = (
@@ -492,7 +732,12 @@ const mapFormatRow = (row: any): BaliseFormat => {
     format_type: formatType,
     label: FIXED_FORMAT_LABELS[formatType] ?? String(row.label ?? formatType),
     is_default: false,
-    payload: formatType === "poincon" ? normalizePoinconPayloadForSave(rawPayload) : rawPayload,
+    payload:
+      formatType === "poincon"
+        ? normalizePoinconPayloadForSave(rawPayload)
+        : formatType === "tableau"
+          ? rawPayload
+          : rawPayload,
     created_at: row.created_at ?? null,
   };
 };
@@ -570,7 +815,7 @@ const deleteBaliseInSupabase = async (baliseId: string, userId: string) => {
 };
 
 const upsertFormatsInSupabase = async (baliseId: string, userId: string, formats: BaliseFormat[]) => {
-  const cleanFormats = ensureCodeFormat(formats, baliseId, userId)
+  const cleanFormats = formats
     .filter((f) => !!f.format_type)
     .map((format) => ({
       balise_id: baliseId,
@@ -581,6 +826,8 @@ const upsertFormatsInSupabase = async (baliseId: string, userId: string, formats
       payload:
         format.format_type === "poincon"
           ? normalizePoinconPayloadForSave(format.payload ?? {})
+          : format.format_type === "tableau"
+            ? normalizeTablePayloadForSave(format.payload ?? {})
           : format.payload ?? {},
     }));
 
@@ -736,6 +983,7 @@ const buildBalisePdfHtml = (balise: Balise, formats: BaliseFormat[], usageList: 
         <meta charset="utf-8" />
         <style>
           body { font-family: Arial, sans-serif; padding: 24px; color: #0f172a; }
+          .readable-code { font-family: Menlo, Consolas, "Courier New", monospace; font-variant-numeric: slashed-zero tabular-nums; letter-spacing: 0.04em; }
           .header { margin-bottom: 20px; }
           .main-title { font-size: 28px; font-weight: 800; margin-bottom: 10px; }
           .meta { display: flex; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
@@ -762,7 +1010,7 @@ const buildBalisePdfHtml = (balise: Balise, formats: BaliseFormat[], usageList: 
           <div class="main-title">Récapitulatif balise</div>
           <div class="meta">
             <div class="chip"><strong>N° balise :</strong> ${escapeHtml(String(balise.numero_balise ?? ""))}</div>
-            <div class="chip"><strong>Code :</strong> ${escapeHtml(String(balise.code ?? ""))}</div>
+            <div class="chip"><strong>Code :</strong> <span class="readable-code">${escapeHtml(String(balise.code ?? ""))}</span></div>
             <div class="chip"><strong>Points :</strong> ${escapeHtml(String(balise.points ?? ""))}</div>
             <div class="chip"><strong>Présence :</strong> ${usageList.length} parcours</div>
           </div>
@@ -885,20 +1133,23 @@ const GridSizePicker = ({
       </Pressable>
 
       {open ? (
-        <View style={styles.gridPickerMenu}>
-          {GRID_SIZE_OPTIONS.map((option) => (
-            <Pressable
-              key={`${iconType}-${option}`}
-              onPress={() => {
-                onSelect(option);
-                setOpen(false);
-              }}
-              style={({ pressed }) => [styles.gridPickerItem, option === value && styles.gridPickerItemActive, pressed && styles.pressedStyle]}
-            >
-              <Text style={[styles.gridPickerItemText, option === value && styles.gridPickerItemTextActive]}>{option}</Text>
-            </Pressable>
-          ))}
-        </View>
+        <>
+          <Pressable style={styles.gridPickerBackdrop} onPress={() => setOpen(false)} />
+          <View style={styles.gridPickerMenu}>
+            {GRID_SIZE_OPTIONS.map((option) => (
+              <Pressable
+                key={`${iconType}-${option}`}
+                onPress={() => {
+                  onSelect(option);
+                  setOpen(false);
+                }}
+                style={({ pressed }) => [styles.gridPickerItem, option === value && styles.gridPickerItemActive, pressed && styles.pressedStyle]}
+              >
+                <Text style={[styles.gridPickerItemText, option === value && styles.gridPickerItemTextActive]}>{option}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </>
       ) : null}
     </View>
   );
@@ -914,9 +1165,11 @@ const FormatCard = ({
   cardMinHeight,
   gridZoneHeight,
   isMobile,
+  tablePrefs,
   onRemove,
   onChangeCode,
   onChangePayload,
+  onSaveTableDefaults,
   onStartEditTableCell,
 }: {
   format: BaliseFormat;
@@ -925,14 +1178,36 @@ const FormatCard = ({
   cardMinHeight: number;
   gridZoneHeight: number;
   isMobile: boolean;
+  tablePrefs: Partial<typeof DEFAULT_TABLE_SETTINGS>;
   onRemove: () => void;
   onChangeCode: (v: string) => void;
   onChangePayload: (payload: Record<string, any>) => void;
+  onSaveTableDefaults: (payload: Record<string, any>) => void;
   onStartEditTableCell: (cell: ActiveCellEditor) => void;
 }) => {
   const payload = format.payload || {};
   const isWeb = Platform.OS === "web";
   const compactTopRow = format.format_type === "poincon" || format.format_type === "tableau";
+  const [codeLengthPickerOpen, setCodeLengthPickerOpen] = useState(false);
+  const [tableViewMode, setTableViewMode] = useState<"table" | "list">("table");
+  const [qrScannerOpen, setQrScannerOpen] = useState(false);
+  const [qrScanLocked, setQrScanLocked] = useState(false);
+  const [qrImporting, setQrImporting] = useState(false);
+  const [qrImportChoiceOpen, setQrImportChoiceOpen] = useState(false);
+  const [qrUrlModalOpen, setQrUrlModalOpen] = useState(false);
+  const [qrUrlDraft, setQrUrlDraft] = useState("");
+  const [qrWebScannerActive, setQrWebScannerActive] = useState(false);
+  const [qrWebScannerMessage, setQrWebScannerMessage] = useState("");
+  const qrWebVideoRef = useRef<any>(null);
+  const qrWebStreamRef = useRef<any>(null);
+  const qrWebScanTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (qrWebScanTimerRef.current) clearInterval(qrWebScanTimerRef.current);
+      qrWebStreamRef.current?.getTracks?.().forEach((track: any) => track.stop?.());
+    };
+  }, []);
 
   const getGridMetrics = (rows: number, cols: number) => {
     const outerWidth = cardWidth - 28;
@@ -984,7 +1259,7 @@ const FormatCard = ({
                 const normalized = normalizePoinconPayloadForSave({ ...payload, rows: nextRows, cols: cols || 4 });
                 onChangePayload(normalized);
               } else {
-                onChangePayload({ ...payload, rows: nextRows, cols, cells: payload.cells || {} });
+                onChangePayload(normalizeTablePayloadForSave({ ...payload, rows: nextRows, cols: cols || 4, cells: payload.cells || {} }, true, tablePrefs));
               }
             }}
           />
@@ -997,7 +1272,7 @@ const FormatCard = ({
                 const normalized = normalizePoinconPayloadForSave({ ...payload, rows: rows || 4, cols: nextCols });
                 onChangePayload(normalized);
               } else {
-                onChangePayload({ ...payload, rows, cols: nextCols, cells: payload.cells || {} });
+                onChangePayload(normalizeTablePayloadForSave({ ...payload, rows: rows || 4, cols: nextCols, cells: payload.cells || {} }, true, tablePrefs));
               }
             }}
           />
@@ -1039,7 +1314,7 @@ const FormatCard = ({
       <>
         {renderTopRow(rows, cols)}
         <View style={styles.editorBlockCompactTight}>
-          <View style={[styles.fixedContentZone, { height: gridZoneHeight }]}> 
+          <View style={[styles.fixedContentZone, { height: gridZoneHeight }]}>
             <View style={[styles.whiteGridWrapCompact, { width: metrics.wrapWidth, height: metrics.wrapHeight, padding: metrics.padding }]}> 
               {Array.from({ length: rows }).map((_, r) => (
                 <View key={`prow-${r}`} style={[styles.whiteGridRowCompact, { gap: metrics.gap, marginBottom: r === rows - 1 ? 0 : metrics.gap }]}> 
@@ -1073,86 +1348,631 @@ const FormatCard = ({
   };
 
   const renderQrCode = () => {
-    const value = String(payload.value ?? "");
-    const matrix = buildFakeQrMatrix(value || "QR", isMobile ? 17 : 19);
+    const value = normalizeQrValue(payload.value);
+    const qrSize = isMobile ? 170 : 220;
+    const applyQrValue = (nextValue: any) => {
+      const cleanValue = normalizeQrValue(nextValue);
+      if (!cleanValue) {
+        Alert.alert("QR code vide", "Aucune valeur lisible n'a été trouvée.");
+        return;
+      }
+      onChangePayload({ ...payload, value: cleanValue });
+    };
+    const stopWebScanner = () => {
+      if (qrWebScanTimerRef.current) {
+        clearInterval(qrWebScanTimerRef.current);
+        qrWebScanTimerRef.current = null;
+      }
+      qrWebStreamRef.current?.getTracks?.().forEach((track: any) => track.stop?.());
+      qrWebStreamRef.current = null;
+      setQrWebScannerActive(false);
+    };
+    const closeQrScanner = () => {
+      stopWebScanner();
+      setQrScannerOpen(false);
+      setQrScanLocked(false);
+    };
+    const generateRandomQr = () => applyQrValue(generateQrSeedValue());
+    const openWebQrScanner = async () => {
+      const BarcodeDetectorCtor = (globalThis as any).BarcodeDetector;
+
+      if (!BarcodeDetectorCtor || !navigator?.mediaDevices?.getUserMedia) {
+        Alert.alert("Scanner indisponible", "Ce navigateur ne permet pas encore le scan QR en direct. Utilise Importer > Fichier.");
+        return;
+      }
+
+      try {
+        stopWebScanner();
+        setQrScanLocked(false);
+        setQrWebScannerActive(true);
+        setQrWebScannerMessage("Ouverture de la caméra...");
+        setQrScannerOpen(true);
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment" },
+          audio: false,
+        });
+        qrWebStreamRef.current = stream;
+
+        requestAnimationFrame(() => {
+          const video = qrWebVideoRef.current as HTMLVideoElement | null;
+          if (!video) return;
+
+          video.srcObject = stream;
+          video.setAttribute("playsInline", "true");
+          video.play?.().catch(() => null);
+          setQrWebScannerMessage("Place le QR code dans le cadre.");
+
+          const detector = new BarcodeDetectorCtor({ formats: ["qr_code"] });
+          qrWebScanTimerRef.current = setInterval(async () => {
+            if (qrScanLocked) return;
+            try {
+              const results = await detector.detect(video);
+              const nextValue = normalizeQrValue(results?.[0]?.rawValue);
+              if (!nextValue) return;
+
+              setQrScanLocked(true);
+              closeQrScanner();
+              applyQrValue(nextValue);
+            } catch {
+              // La détection réessaie automatiquement sur l'image suivante.
+            }
+          }, 450);
+        });
+      } catch (e: any) {
+        stopWebScanner();
+        setQrScannerOpen(false);
+        Alert.alert("Caméra indisponible", e?.message || "Impossible d'ouvrir la caméra du navigateur.");
+      }
+    };
+    const scanQrFromCameraPhoto = async () => {
+      if (qrImporting) return;
+      setQrImporting(true);
+
+      try {
+        const permission = await ImagePicker.requestCameraPermissionsAsync();
+        if (permission.status !== "granted") {
+          Alert.alert("Caméra refusée", "Autorise l'accès à la caméra pour scanner un QR code.");
+          return;
+        }
+
+        const result = await ImagePicker.launchCameraAsync({
+          mediaTypes: ["images"],
+          allowsEditing: false,
+          quality: 1,
+        });
+
+        if (result.canceled) return;
+        const uri = result.assets?.[0]?.uri;
+        if (!uri) {
+          Alert.alert("Photo illisible", "Impossible de lire la photo du QR code.");
+          return;
+        }
+
+        const decodedValue = await decodeQrFromImageUri(uri);
+        applyQrValue(decodedValue);
+      } catch (e: any) {
+        Alert.alert("QR code non détecté", e?.message || "Aucun QR code lisible n'a été trouvé dans cette photo.");
+      } finally {
+        setQrImporting(false);
+      }
+    };
+    const openQrScanner = async () => {
+      if (Platform.OS === "web") {
+        await openWebQrScanner();
+        return;
+      }
+
+      try {
+        const permission = await BarCodeScanner.requestPermissionsAsync();
+        if (permission.status !== "granted") {
+          Alert.alert("Caméra refusée", "Autorise l'accès à la caméra pour scanner un QR code.");
+          return;
+        }
+        setQrScanLocked(false);
+        setQrWebScannerActive(false);
+        setQrScannerOpen(true);
+      } catch (e: any) {
+        Alert.alert("Scanner indisponible", e?.message || "Impossible d'ouvrir le scanner QR.");
+      }
+    };
+    const importQrImage = async () => {
+      if (qrImporting) return;
+      setQrImportChoiceOpen(false);
+      setQrImporting(true);
+
+      try {
+        if (Platform.OS !== "web") {
+          const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+          if (permission.status !== "granted") {
+            Alert.alert("Photos refusées", "Autorise l'accès aux photos pour importer un QR code.");
+            return;
+          }
+        }
+
+        const result = await ImagePicker.launchImageLibraryAsync({
+          mediaTypes: ["images"],
+          allowsEditing: false,
+          quality: 1,
+        });
+
+        if (result.canceled) return;
+        const uri = result.assets?.[0]?.uri;
+        if (!uri) {
+          Alert.alert("Image illisible", "Impossible de lire l'image sélectionnée.");
+          return;
+        }
+
+        const decodedValue = await decodeQrFromImageUri(uri);
+        applyQrValue(decodedValue);
+      } catch (e: any) {
+        Alert.alert("QR code non détecté", e?.message || "Aucun QR code lisible n'a été trouvé dans cette image.");
+      } finally {
+        setQrImporting(false);
+      }
+    };
+    const importQrFromUrl = async () => {
+      if (qrImporting) return;
+      const url = normalizeQrValue(qrUrlDraft);
+
+      if (!url) {
+        Alert.alert("URL manquante", "Ajoute le lien à transformer en QR code.");
+        return;
+      }
+
+      applyQrValue(url);
+      setQrUrlModalOpen(false);
+      setQrUrlDraft("");
+    };
+    const handleQrScanned = ({ data }: { data: string }) => {
+      if (qrScanLocked) return;
+      setQrScanLocked(true);
+      setQrScannerOpen(false);
+      applyQrValue(data);
+    };
 
     return (
       <>
         {renderTopRow()}
         <View style={styles.editorBlockCompact}>
           <View style={styles.qrActionRowCompact}>
-            <Pressable onPress={() => onChangePayload({ ...payload, value: generateQrSeedValue() })} style={({ pressed }) => [styles.generateBtnCompact, pressed && styles.pressedStyle]}>
-              <Text style={styles.generateBtnTextCompact}>Générer</Text>
+            <Pressable onPress={generateRandomQr} style={({ pressed }) => [styles.qrModeBtn, pressed && styles.pressedStyle]}>
+              <Sparkles size={14} color="#fff" />
+              <Text style={styles.generateBtnTextCompact}>Aléatoire</Text>
+            </Pressable>
+
+            <Pressable onPress={openQrScanner} style={({ pressed }) => [styles.qrModeBtn, pressed && styles.pressedStyle]}>
+              <ScanLine size={14} color="#fff" />
+              <Text style={styles.generateBtnTextCompact}>Scanner</Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => setQrImportChoiceOpen(true)}
+              disabled={qrImporting}
+              style={({ pressed }) => [styles.qrModeBtn, qrImporting && styles.qrModeBtnDisabled, pressed && !qrImporting && styles.pressedStyle]}
+            >
+              {qrImporting ? <ActivityIndicator size="small" color="#fff" /> : <Upload size={14} color="#fff" />}
+              <Text style={styles.generateBtnTextCompact}>Importer</Text>
             </Pressable>
           </View>
 
-          <View style={[styles.fixedContentZone, { height: gridZoneHeight }]}> 
-            <View style={styles.fakeQrWrapCompact}>
-              {matrix.map((row, r) => (
-                <View key={`qr-r-${r}`} style={styles.fakeQrRow}>
-                  {row.map((filled, c) => (
-                    <View key={`qr-${r}-${c}`} style={[styles.fakeQrPixelCompact, filled && styles.fakeQrPixelDark]} />
-                  ))}
-                </View>
-              ))}
+          <View style={[styles.fixedContentZone, { height: gridZoneHeight }]}>
+            <View style={styles.realQrWrapCompact}>
+              <QRCode value={value || " "} size={qrSize} backgroundColor="#ffffff" color="#111827" ecl="H" quietZone={8} />
             </View>
           </View>
         </View>
+
+        <Modal visible={qrScannerOpen} animationType="slide" transparent onRequestClose={closeQrScanner}>
+          <View style={styles.qrScannerBackdrop}>
+            <View style={styles.qrScannerPanel}>
+              <View style={styles.qrScannerHeader}>
+                <View style={styles.qrScannerTitleRow}>
+                  <Camera size={18} color="#E0F2FE" />
+                  <Text style={styles.qrScannerTitle}>Scanner un QR code</Text>
+                </View>
+                <Pressable onPress={closeQrScanner} style={({ pressed }) => [styles.qrScannerCloseBtn, pressed && styles.pressedStyle]}>
+                  <X size={16} color="#E0F2FE" />
+                </Pressable>
+              </View>
+
+              <View style={styles.qrScannerCameraWrap}>
+                {Platform.OS === "web" && qrWebScannerActive ? (
+                  React.createElement("video", {
+                    ref: qrWebVideoRef,
+                    muted: true,
+                    playsInline: true,
+                    autoPlay: true,
+                    style: styles.qrScannerCamera as any,
+                  })
+                ) : (
+                  <BarCodeScanner
+                    onBarCodeScanned={qrScanLocked ? undefined : handleQrScanned}
+                    barCodeTypes={getQrBarCodeTypes()}
+                    style={styles.qrScannerCamera}
+                  />
+                )}
+                <View style={styles.qrScannerFrame} />
+              </View>
+
+              <Text style={styles.qrScannerHint}>{qrWebScannerMessage || "Place le QR code dans le cadre. Il sera recopié puis régénéré proprement."}</Text>
+            </View>
+          </View>
+        </Modal>
+
+        <Modal visible={qrImportChoiceOpen} animationType="fade" transparent onRequestClose={() => setQrImportChoiceOpen(false)}>
+          <View style={styles.qrScannerBackdrop}>
+            <View style={styles.qrImportPanel}>
+              <View style={styles.qrScannerHeader}>
+                <Text style={styles.qrScannerTitle}>Importer</Text>
+                <Pressable onPress={() => setQrImportChoiceOpen(false)} style={({ pressed }) => [styles.qrScannerCloseBtn, pressed && styles.pressedStyle]}>
+                  <X size={16} color="#E0F2FE" />
+                </Pressable>
+              </View>
+
+              <Pressable
+                onPress={() => {
+                  setQrImportChoiceOpen(false);
+                  setQrUrlModalOpen(true);
+                }}
+                style={({ pressed }) => [styles.qrImportOptionBtn, pressed && styles.pressedStyle]}
+              >
+                <LinkIcon size={18} color="#0F172A" />
+                <Text style={styles.qrImportOptionText}>URL</Text>
+              </Pressable>
+
+              <Pressable onPress={importQrImage} style={({ pressed }) => [styles.qrImportOptionBtn, pressed && styles.pressedStyle]}>
+                <Upload size={18} color="#0F172A" />
+                <Text style={styles.qrImportOptionText}>Fichier</Text>
+              </Pressable>
+            </View>
+          </View>
+        </Modal>
+
+        <Modal visible={qrUrlModalOpen} animationType="fade" transparent onRequestClose={() => setQrUrlModalOpen(false)}>
+          <View style={styles.qrScannerBackdrop}>
+            <View style={styles.qrImportPanel}>
+              <View style={styles.qrScannerHeader}>
+                <Text style={styles.qrScannerTitle}>URL</Text>
+                <Pressable onPress={() => setQrUrlModalOpen(false)} style={({ pressed }) => [styles.qrScannerCloseBtn, pressed && styles.pressedStyle]}>
+                  <X size={16} color="#E0F2FE" />
+                </Pressable>
+              </View>
+
+              <TextInput
+                value={qrUrlDraft}
+                onChangeText={setQrUrlDraft}
+                placeholder="https://..."
+                placeholderTextColor="rgba(15,23,42,0.36)"
+                style={styles.qrUrlInput}
+                autoCapitalize="none"
+                autoCorrect={false}
+                keyboardType="url"
+                returnKeyType="done"
+                onSubmitEditing={importQrFromUrl}
+              />
+
+              <Pressable
+                onPress={importQrFromUrl}
+                disabled={qrImporting}
+                style={({ pressed }) => [styles.qrImportValidateBtn, qrImporting && styles.qrModeBtnDisabled, pressed && !qrImporting && styles.pressedStyle]}
+              >
+                {qrImporting ? <ActivityIndicator size="small" color="#fff" /> : <LinkIcon size={16} color="#fff" />}
+                <Text style={styles.generateBtnTextCompact}>Valider</Text>
+              </Pressable>
+            </View>
+          </View>
+        </Modal>
       </>
     );
   };
 
   const renderTableau = () => {
-    const rows = clampGridSize(payload.rows, 4);
-    const cols = clampGridSize(payload.cols, 4);
-    const cells = payload.cells || {};
-    const metrics = getGridMetrics(rows, cols);
+    const normalizedPayload = normalizeTablePayloadForSave(payload, true, tablePrefs);
+    const rows = clampGridSize(normalizedPayload.rows, 4);
+    const cols = clampGridSize(normalizedPayload.cols, 4);
+    const settings = normalizeTableSettings(normalizedPayload, tablePrefs);
+    const cells = normalizedPayload.cells || {};
+    const showCodeTags = settings.codeLength >= 6;
+    const tableGridZoneHeight = Math.max(isMobile ? 165 : 235, gridZoneHeight - 96);
+    const metrics = (() => {
+      const outerWidth = cardWidth - 28;
+      const gap = isMobile ? 3 : 5;
+      const gridPadding = isMobile ? 6 : 8;
+      const usableByWidth = outerWidth - gridPadding * 2;
+      const usableByHeight = tableGridZoneHeight - gridPadding * 2;
+      const headerWidth = isMobile ? 34 : 38;
+      const cellFromWidth = Math.floor((usableByWidth - headerWidth - gap * cols) / cols);
+      const cellFromHeight = Math.floor((usableByHeight - gap * rows) / (rows + 1));
+      const minCellWidth = showCodeTags
+        ? (isMobile ? 38 : 44)
+        : settings.codeLength <= 3
+          ? (isMobile ? 42 : 48)
+          : settings.codeLength <= 4
+            ? (isMobile ? 50 : 58)
+            : (isMobile ? 60 : 70);
+      const cellWidth = Math.max(minCellWidth, cellFromWidth);
+      const cellHeight = Math.max(isMobile ? 30 : 34, Math.min(cellFromHeight, isMobile ? 38 : 42));
+      return {
+        gap,
+        padding: gridPadding,
+        cellWidth,
+        cellHeight,
+        headerWidth,
+        fontSize: showCodeTags ? 11 : settings.codeLength >= 5 ? 10 : settings.codeLength === 4 ? 11 : 12,
+        wrapWidth: headerWidth + cellWidth * cols + gap * cols + gridPadding * 2,
+        wrapHeight: cellHeight * (rows + 1) + gap * rows + gridPadding * 2,
+      };
+    })();
+    const codeCharsLabel = `${settings.codeLength} car.`;
+    const tableCodeTags = Array.from({ length: rows }).flatMap((_, r) =>
+      Array.from({ length: cols }).map((__, c) => {
+        const key = makeCellKey(r, c);
+        return {
+          key,
+          label: `${toLetter(c)}${r + 1}`,
+          value: String(cells[key] ?? ""),
+        };
+      })
+    );
+
+    const changeSettings = (patch: Partial<typeof settings>) => {
+      const nextSettings = normalizeTableSettings({ ...settings, ...patch }, tablePrefs);
+      onChangePayload(
+        normalizeTablePayloadForSave({
+          ...normalizedPayload,
+          rows,
+          cols,
+          settings: nextSettings,
+          cells,
+        }, true, tablePrefs)
+      );
+    };
+
+    const regenerate = () => {
+      onChangePayload(
+        normalizeTablePayloadForSave(
+          {
+            ...normalizedPayload,
+            rows,
+            cols,
+            settings,
+            cells: {},
+          },
+          false,
+          tablePrefs
+        )
+      );
+    };
+
+    const selectCodeLength = (nextLength: number) => {
+      setCodeLengthPickerOpen(false);
+      const nextSettings = normalizeTableSettings({ ...settings, codeLength: nextLength }, tablePrefs);
+      onChangePayload(
+        normalizeTablePayloadForSave(
+          {
+            ...normalizedPayload,
+            rows,
+            cols,
+            settings: nextSettings,
+            cells: {},
+          },
+          false,
+          tablePrefs
+        )
+      );
+    };
+
+    const editTableCell = (cellKey: string, value: string, placeholder: string) => {
+      if (isWeb) {
+        const nextValue = window.prompt(`Code ${placeholder}`, value);
+        if (nextValue == null) return;
+        onChangePayload({ ...normalizedPayload, rows, cols, cells: { ...cells, [cellKey]: nextValue } });
+        return;
+      }
+
+      onStartEditTableCell({ formatId: format.id, cellKey, value, placeholder });
+    };
 
     return (
       <>
         {renderTopRow(rows, cols)}
         <View style={styles.editorBlockCompactTight}>
-          <View style={[styles.fixedContentZone, { height: gridZoneHeight }]}> 
-            <View style={[styles.tableFixedWrap, { width: metrics.wrapWidth, height: metrics.wrapHeight, padding: metrics.padding }]}> 
-              {Array.from({ length: rows }).map((_, r) => (
-                <View key={`trow-${r}`} style={[styles.tableEditorRowCompact, { gap: metrics.gap, marginBottom: r === rows - 1 ? 0 : metrics.gap }]}> 
-                  {Array.from({ length: cols }).map((__, c) => {
-                    const key = makeCellKey(r, c);
-                    const currentValue = String(cells[key] ?? "");
-                    const placeholder = defaultTablePlaceholder(r, c);
+          <View style={styles.tableToolsRow}>
+            <View style={styles.codeLengthPickerWrap}>
+              <Pressable
+                onPress={() => setCodeLengthPickerOpen(true)}
+                style={({ pressed }) => [styles.tableToolBtn, pressed && styles.pressedStyle]}
+              >
+                <Text style={styles.tableToolBtnText}>{codeCharsLabel}</Text>
+              </Pressable>
+            </View>
 
-                    if (isWeb) {
-                      return (
-                        <TextInput
-                          key={key}
-                          value={currentValue}
-                          onChangeText={(v) => onChangePayload({ ...payload, rows, cols, cells: { ...cells, [key]: v } })}
-                          placeholder={placeholder}
-                          placeholderTextColor="rgba(15,23,42,0.35)"
-                          style={[styles.tableCellInputWeb, { width: metrics.cell, height: metrics.cell }]}
-                          autoCapitalize="none"
-                          autoCorrect={false}
-                        />
-                      );
-                    }
+            <Pressable
+              onPress={() => changeSettings({ useUppercase: !settings.useUppercase })}
+              style={({ pressed }) => [styles.tableToggleBtn, settings.useUppercase && styles.tableToggleBtnActive, pressed && styles.pressedStyle]}
+            >
+              <Text style={[styles.tableToggleText, settings.useUppercase && styles.tableToggleTextActive]}>A-Z</Text>
+            </Pressable>
 
-                    return (
-                      <Pressable
-                        key={key}
-                        onPress={() => onStartEditTableCell({ formatId: format.id, cellKey: key, value: currentValue, placeholder })}
-                        style={[styles.tableCellPressable, { width: metrics.cell, height: metrics.cell }]}
-                      >
-                        <Text numberOfLines={1} style={[styles.tableCellPressableText, !currentValue && styles.tableCellPressablePlaceholder]}>
-                          {currentValue || placeholder}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
+            <Pressable
+              onPress={() => changeSettings({ useDigits: !settings.useDigits })}
+              style={({ pressed }) => [styles.tableToggleBtn, settings.useDigits && styles.tableToggleBtnActive, pressed && styles.pressedStyle]}
+            >
+              <Text style={[styles.tableToggleText, settings.useDigits && styles.tableToggleTextActive]}>0-9</Text>
+            </Pressable>
+
+            <Pressable onPress={regenerate} style={({ pressed }) => [styles.generateBtnCompact, pressed && styles.pressedStyle]}>
+              <Text style={styles.generateBtnTextCompact}>Générer</Text>
+            </Pressable>
+          </View>
+
+          <View style={styles.tableToolsRow}>
+            <Pressable
+              onPress={() => changeSettings({ useSymbols: !settings.useSymbols })}
+              style={({ pressed }) => [styles.tableToggleBtn, settings.useSymbols && styles.tableToggleBtnActive, pressed && styles.pressedStyle]}
+            >
+              <Text style={[styles.tableToggleText, settings.useSymbols && styles.tableToggleTextActive]}>Symboles</Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => changeSettings({ useLowercase: !settings.useLowercase })}
+              style={({ pressed }) => [styles.tableToggleBtn, settings.useLowercase && styles.tableToggleBtnActive, pressed && styles.pressedStyle]}
+            >
+              <Text style={[styles.tableToggleText, settings.useLowercase && styles.tableToggleTextActive]}>a-z</Text>
+            </Pressable>
+
+            <Pressable onPress={() => onSaveTableDefaults(normalizedPayload)} style={({ pressed }) => [styles.tableToolBtn, pressed && styles.pressedStyle]}>
+              <Text style={styles.tableToolBtnText}>Défaut</Text>
+            </Pressable>
+          </View>
+
+          <View style={styles.tableViewSwitchRow}>
+            <Pressable
+              onPress={() => setTableViewMode("table")}
+              style={({ pressed }) => [styles.tableViewSwitchBtn, tableViewMode === "table" && styles.tableViewSwitchBtnActive, pressed && styles.pressedStyle]}
+            >
+              <Text style={[styles.tableViewSwitchText, tableViewMode === "table" && styles.tableViewSwitchTextActive]}>Tableau</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => setTableViewMode("list")}
+              style={({ pressed }) => [styles.tableViewSwitchBtn, tableViewMode === "list" && styles.tableViewSwitchBtnActive, pressed && styles.pressedStyle]}
+            >
+              <Text style={[styles.tableViewSwitchText, tableViewMode === "list" && styles.tableViewSwitchTextActive]}>Liste</Text>
+            </Pressable>
+          </View>
+
+          {tableViewMode === "table" ? (
+            <ScrollView
+              style={[styles.tableViewport, { height: tableGridZoneHeight }]}
+              horizontal
+              nestedScrollEnabled
+              showsHorizontalScrollIndicator
+              contentContainerStyle={styles.tableViewportHorizontalContent}
+            >
+              <ScrollView nestedScrollEnabled showsVerticalScrollIndicator style={{ maxHeight: tableGridZoneHeight }}>
+                <View style={[styles.tableFixedWrap, { width: metrics.wrapWidth, minHeight: metrics.wrapHeight, padding: metrics.padding }]}>
+                  <View style={[styles.tableEditorRowCompact, { gap: metrics.gap, marginBottom: metrics.gap }]}>
+                    <View style={[styles.tableHeaderCorner, { width: metrics.headerWidth, height: metrics.cellHeight }]} />
+                    {Array.from({ length: cols }).map((_, c) => (
+                      <View key={`thead-${c}`} style={[styles.tableHeaderCell, { width: metrics.cellWidth, height: metrics.cellHeight }]}>
+                        <Text style={styles.tableHeaderText}>{toLetter(c)}</Text>
+                      </View>
+                    ))}
+                  </View>
+
+                  {Array.from({ length: rows }).map((_, r) => (
+                    <View key={`trow-${r}`} style={[styles.tableEditorRowCompact, { gap: metrics.gap, marginBottom: r === rows - 1 ? 0 : metrics.gap }]}>
+                      <View style={[styles.tableHeaderCell, { width: metrics.headerWidth, height: metrics.cellHeight }]}>
+                        <Text style={styles.tableHeaderText}>{r + 1}</Text>
+                      </View>
+                      {Array.from({ length: cols }).map((__, c) => {
+                        const key = makeCellKey(r, c);
+                        const currentValue = String(cells[key] ?? "");
+                        const placeholder = defaultTablePlaceholder(r, c);
+                        const visibleValue = showCodeTags ? `${toLetter(c)}${r + 1}` : currentValue;
+
+                        if (isWeb && !showCodeTags) {
+                          return (
+                            <TextInput
+                              key={key}
+                              value={currentValue}
+                              onChangeText={(v) => onChangePayload({ ...payload, rows, cols, cells: { ...cells, [key]: v } })}
+                              placeholder={placeholder}
+                              placeholderTextColor="rgba(15,23,42,0.35)"
+                              style={[styles.tableCellInputWeb, { width: metrics.cellWidth, height: metrics.cellHeight, fontSize: metrics.fontSize }]}
+                              autoCapitalize="none"
+                              autoCorrect={false}
+                            />
+                          );
+                        }
+
+                        return (
+                          <Pressable
+                            key={key}
+                            onPress={() => editTableCell(key, currentValue, placeholder)}
+                            style={[styles.tableCellPressable, { width: metrics.cellWidth, height: metrics.cellHeight }]}
+                          >
+                            <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.65} style={[styles.tableCellPressableText, { fontSize: metrics.fontSize }, !currentValue && styles.tableCellPressablePlaceholder]}>
+                              {visibleValue || placeholder}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                  ))}
                 </View>
+              </ScrollView>
+            </ScrollView>
+          ) : (
+            <ScrollView
+              style={[styles.tableListViewport, { height: tableGridZoneHeight }]}
+              contentContainerStyle={styles.tableListContent}
+              showsVerticalScrollIndicator
+            >
+              {tableCodeTags.map((item) => (
+                <Pressable
+                  key={`list-${item.key}`}
+                  onPress={() => editTableCell(item.key, item.value, item.label)}
+                  style={({ pressed }) => [styles.tableListRow, pressed && styles.pressedStyle]}
+                >
+                  <Text style={styles.tableListCoord}>{item.label}</Text>
+                  <Text selectable={isWeb as any} numberOfLines={1} style={styles.tableListValue}>{item.value}</Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+          )}
+
+        </View>
+
+        {isWeb && codeLengthPickerOpen ? (
+          <>
+            <Pressable style={styles.codeLengthBackdrop} onPress={() => setCodeLengthPickerOpen(false)} />
+            <View style={styles.codeLengthMenuFloating}>
+              {TABLE_CODE_LENGTH_OPTIONS.map((option) => (
+                <Pressable
+                  key={`length-${option}`}
+                  onPress={() => selectCodeLength(option)}
+                  style={({ pressed }) => [
+                    styles.codeLengthMenuItem,
+                    option === settings.codeLength && styles.codeLengthMenuItemActive,
+                    pressed && styles.pressedStyle,
+                  ]}
+                >
+                  <Text style={[styles.codeLengthMenuText, option === settings.codeLength && styles.codeLengthMenuTextActive]}>
+                    {option} caractères
+                  </Text>
+                </Pressable>
               ))}
             </View>
-          </View>
-        </View>
+          </>
+        ) : null}
+
+        {!isWeb && codeLengthPickerOpen ? (
+          <Modal visible transparent animationType="fade" onRequestClose={() => setCodeLengthPickerOpen(false)}>
+            <View style={styles.lengthModalRoot}>
+              <Pressable style={styles.lengthModalBackdrop} onPress={() => setCodeLengthPickerOpen(false)} />
+              <View style={styles.lengthModalCard}>
+                <Text style={styles.lengthModalTitle}>Nombre de caractères</Text>
+                {TABLE_CODE_LENGTH_OPTIONS.map((option) => (
+                  <Pressable
+                    key={`mobile-length-${option}`}
+                    onPress={() => selectCodeLength(option)}
+                    style={({ pressed }) => [
+                      styles.lengthModalItem,
+                      option === settings.codeLength && styles.lengthModalItemActive,
+                      pressed && styles.pressedStyle,
+                    ]}
+                  >
+                    <Text style={[styles.lengthModalItemText, option === settings.codeLength && styles.lengthModalItemTextActive]}>
+                      {option} caractères
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+          </Modal>
+        ) : null}
       </>
     );
   };
@@ -1188,6 +2008,7 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
   const [removingFromParcours, setRemovingFromParcours] = useState(false);
   const [showDeleteInfo, setShowDeleteInfo] = useState(false);
   const [showFormatPicker, setShowFormatPicker] = useState(false);
+  const [tablePrefs, setTablePrefs] = useState(DEFAULT_TABLE_SETTINGS);
 
   const [activeCellEditor, setActiveCellEditor] = useState<ActiveCellEditor | null>(null);
   const [activeFormatIndex, setActiveFormatIndex] = useState(0);
@@ -1198,6 +2019,7 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
   const initialLoadDoneRef = useRef(false);
   const savingRef = useRef(false);
   const saveAgainRef = useRef(false);
+  const tablePrefsSourceRef = useRef<"default" | "local" | "supabase">("default");
 
   const latestStateRef = useRef<{
     balise: Balise | null;
@@ -1216,15 +2038,44 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
   const currentUsageCount = usageList.length;
   const currentIsUsed = currentUsageCount > 0;
 
+  useEffect(() => {
+    let mounted = true;
+
+    const loadTablePrefs = async () => {
+      try {
+        const raw = await AsyncStorage.getItem(TABLE_PREFS_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (mounted && tablePrefsSourceRef.current !== "supabase") {
+          tablePrefsSourceRef.current = "local";
+          setTablePrefs(normalizeTableSettings(parsed));
+        }
+      } catch {
+        // Les préférences locales sont optionnelles.
+      }
+    };
+
+    loadTablePrefs();
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
   const orderedFormats = useMemo(() => {
     return [...formats]
       .map((f) => ({
         ...f,
         label: FIXED_FORMAT_LABELS[f.format_type],
-        payload: f.format_type === "poincon" ? normalizePoinconPayloadForSave(f.payload ?? {}) : f.payload ?? {},
+        payload:
+          f.format_type === "poincon"
+            ? normalizePoinconPayloadForSave(f.payload ?? {})
+            : f.format_type === "tableau"
+              ? normalizeTablePayloadForSave(f.payload ?? {}, true, tablePrefs)
+              : f.payload ?? {},
       }))
       .sort((a, b) => FORMAT_ORDER.indexOf(a.format_type) - FORMAT_ORDER.indexOf(b.format_type));
-  }, [formats]);
+  }, [formats, tablePrefs]);
 
   const availableTypes = useMemo(() => {
     const used = new Set(formats.map((f) => f.format_type));
@@ -1287,15 +2138,14 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
       user_id: userId,
     };
 
-    const codeFormat = createDefaultFormat("code", null, userId);
-
     setBalise(newBalise);
     setInitialBalise({ ...newBalise });
-    setFormats([codeFormat]);
-    setInitialFormats([codeFormat]);
+    setFormats([]);
+    setInitialFormats([]);
     setIsNew(true);
     setUsageList([]);
     setActiveFormatIndex(0);
+    setShowFormatPicker(true);
   }, []);
 
   const saveFromSnapshot = useCallback(
@@ -1332,17 +2182,17 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
 
         const codeValue = String(currentBalise.code ?? "").trim();
 
-        const safeFormats = ensureCodeFormat(
-          currentFormats.map((f) => ({
+        const safeFormats = currentFormats
+          .filter((f) => !!f.format_type)
+          .map((f) => ({
             ...f,
             payload:
               f.format_type === "poincon"
                 ? normalizePoinconPayloadForSave(f.payload ?? {})
-                : f.payload ?? {},
-          })),
-          currentBalise.id.startsWith("new-") ? null : currentBalise.id,
-          userId
-        );
+                : f.format_type === "tableau"
+                  ? normalizeTablePayloadForSave(f.payload ?? {}, true, tablePrefs)
+                  : f.payload ?? {},
+          }));
 
         if (currentIsNew || currentBalise.id.startsWith("new-")) {
           const inserted = await insertBaliseInSupabase(
@@ -1368,11 +2218,7 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
             points: String(inserted.points ?? ""),
           };
 
-          const refreshedFormats = ensureCodeFormat(
-            await fetchFormatsByBaliseId(inserted.id, userId),
-            inserted.id,
-            userId
-          );
+          const refreshedFormats = await fetchFormatsByBaliseId(inserted.id, userId);
 
           setBalise(finalBalise);
           setInitialBalise({ ...finalBalise });
@@ -1413,11 +2259,7 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
 
         await upsertFormatsInSupabase(updatedBalise.id, userId, formatsForUpdate);
 
-        const refreshedFormats = ensureCodeFormat(
-          await fetchFormatsByBaliseId(updatedBalise.id, userId),
-          updatedBalise.id,
-          userId
-        );
+        const refreshedFormats = await fetchFormatsByBaliseId(updatedBalise.id, userId);
 
         setBalise(updatedBalise);
         setInitialBalise({ ...updatedBalise });
@@ -1445,7 +2287,7 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
         }
       }
     },
-    [refreshUsage]
+    [refreshUsage, tablePrefs]
   );
 
   useEffect(() => {
@@ -1458,6 +2300,24 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
         const userId = await getAuthenticatedUserId();
         if (!mounted) return;
         setCurrentUserId(userId);
+
+        try {
+          const { data: prefData, error: prefError } = await supabase
+            .from("user_preferences")
+            .select("value")
+            .eq("user_id", userId)
+            .eq("key", TABLE_USER_PREFS_KEY)
+            .maybeSingle();
+
+          if (!prefError && (prefData as any)?.value && mounted) {
+            const settings = normalizeTableSettings((prefData as any).value);
+            tablePrefsSourceRef.current = "supabase";
+            setTablePrefs(settings);
+            await AsyncStorage.setItem(TABLE_PREFS_KEY, JSON.stringify(settings)).catch(() => null);
+          }
+        } catch {
+          // Les préférences Supabase sont optionnelles : le défaut local prend le relais.
+        }
 
         let parsedDraft: BaliseEditDraft | null = null;
 
@@ -1479,7 +2339,7 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
               return;
             }
 
-            const existingFormats = ensureCodeFormat(await fetchFormatsByBaliseId(parsedDraft.balise_id, userId), existing.id, userId);
+            const existingFormats = await fetchFormatsByBaliseId(parsedDraft.balise_id, userId);
 
             if (!mounted) return;
 
@@ -1579,10 +2439,15 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
     (type: BaliseFormatType) => {
       if (!balise) return;
 
-      const created = createDefaultFormat(type, balise.id.startsWith("new-") ? null : balise.id, currentUserId || balise.user_id || null);
+      const created = createDefaultFormat(
+        type,
+        balise.id.startsWith("new-") ? null : balise.id,
+        currentUserId || balise.user_id || null,
+        tablePrefs
+      );
 
       setFormats((prev) => {
-        const next = ensureCodeFormat([...prev, created], balise.id, currentUserId);
+        const next = [...prev.filter((f) => f.format_type !== type), created];
         setTimeout(() => {
           const nextOrdered = [...next].sort((a, b) => FORMAT_ORDER.indexOf(a.format_type) - FORMAT_ORDER.indexOf(b.format_type));
           const nextIndex = nextOrdered.findIndex((f) => f.id === created.id);
@@ -1593,16 +2458,32 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
 
       setShowFormatPicker(false);
     },
-    [balise, currentUserId, scrollToFormatIndex]
+    [balise, currentUserId, scrollToFormatIndex, tablePrefs]
   );
+
+  const closeFormatPicker = useCallback(() => {
+    if (formats.length === 0) return;
+    setShowFormatPicker(false);
+  }, [formats.length]);
+
+  const saveTablePrefsFromPayload = useCallback(async (payload: Record<string, any>) => {
+    const settings = normalizeTableSettings(payload);
+    tablePrefsSourceRef.current = "local";
+    setTablePrefs(settings);
+    try {
+      await AsyncStorage.setItem(TABLE_PREFS_KEY, JSON.stringify(settings));
+    } catch {
+      // Non bloquant : la balise reste sauvegardée même si la préférence locale échoue.
+    }
+  }, []);
 
   const removeFormat = useCallback(
     (formatId: string) => {
       setFormats((prev) => {
         const target = prev.find((f) => f.id === formatId);
-        if (target?.format_type === "code") return prev;
+        if (prev.length <= 1) return prev;
 
-        const next = ensureCodeFormat(prev.filter((f) => f.id !== formatId), balise?.id || null, currentUserId);
+        const next = prev.filter((f) => f.id !== formatId);
 
         setTimeout(() => {
           const newIndex = Math.max(0, Math.min(activeFormatIndex, next.length - 1));
@@ -1624,7 +2505,12 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
           ? {
               ...f,
               label: FIXED_FORMAT_LABELS[f.format_type],
-              payload: f.format_type === "poincon" ? normalizePoinconPayloadForSave(payload ?? {}) : payload,
+              payload:
+                f.format_type === "poincon"
+                  ? normalizePoinconPayloadForSave(payload ?? {})
+                  : f.format_type === "tableau"
+                    ? normalizeTablePayloadForSave(payload ?? {}, true, tablePrefs)
+                    : payload,
             }
           : f
       );
@@ -1637,7 +2523,7 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
 
       return next;
     });
-  }, []);
+  }, [tablePrefs]);
 
   const handleStartEditTableCell = useCallback((cell: ActiveCellEditor) => setActiveCellEditor(cell), []);
   const handleEditorChange = useCallback((text: string) => setActiveCellEditor((prev) => (prev ? { ...prev, value: text } : prev)), []);
@@ -1646,34 +2532,58 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
     if (!activeCellEditor) return;
     const { formatId, cellKey, value } = activeCellEditor;
 
-    setFormats((prev) =>
-      prev.map((f) => {
+    setFormats((prev) => {
+      const next = prev.map((f) => {
         if (f.id !== formatId) return f;
         const payload = f.payload || {};
         const cells = payload.cells || {};
-        return { ...f, payload: { ...payload, cells: { ...cells, [cellKey]: value } } };
-      })
-    );
+        const nextPayload = { ...payload, cells: { ...cells, [cellKey]: value } };
+        return {
+          ...f,
+          payload: f.format_type === "tableau" ? normalizeTablePayloadForSave(nextPayload, true, tablePrefs) : nextPayload,
+        };
+      });
+
+      latestStateRef.current = {
+        ...latestStateRef.current,
+        formats: next,
+        hasChanges: true,
+      };
+
+      return next;
+    });
 
     setActiveCellEditor(null);
-  }, [activeCellEditor]);
+  }, [activeCellEditor, tablePrefs]);
 
   const handleEditorClear = useCallback(() => {
     if (!activeCellEditor) return;
     const { formatId, cellKey } = activeCellEditor;
 
-    setFormats((prev) =>
-      prev.map((f) => {
+    setFormats((prev) => {
+      const next = prev.map((f) => {
         if (f.id !== formatId) return f;
         const payload = f.payload || {};
         const cells = { ...(payload.cells || {}) };
         delete cells[cellKey];
-        return { ...f, payload: { ...payload, cells } };
-      })
-    );
+        const nextPayload = { ...payload, cells };
+        return {
+          ...f,
+          payload: f.format_type === "tableau" ? normalizeTablePayloadForSave(nextPayload, true, tablePrefs) : nextPayload,
+        };
+      });
+
+      latestStateRef.current = {
+        ...latestStateRef.current,
+        formats: next,
+        hasChanges: true,
+      };
+
+      return next;
+    });
 
     setActiveCellEditor(null);
-  }, [activeCellEditor]);
+  }, [activeCellEditor, tablePrefs]);
 
   const handleExportPdf = useCallback(async () => {
     if (!balise) return;
@@ -1907,9 +2817,11 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
                       cardMinHeight={cardMinHeight}
                       gridZoneHeight={gridZoneHeight}
                       isMobile={isMobile}
+                      tablePrefs={tablePrefs}
                       onRemove={() => removeFormat(format.id)}
                       onChangeCode={(v) => updateBaliseDraft({ code: v })}
                       onChangePayload={(payload) => updateFormatPayload(format.id, payload)}
+                      onSaveTableDefaults={saveTablePrefsFromPayload}
                       onStartEditTableCell={handleStartEditTableCell}
                     />
                   </View>
@@ -2031,16 +2943,18 @@ const CreationBalise: React.FC<Props> = ({ setPage = () => {} }) => {
         </View>
       </Modal>
 
-      <Modal visible={showFormatPicker} animationType="fade" transparent={false} presentationStyle="fullScreen" onRequestClose={() => setShowFormatPicker(false)}>
+      <Modal visible={showFormatPicker} animationType="fade" transparent={false} presentationStyle="fullScreen" onRequestClose={closeFormatPicker}>
         <SafeAreaView style={styles.fullModalRoot}>
           <StatusBar hidden />
           <View style={styles.fullModalOverlay}>
             <View style={styles.fullModalSheet}>
               <View style={styles.modalTopRow}>
                 <Text style={styles.modalTitle}>Ajouter un format</Text>
-                <Pressable onPress={() => setShowFormatPicker(false)} style={({ pressed }) => [styles.modalCloseBtn, pressed && styles.pressedStyle]}>
-                  <X size={16} color="#334155" />
-                </Pressable>
+                {formats.length > 0 ? (
+                  <Pressable onPress={closeFormatPicker} style={({ pressed }) => [styles.modalCloseBtn, pressed && styles.pressedStyle]}>
+                    <X size={16} color="#334155" />
+                  </Pressable>
+                ) : null}
               </View>
 
               {availableTypes.length === 0 ? (
@@ -2219,6 +3133,15 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   gridPickerButtonText: { color: C_TEXT, fontWeight: "800", fontSize: 14, flex: 1 },
+  gridPickerBackdrop: {
+    position: Platform.OS === "web" ? ("fixed" as any) : "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 99998,
+    backgroundColor: "transparent",
+  },
   gridPickerMenu: {
     position: "absolute",
     top: 42,
@@ -2245,17 +3168,168 @@ const styles = StyleSheet.create({
   whiteGridRowCompact: { flexDirection: "row" },
   whiteGridCellCompact: { borderRadius: 9, borderWidth: 1, borderColor: "#d1d5db", backgroundColor: "#fff", alignItems: "center", justifyContent: "center" },
   blackDotCompact: { width: 12, height: 12, borderRadius: 999, backgroundColor: "#111827" },
-  qrActionRowCompact: { alignItems: "flex-end" },
+  qrActionRowCompact: { flexDirection: "row", alignItems: "center", justifyContent: "flex-end", gap: 8, flexWrap: "wrap" },
+  qrModeBtn: {
+    minHeight: 36,
+    backgroundColor: C_BLUE_SOFT,
+    borderRadius: 11,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+  },
+  qrModeBtnDisabled: { opacity: 0.65 },
+  qrScannerBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(15,23,42,0.82)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 18,
+  },
+  qrScannerPanel: {
+    width: "100%",
+    maxWidth: 430,
+    borderRadius: 22,
+    backgroundColor: "#0f172a",
+    borderWidth: 1,
+    borderColor: "rgba(226,232,240,0.18)",
+    padding: 14,
+    gap: 12,
+  },
+  qrImportPanel: {
+    width: "100%",
+    maxWidth: 360,
+    borderRadius: 22,
+    backgroundColor: "#0f172a",
+    borderWidth: 1,
+    borderColor: "rgba(226,232,240,0.18)",
+    padding: 14,
+    gap: 12,
+  },
+  qrScannerHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 },
+  qrScannerTitleRow: { flexDirection: "row", alignItems: "center", gap: 8, flex: 1 },
+  qrScannerTitle: { color: "#F8FAFC", fontSize: 16, fontWeight: "900" },
+  qrScannerCloseBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.10)",
+  },
+  qrScannerCameraWrap: {
+    height: 330,
+    borderRadius: 18,
+    overflow: "hidden",
+    backgroundColor: "#020617",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  qrScannerCamera: { ...StyleSheet.absoluteFillObject },
+  qrScannerFrame: {
+    width: 220,
+    height: 220,
+    borderRadius: 22,
+    borderWidth: 3,
+    borderColor: "#38BDF8",
+    backgroundColor: "transparent",
+  },
+  qrScannerHint: { color: "#CBD5E1", fontSize: 13, lineHeight: 18, fontWeight: "700", textAlign: "center" },
+  qrImportOptionBtn: {
+    minHeight: 48,
+    borderRadius: 14,
+    backgroundColor: "#F8FAFC",
+    borderWidth: 1,
+    borderColor: "rgba(226,232,240,0.92)",
+    paddingHorizontal: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  qrImportOptionText: { color: "#0F172A", fontSize: 15, fontWeight: "900" },
+  qrUrlInput: {
+    minHeight: 46,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(226,232,240,0.92)",
+    backgroundColor: "#F8FAFC",
+    color: "#0F172A",
+    paddingHorizontal: 12,
+    fontSize: 15,
+    fontWeight: "800",
+  },
+  qrImportValidateBtn: {
+    minHeight: 42,
+    borderRadius: 13,
+    backgroundColor: C_BLUE_SOFT,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
   generateBtnCompact: { backgroundColor: C_BLUE_SOFT, borderRadius: 11, paddingHorizontal: 12, paddingVertical: 8 },
   generateBtnTextCompact: { color: "#fff", fontWeight: "800", fontSize: 14 },
   fakeQrWrapCompact: { backgroundColor: "#fff", borderWidth: 1, borderColor: C_BORDER, borderRadius: 14, padding: 10 },
+  realQrWrapCompact: { backgroundColor: "#fff", borderWidth: 1, borderColor: C_BORDER, borderRadius: 14, padding: 12, alignItems: "center", justifyContent: "center" },
   fakeQrRow: { flexDirection: "row" },
   fakeQrPixelCompact: { width: 7, height: 7, backgroundColor: "#fff" },
   fakeQrPixelDark: { backgroundColor: "#111827" },
+  tableToolsRow: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, flexWrap: "wrap" },
+  codeLengthPickerWrap: { position: "relative", zIndex: 10 },
+  codeLengthBackdrop: {
+    position: Platform.OS === "web" ? ("fixed" as any) : "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 90000,
+    backgroundColor: "transparent",
+  },
+  codeLengthMenuFloating: {
+    position: "absolute",
+    top: 78,
+    alignSelf: "center",
+    minWidth: 172,
+    backgroundColor: "#fff",
+    borderWidth: 1,
+    borderColor: C_BORDER,
+    borderRadius: 16,
+    padding: 7,
+    zIndex: 90001,
+    elevation: 80,
+    shadowColor: "#000",
+    shadowOpacity: 0.22,
+    shadowOffset: { width: 0, height: 10 },
+    shadowRadius: 18,
+  },
+  codeLengthMenuItem: { paddingHorizontal: 10, paddingVertical: 9, borderRadius: 9 },
+  codeLengthMenuItemActive: { backgroundColor: "rgba(37,99,235,0.10)" },
+  codeLengthMenuText: { color: C_TEXT, fontSize: 13, fontWeight: "800" },
+  codeLengthMenuTextActive: { color: C_BLUE_SOFT },
+  tableToolBtn: { backgroundColor: "#EAF3F9", borderWidth: 1, borderColor: "#C9D5DF", borderRadius: 10, paddingHorizontal: 10, paddingVertical: 7 },
+  tableToolBtnText: { color: C_TEXT, fontWeight: "800", fontSize: 12 },
+  tableToggleBtn: { backgroundColor: "#fff", borderWidth: 1, borderColor: C_BORDER, borderRadius: 10, paddingHorizontal: 10, paddingVertical: 7 },
+  tableToggleBtnActive: { backgroundColor: C_BLUE_SOFT, borderColor: C_BLUE_SOFT },
+  tableToggleText: { color: C_TEXT, fontWeight: "800", fontSize: 12 },
+  tableToggleTextActive: { color: "#fff" },
+  tableViewSwitchRow: { flexDirection: "row", alignSelf: "center", backgroundColor: "#EAF3F9", borderWidth: 1, borderColor: "#C9D5DF", borderRadius: 12, padding: 3, gap: 3 },
+  tableViewSwitchBtn: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 9 },
+  tableViewSwitchBtnActive: { backgroundColor: C_BLUE_SOFT },
+  tableViewSwitchText: { color: C_TEXT, fontSize: 12, fontWeight: "900" },
+  tableViewSwitchTextActive: { color: "#fff" },
+  tableViewport: { alignSelf: "stretch", overflow: "hidden" },
+  tableViewportHorizontalContent: { alignItems: "flex-start", justifyContent: "flex-start", paddingHorizontal: 0 },
   tableFixedWrap: { backgroundColor: "#fff", borderWidth: 1, borderColor: C_BORDER, borderRadius: 18, alignItems: "center", justifyContent: "center" },
   tableEditorRowCompact: { flexDirection: "row" },
+  tableHeaderCorner: { backgroundColor: "#F8FAFC", borderWidth: 1, borderColor: "transparent", borderRadius: 10 },
+  tableHeaderCell: { backgroundColor: "#EAF3F9", borderWidth: 1, borderColor: "#C9D5DF", borderRadius: 10, alignItems: "center", justifyContent: "center" },
+  tableHeaderText: { color: "#1F5B86", fontSize: 12, fontWeight: "900", textAlign: "center" },
   tableCellPressable: { backgroundColor: "#fff", borderWidth: 1, borderColor: C_BORDER, borderRadius: 10, alignItems: "center", justifyContent: "center", paddingHorizontal: 2 },
-  tableCellPressableText: { color: C_TEXT, fontSize: 13, fontWeight: "700", textAlign: "center" },
+  tableCellPressableText: { color: C_TEXT, fontSize: 13, fontWeight: "800", textAlign: "center", fontFamily: READABLE_CODE_FONT, fontVariant: ["tabular-nums"] },
   tableCellPressablePlaceholder: { color: "rgba(15,23,42,0.35)", fontWeight: "600" },
   tableCellInputWeb: {
     backgroundColor: "#fff",
@@ -2265,11 +3339,35 @@ const styles = StyleSheet.create({
     textAlign: "center",
     color: C_TEXT,
     fontSize: 13,
-    fontWeight: "700",
+    fontWeight: "800",
+    fontFamily: READABLE_CODE_FONT,
     paddingHorizontal: 4,
     paddingVertical: 0,
     outlineStyle: "none" as any,
   },
+  tableListViewport: { alignSelf: "stretch", backgroundColor: "#fff", borderWidth: 1, borderColor: C_BORDER, borderRadius: 18, padding: 8 },
+  tableListContent: { gap: 7, paddingBottom: 6 },
+  tableListRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: "#F8FAFC",
+    borderWidth: 1,
+    borderColor: "#D8E2EA",
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  tableListCoord: { width: 42, color: "#1F5B86", fontSize: 13, fontWeight: "900" },
+  tableListValue: { flex: 1, color: C_TEXT, fontSize: 13, fontWeight: "900", fontFamily: READABLE_CODE_FONT, fontVariant: ["tabular-nums"] },
+  lengthModalRoot: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24 },
+  lengthModalBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(15,23,42,0.45)" },
+  lengthModalCard: { width: "100%", maxWidth: 320, backgroundColor: "#fff", borderRadius: 22, padding: 16, borderWidth: 1, borderColor: C_BORDER },
+  lengthModalTitle: { color: C_TEXT, fontSize: 18, fontWeight: "900", textAlign: "center", marginBottom: 12 },
+  lengthModalItem: { borderRadius: 14, paddingVertical: 13, paddingHorizontal: 14, alignItems: "center", marginBottom: 8, backgroundColor: "#F8FAFC", borderWidth: 1, borderColor: C_BORDER },
+  lengthModalItemActive: { backgroundColor: C_BLUE_SOFT, borderColor: C_BLUE_SOFT },
+  lengthModalItemText: { color: C_TEXT, fontSize: 16, fontWeight: "900" },
+  lengthModalItemTextActive: { color: "#fff" },
   floatingEditorBar: {
     position: "absolute",
     left: 10,
@@ -2289,7 +3387,7 @@ const styles = StyleSheet.create({
   floatingEditorTop: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8, gap: 8 },
   floatingEditorTitle: { color: C_TEXT, fontWeight: "900", fontSize: 15, flex: 1 },
   floatingEditorClose: { width: 30, height: 30, borderRadius: 10, backgroundColor: "rgba(0,0,0,0.06)", alignItems: "center", justifyContent: "center" },
-  floatingEditorInput: { backgroundColor: "#F8FAFC", borderWidth: 1, borderColor: C_BORDER, borderRadius: 12, color: C_TEXT, paddingHorizontal: 12, paddingVertical: 12, fontSize: 18, fontWeight: "700" },
+  floatingEditorInput: { backgroundColor: "#F8FAFC", borderWidth: 1, borderColor: C_BORDER, borderRadius: 12, color: C_TEXT, paddingHorizontal: 12, paddingVertical: 12, fontSize: 18, fontWeight: "700", fontFamily: READABLE_CODE_FONT },
   floatingEditorActions: { marginTop: 10, flexDirection: "row", gap: 8 },
   floatingEditorGhostBtn: { flex: 1, backgroundColor: "rgba(0,0,0,0.06)", borderRadius: 12, paddingVertical: 11, alignItems: "center", justifyContent: "center" },
   floatingEditorGhostTxt: { color: C_TEXT, fontWeight: "800" },

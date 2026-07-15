@@ -12,6 +12,7 @@ export type BaliseFormatCompat = {
 };
 
 const FORMAT_TYPES: BaliseFormatType[] = ["code", "poincon", "qrcode", "tableau"];
+const TABLE_SETTINGS_CELL_KEY = "__settings";
 const COMPACT_BALISE_SELECT =
   "id, user_id, code, format_types, poincon_rows, poincon_cols, poincon_cells, tableau_rows, tableau_cols, tableau_cells, qrcode_value";
 const LEGACY_FORMAT_SELECT = "id, balise_id, user_id, format_type, label, is_default, payload, created_at";
@@ -124,7 +125,10 @@ const hasPoinconCells = (cells: any) =>
   Array.isArray(cells) && cells.some((row) => Array.isArray(row) && row.some(Boolean));
 
 const hasTableauCells = (cells: any) =>
-  cells && typeof cells === "object" && !Array.isArray(cells) && Object.values(cells).some((value) => String(value ?? "").trim());
+  cells &&
+  typeof cells === "object" &&
+  !Array.isArray(cells) &&
+  Object.entries(cells).some(([key, value]) => key !== TABLE_SETTINGS_CELL_KEY && String(value ?? "").trim());
 
 const normalizePoinconPayload = (payload: Record<string, any> = {}) => {
   const rows = clampGridSize(payload.rows, 4);
@@ -168,6 +172,14 @@ const buildCompactBaliseFormatUpdate = (formats: BaliseFormatCompat[]) => {
   const poinconPayload = poincon ? normalizePoinconPayload(poincon.payload ?? {}) : null;
   const tableauPayload = tableau?.payload && typeof tableau.payload === "object" ? tableau.payload : {};
   const qrcodePayload = qrcode?.payload && typeof qrcode.payload === "object" ? qrcode.payload : {};
+  const tableauCells =
+    tableau && tableauPayload.cells && typeof tableauPayload.cells === "object" && !Array.isArray(tableauPayload.cells)
+      ? { ...tableauPayload.cells }
+      : {};
+
+  if (tableau && tableauPayload.settings && typeof tableauPayload.settings === "object") {
+    tableauCells[TABLE_SETTINGS_CELL_KEY] = tableauPayload.settings;
+  }
 
   return {
     format_types: Array.from(typeSet),
@@ -176,7 +188,7 @@ const buildCompactBaliseFormatUpdate = (formats: BaliseFormatCompat[]) => {
     poincon_cells: poinconPayload?.cells ?? null,
     tableau_rows: tableau ? clampGridSize(tableauPayload.rows, 4) : null,
     tableau_cols: tableau ? clampGridSize(tableauPayload.cols, 4) : null,
-    tableau_cells: tableau ? tableauPayload.cells && typeof tableauPayload.cells === "object" ? tableauPayload.cells : {} : null,
+    tableau_cells: tableau ? tableauCells : null,
     qrcode_value: qrcode ? String(qrcodePayload.value ?? qrcodePayload.url ?? qrcodePayload.text ?? "") : null,
   };
 };
@@ -278,6 +290,14 @@ const rowsFromBalisesCompactColumns = (balises: any[]): BaliseFormatCompat[] => 
               balise.tableau_cells && typeof balise.tableau_cells === "object" && !Array.isArray(balise.tableau_cells)
                 ? balise.tableau_cells
                 : {},
+            settings:
+              balise.tableau_cells &&
+              typeof balise.tableau_cells === "object" &&
+              !Array.isArray(balise.tableau_cells) &&
+              balise.tableau_cells[TABLE_SETTINGS_CELL_KEY] &&
+              typeof balise.tableau_cells[TABLE_SETTINGS_CELL_KEY] === "object"
+                ? balise.tableau_cells[TABLE_SETTINGS_CELL_KEY]
+                : undefined,
           },
           created_at: null,
         });
